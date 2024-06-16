@@ -1,16 +1,16 @@
 plugins {
   `java-library`
+  id("pmd.caffeine")
+  id("base.caffeine")
+  id("jacoco.caffeine")
+  id("publish.caffeine")
+  id("testing.caffeine")
+  id("spotbugs.caffeine")
+  id("checkstyle.caffeine")
+  id("errorprone.caffeine")
   id("biz.aQute.bnd.builder")
-  id("pmd-caffeine-conventions")
-  id("base-caffeine-conventions")
-  id("jacoco-caffeine-conventions")
-  id("publish-caffeine-conventions")
-  id("testing-caffeine-conventions")
-  id("spotbugs-caffeine-conventions")
-  id("checkstyle-caffeine-conventions")
-  id("errorprone-caffeine-conventions")
-  id("object-layout-caffeine-conventions")
-  id("forbidden-apis-caffeine-conventions")
+  id("object-layout.caffeine")
+  id("forbidden-apis.caffeine")
 }
 
 dependencies {
@@ -31,8 +31,8 @@ tasks.withType<JavaCompile>().configureEach {
     languageVersion = maxOf(javaVersion, JavaLanguageVersion.of(17))
   }
 
-  options.compilerArgs.add("-Xlint:all,-processing,-exports,-auxiliaryclass,"
-    + "-requires-automatic,-requires-transitive-automatic")
+  options.compilerArgs.add("-Xlint:all,-auxiliaryclass,-exports,-processing,"
+    + "-removal,-requires-automatic,-requires-transitive-automatic")
   options.compilerArgs.addAll(listOf("-Xmaxerrs", "500", "-Xmaxwarns", "500"))
   if (javaVersion.canCompileOrRun(21)) {
     options.compilerArgs.add("-proc:full")

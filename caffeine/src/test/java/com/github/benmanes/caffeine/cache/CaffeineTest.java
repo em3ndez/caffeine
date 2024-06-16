@@ -15,6 +15,7 @@
  */
 package com.github.benmanes.caffeine.cache;
 
+import static com.github.benmanes.caffeine.testing.LoggingEvents.logEvents;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static org.junit.Assert.assertThrows;
@@ -46,7 +47,6 @@ import com.github.benmanes.caffeine.cache.testing.CacheSpec.Listener;
 import com.github.benmanes.caffeine.cache.testing.CacheSpec.Maximum;
 import com.github.benmanes.caffeine.cache.testing.CacheSpec.Population;
 import com.github.valfirst.slf4jtest.TestLoggerFactory;
-import com.google.common.collect.Iterables;
 import com.google.common.testing.FakeTicker;
 import com.google.common.testing.NullPointerTester;
 
@@ -112,12 +112,12 @@ public final class CaffeineTest {
   public void fromSpec_lenientParsing() {
     var cache = Caffeine.from(CaffeineSpec.parse("maximumSize=100")).weigher((k, v) -> 0).build();
     assertThat(cache).isNotNull();
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage())
-        .isEqualTo("ignoring weigher specified without maximumWeight");
-    assertThat(event.getThrowable()).isEmpty();
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("ignoring weigher specified without maximumWeight")
+        .withoutThrowable()
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @Test
@@ -187,6 +187,7 @@ public final class CaffeineTest {
 
   @Test
   public void calculateHashMapCapacity() {
+    @SuppressWarnings("UnnecessaryMethodReference")
     Iterable<Integer> iterable = List.of(1, 2, 3)::iterator;
     assertThat(Caffeine.calculateHashMapCapacity(iterable)).isEqualTo(16);
     assertThat(Caffeine.calculateHashMapCapacity(List.of(1, 2, 3))).isEqualTo(4);
@@ -204,13 +205,13 @@ public final class CaffeineTest {
   @Test
   public void async_weakValues() {
     var builder = Caffeine.newBuilder().weakValues();
-    assertThrows(IllegalStateException.class, () -> builder.buildAsync(loader));
+    assertThrows(IllegalStateException.class, () -> builder.buildAsync());
   }
 
   @Test
   public void async_softValues() {
     var builder = Caffeine.newBuilder().softValues();
-    assertThrows(IllegalStateException.class, () -> builder.buildAsync(loader));
+    assertThrows(IllegalStateException.class, () -> builder.buildAsync());
   }
 
   @Test
@@ -232,6 +233,7 @@ public final class CaffeineTest {
 
   @Test
   public void asyncLoader() {
+    @SuppressWarnings("UnnecessaryMethodReference")
     AsyncCacheLoader<Object, Object> asyncLoader = loader::asyncLoad;
     var cache = Caffeine.newBuilder().buildAsync(asyncLoader);
     assertThat(cache).isNotNull();

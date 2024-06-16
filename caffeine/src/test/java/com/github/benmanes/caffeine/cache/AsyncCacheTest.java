@@ -24,6 +24,7 @@ import static com.github.benmanes.caffeine.testing.Awaits.await;
 import static com.github.benmanes.caffeine.testing.CollectionSubject.assertThat;
 import static com.github.benmanes.caffeine.testing.FutureSubject.assertThat;
 import static com.github.benmanes.caffeine.testing.IntSubject.assertThat;
+import static com.github.benmanes.caffeine.testing.LoggingEvents.logEvents;
 import static com.github.benmanes.caffeine.testing.MapSubject.assertThat;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -35,6 +36,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.slf4j.event.Level.WARN;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -66,7 +68,6 @@ import com.github.benmanes.caffeine.cache.testing.CheckMaxLogLevel;
 import com.github.benmanes.caffeine.cache.testing.CheckNoEvictions;
 import com.github.benmanes.caffeine.cache.testing.CheckNoStats;
 import com.github.benmanes.caffeine.testing.Int;
-import com.github.valfirst.slf4jtest.TestLoggerFactory;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
@@ -169,12 +170,12 @@ public final class AsyncCacheTest {
 
     assertThat(valueFuture).hasCompletedExceptionally();
     assertThat(cache).doesNotContainKey(context.absentKey());
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow())
-        .hasCauseThat().isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withUnderlyingCause(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @Test(dataProvider = "caches")
@@ -262,7 +263,16 @@ public final class AsyncCacheTest {
 
   @CacheSpec
   @Test(dataProvider = "caches")
-  public void getBiFunc_throwsException(AsyncCache<Int, Int> cache, CacheContext context) {
+  public void getBiFunc_throwsCheckedException(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThrows(IOException.class, () -> cache.get(context.absentKey(),
+        (key, executor) -> { throw uncheckedThrow(new IOException()); }));
+    assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
+    assertThat(cache).doesNotContainKey(context.absentKey());
+  }
+
+  @CacheSpec
+  @Test(dataProvider = "caches")
+  public void getBiFunc_throwsRuntimeException(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThrows(IllegalStateException.class, () ->
         cache.get(context.absentKey(), (key, executor) -> { throw new IllegalStateException(); }));
     assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
@@ -297,11 +307,12 @@ public final class AsyncCacheTest {
 
     assertThat(valueFuture).hasCompletedExceptionally();
     assertThat(cache).doesNotContainKey(key);
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @CacheSpec
@@ -316,11 +327,12 @@ public final class AsyncCacheTest {
 
     assertThat(valueFuture).hasCompletedExceptionally();
     assertThat(cache).doesNotContainKey(key);
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @CacheSpec
@@ -446,12 +458,12 @@ public final class AsyncCacheTest {
         .hasCauseThat().isInstanceOf(IllegalStateException.class);
     int misses = context.absentKeys().size();
     assertThat(context).stats().hits(0).misses(misses).success(0).failures(1);
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow())
-        .hasCauseThat().isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withUnderlyingCause(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @Test(dataProvider = "caches")
@@ -739,16 +751,32 @@ public final class AsyncCacheTest {
     assertThat(future).failsWith(CompletionException.class)
         .hasCauseThat().isInstanceOf(IllegalStateException.class);
     assertThat(context).stats().hits(0).misses(context.absentKeys().size()).success(0).failures(1);
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @CacheSpec
   @Test(dataProvider = "caches")
-  public void getAllBifunction_absent_throwsException(
+  public void getAllBifunction_absent_throwsCheckedException(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var error = assertThrows(CompletionException.class, () -> {
+      cache.getAll(context.absentKeys(),
+          (keys, executor) -> { throw uncheckedThrow(new IOException()); });
+    });
+    assertThat(error).hasCauseThat().isInstanceOf(IOException.class);
+
+    int misses = context.absentKeys().size();
+    assertThat(context).stats().hits(0).misses(misses).success(0).failures(1);
+    assertThat(cache).doesNotContainKey(context.absentKey());
+  }
+
+  @CacheSpec
+  @Test(dataProvider = "caches")
+  public void getAllBifunction_absent_throwsRuntimeException(
       AsyncCache<Int, Int> cache, CacheContext context) {
     assertThrows(IllegalStateException.class, () -> {
       cache.getAll(context.absentKeys(),
@@ -1010,7 +1038,7 @@ public final class AsyncCacheTest {
     } else {
       assertThat(result.join()).containsExactlyEntriesIn(context.absent());
     }
-    assertThat(TestLoggerFactory.getLoggingEvents()).isEmpty();
+    assertThat(logEvents()).isEmpty();
   }
 
   /* --------------- put --------------- */
@@ -1043,7 +1071,7 @@ public final class AsyncCacheTest {
     cache.put(context.absentKey(), failedFuture);
     assertThat(cache).hasSize(context.initialSize());
     assertThat(cache).doesNotContainKey(context.absentKey());
-    assertThat(TestLoggerFactory.getLoggingEvents()).isEmpty();
+    assertThat(logEvents()).isEmpty();
   }
 
   @Test(dataProvider = "caches")
@@ -1055,11 +1083,12 @@ public final class AsyncCacheTest {
     failedFuture.completeExceptionally(new IllegalStateException());
     assertThat(cache).doesNotContainKey(context.absentKey());
     assertThat(cache).hasSize(context.initialSize());
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @Test(dataProvider = "caches")
@@ -1081,7 +1110,7 @@ public final class AsyncCacheTest {
     cache.put(context.middleKey(), failedFuture);
     assertThat(cache).hasSize(context.initialSize() - 1);
     assertThat(cache).doesNotContainKey(context.absentKey());
-    assertThat(TestLoggerFactory.getLoggingEvents()).isEmpty();
+    assertThat(logEvents()).isEmpty();
   }
 
   @Test(dataProvider = "caches")
@@ -1093,7 +1122,7 @@ public final class AsyncCacheTest {
     failedFuture.completeExceptionally(new IllegalStateException());
     assertThat(cache).doesNotContainKey(context.absentKey());
     assertThat(cache).hasSize(context.initialSize() - 1);
-    assertThat(TestLoggerFactory.getLoggingEvents()).isEmpty();
+    assertThat(logEvents()).isEmpty();
   }
 
   @Test(dataProvider = "caches")
@@ -1145,6 +1174,11 @@ public final class AsyncCacheTest {
   @Test(dataProvider = "caches")
   public void serialize(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThat(cache).isReserialize();
+  }
+
+  @SuppressWarnings({"TypeParameterUnusedInFormals", "unchecked"})
+  static <E extends Throwable> E uncheckedThrow(Throwable throwable) throws E {
+    throw (E) throwable;
   }
 
   private static final class LoadAllException extends RuntimeException {

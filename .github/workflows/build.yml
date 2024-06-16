@@ -39,7 +39,7 @@ env:
     schemastore.org:443
     www.graalvm.org:443
   PUBLISH_JDK: 11
-  EA_JDK: 23
+  EA_JDK: 24
 
 jobs:
   compile:
@@ -48,18 +48,18 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        java: [ 11, 22, 23, GraalVM ]
+        java: [ 11, 22, 24, GraalVM ]
     env:
       JAVA_VERSION: ${{ matrix.java }}
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@a4aa98b93cab29d9b1101a6143fb8bce00e2eac4 # v2.7.1
+        uses: step-security/harden-runner@17d0e2bd7d51742c71671bd19fa12bdc9d40a3d6 # v2.8.1
         with:
           disable-sudo: true
           egress-policy: block
           allowed-endpoints: ${{ env.ALLOWED_ENDPOINTS }}
       - name: Checkout
-        uses: actions/checkout@0ad4b8fadaa221de15dcec353f45205ec38ea70b # v4.1.4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       - name: Prepare GraalVM
         if: env.JAVA_VERSION == 'GraalVM'
         shell: bash
@@ -72,7 +72,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           arguments: check -x test ${{ env.GRADLE_ARGS }}
       - name: Cancel if failed
-        uses: andymckay/cancel-action@271cfbfa11ca9222f7be99a47e8f929574549e0a # 0.4
+        uses: andymckay/cancel-action@a955d435292c0d409d104b57d8e78435a93a6ef1 # 0.5
         continue-on-error: true
         if: failure()
 
@@ -170,13 +170,13 @@ jobs:
       JAVA_VERSION: ${{ matrix.java }}
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@a4aa98b93cab29d9b1101a6143fb8bce00e2eac4 # v2.7.1
+        uses: step-security/harden-runner@17d0e2bd7d51742c71671bd19fa12bdc9d40a3d6 # v2.8.1
         with:
           disable-sudo: true
           egress-policy: block
           allowed-endpoints: ${{ env.ALLOWED_ENDPOINTS }}
       - name: Checkout
-        uses: actions/checkout@0ad4b8fadaa221de15dcec353f45205ec38ea70b # v4.1.4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       - name: Run tests (${{ env.JAVA_VERSION }})
         uses: ./.github/actions/run-gradle
         with:
@@ -202,7 +202,7 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}-results
           path: ${{ env.ARTIFACT_NAME }}.tar.gz
       - name: Cancel if failed
-        uses: andymckay/cancel-action@271cfbfa11ca9222f7be99a47e8f929574549e0a # 0.4
+        uses: andymckay/cancel-action@a955d435292c0d409d104b57d8e78435a93a6ef1 # 0.5
         continue-on-error: true
         if: failure()
 
@@ -213,7 +213,7 @@ jobs:
     if: (github.event_name == 'push') && (github.event.repository.fork == false)
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@a4aa98b93cab29d9b1101a6143fb8bce00e2eac4 # v2.7.1
+        uses: step-security/harden-runner@17d0e2bd7d51742c71671bd19fa12bdc9d40a3d6 # v2.8.1
         with:
           disable-sudo: true
           egress-policy: block
@@ -231,7 +231,7 @@ jobs:
             storage.googleapis.com:443
             uploader.codecov.io:443
       - name: Checkout
-        uses: actions/checkout@0ad4b8fadaa221de15dcec353f45205ec38ea70b # v4.1.4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
           fetch-depth: 0
       - name: Download Tests Results
@@ -252,7 +252,7 @@ jobs:
           java: ${{ env.PUBLISH_JDK }}
         continue-on-error: true
       - name: Publish to Codecov
-        uses: codecov/codecov-action@5ecb98a3c6b747ed38dc09f787459979aebb39be # v4.3.1
+        uses: codecov/codecov-action@e28ff129e5465c2c0dcc6f003fc735cb6ae0c673 # v4.5.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Publish to Codacy
@@ -279,7 +279,7 @@ jobs:
       checks: write
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@a4aa98b93cab29d9b1101a6143fb8bce00e2eac4 # v2.7.1
+        uses: step-security/harden-runner@17d0e2bd7d51742c71671bd19fa12bdc9d40a3d6 # v2.8.1
         with:
           disable-sudo: true
           egress-policy: block
@@ -331,7 +331,7 @@ jobs:
       && endsWith(github.ref, github.event.repository.default_branch)
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@a4aa98b93cab29d9b1101a6143fb8bce00e2eac4 # v2.7.1
+        uses: step-security/harden-runner@17d0e2bd7d51742c71671bd19fa12bdc9d40a3d6 # v2.8.1
         with:
           disable-sudo: true
           egress-policy: block
@@ -342,7 +342,7 @@ jobs:
             errorprone.info:443
             lightbend.github.io:443
             guava.dev:443
-      - uses: actions/checkout@0ad4b8fadaa221de15dcec353f45205ec38ea70b # v4.1.4
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       - name: Publish Snapshot
         uses: ./.github/actions/run-gradle
         env:

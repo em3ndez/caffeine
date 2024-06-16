@@ -25,9 +25,9 @@ import static com.github.benmanes.caffeine.cache.testing.CacheSpec.Expiration.AF
 import static com.github.benmanes.caffeine.cache.testing.CacheSpec.Expiration.VARIABLE;
 import static com.github.benmanes.caffeine.cache.testing.CacheSubject.assertThat;
 import static com.github.benmanes.caffeine.testing.FutureSubject.assertThat;
+import static com.github.benmanes.caffeine.testing.LoggingEvents.logEvents;
 import static com.github.benmanes.caffeine.testing.MapSubject.assertThat;
 import static com.google.common.base.Functions.identity;
-import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.truth.Truth.assertThat;
 import static java.util.Map.entry;
 import static org.junit.Assert.assertThrows;
@@ -72,9 +72,7 @@ import com.github.benmanes.caffeine.cache.testing.CacheValidationListener;
 import com.github.benmanes.caffeine.cache.testing.CheckMaxLogLevel;
 import com.github.benmanes.caffeine.cache.testing.CheckNoStats;
 import com.github.benmanes.caffeine.testing.Int;
-import com.github.valfirst.slf4jtest.TestLoggerFactory;
 import com.google.common.base.Splitter;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
 import com.google.common.util.concurrent.Futures;
@@ -125,11 +123,12 @@ public final class ExpirationTest {
     assertThat(cache).isEmpty();
 
     assertThat(context).evictionNotifications().hasSize(1);
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents().stream()
-        .filter(e -> e.getFormattedMessage().equals("Exception thrown by eviction listener"))
-        .collect(toImmutableList()));
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(RejectedExecutionException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown by eviction listener")
+        .withThrowable(RejectedExecutionException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @Test(dataProvider = "caches")
@@ -1558,7 +1557,7 @@ public final class ExpirationTest {
       expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE}, expiryTime = Expire.ONE_MINUTE)
   public void entrySet_iterator(Map<Int, Int> map, CacheContext context) {
     context.ticker().advance(Duration.ofMinutes(10));
-    assertThat(map.keySet().iterator().hasNext()).isFalse();
+    assertThat(map.entrySet().iterator().hasNext()).isFalse();
     assertThat(map).isExhaustivelyEmpty();
     assertThat(context).notifications().withCause(EXPIRED)
         .contains(context.original()).exclusively();
@@ -1631,10 +1630,10 @@ public final class ExpirationTest {
     map.putAll(context.absent());
 
     context.ticker().advance(Duration.ofSeconds(45));
-    assertThat(map.hashCode()).isEqualTo(context.absent().hashCode());
+    assertThat(map.entrySet().hashCode()).isEqualTo(context.absent().entrySet().hashCode());
 
     context.cleanUp();
-    assertThat(map.hashCode()).isEqualTo(context.absent().hashCode());
+    assertThat(map.entrySet().hashCode()).isEqualTo(context.absent().entrySet().hashCode());
   }
 
   @Test(dataProvider = "caches")

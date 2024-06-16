@@ -20,8 +20,8 @@ import static com.github.benmanes.caffeine.cache.RemovalCause.REPLACED;
 import static com.github.benmanes.caffeine.cache.testing.CacheContext.intern;
 import static com.github.benmanes.caffeine.cache.testing.CacheContextSubject.assertThat;
 import static com.github.benmanes.caffeine.cache.testing.CacheSubject.assertThat;
+import static com.github.benmanes.caffeine.testing.LoggingEvents.logEvents;
 import static com.github.benmanes.caffeine.testing.MapSubject.assertThat;
-import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
@@ -36,6 +36,7 @@ import static org.mockito.Mockito.when;
 import static org.slf4j.event.Level.ERROR;
 import static org.slf4j.event.Level.WARN;
 
+import java.io.IOException;
 import java.io.InvalidObjectException;
 import java.io.ObjectInputStream;
 import java.lang.reflect.InvocationTargetException;
@@ -86,7 +87,6 @@ import com.github.benmanes.caffeine.cache.testing.CheckMaxLogLevel;
 import com.github.benmanes.caffeine.cache.testing.CheckNoEvictions;
 import com.github.benmanes.caffeine.cache.testing.CheckNoStats;
 import com.github.benmanes.caffeine.testing.Int;
-import com.github.valfirst.slf4jtest.TestLoggerFactory;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSetMultimap;
@@ -175,7 +175,20 @@ public final class CacheTest {
 
   @CacheSpec
   @Test(dataProvider = "caches")
-  public void get_absent_throwsException(Cache<Int, Int> cache, CacheContext context) {
+  public void get_absent_throwsCheckedException(Cache<Int, Int> cache, CacheContext context) {
+    var error = assertThrows(Exception.class, () ->
+        cache.get(context.absentKey(), key -> { throw uncheckedThrow(new IOException()); }));
+    if (context.isSync() && context.isCaffeine()) {
+      assertThat(error).isInstanceOf(IOException.class);
+    } else {
+      assertThat(error).hasCauseThat().isInstanceOf(IOException.class);
+    }
+    assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
+  }
+
+  @CacheSpec
+  @Test(dataProvider = "caches")
+  public void get_absent_throwsRuntimeException(Cache<Int, Int> cache, CacheContext context) {
     assertThrows(IllegalStateException.class, () ->
         cache.get(context.absentKey(), key -> { throw new IllegalStateException(); }));
     assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
@@ -405,7 +418,22 @@ public final class CacheTest {
 
   @CacheSpec
   @Test(dataProvider = "caches")
-  public void getAll_absent_throwsException(Cache<Int, Int> cache, CacheContext context) {
+  public void getAll_absent_throwsCheckedException(Cache<Int, Int> cache, CacheContext context) {
+    var error = assertThrows(Exception.class, () ->
+        cache.getAll(context.absentKeys(), keys -> { throw uncheckedThrow(new IOException()); }));
+    if (context.isSync()) {
+      assertThat(error).isInstanceOf(IOException.class);
+    } else {
+      assertThat(error).hasCauseThat().isInstanceOf(IOException.class);
+    }
+
+    int misses = context.absentKeys().size();
+    assertThat(context).stats().hits(0).misses(misses).success(0).failures(1);
+  }
+
+  @CacheSpec
+  @Test(dataProvider = "caches")
+  public void getAll_absent_throwsRuntimeException(Cache<Int, Int> cache, CacheContext context) {
     assertThrows(IllegalStateException.class, () ->
         cache.getAll(context.absentKeys(), keys -> { throw new IllegalStateException(); }));
     int misses = context.absentKeys().size();
@@ -414,7 +442,7 @@ public final class CacheTest {
 
   @CacheSpec
   @Test(dataProvider = "caches")
-  public void getAll_function_throwsError(Cache<Int, Int> cache, CacheContext context) {
+  public void getAll_absent_throwsError(Cache<Int, Int> cache, CacheContext context) {
     assertThrows(UnknownError.class, () ->
         cache.getAll(context.absentKeys(), keys -> { throw new UnknownError(); }));
     int misses = context.absentKeys().size();
@@ -845,11 +873,12 @@ public final class CacheTest {
   @CacheSpec(population = Population.SINGLETON, removalListener = Listener.REJECTING)
   public void removalListener_error_log(Cache<Int, Int> cache, CacheContext context) {
     cache.invalidateAll();
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getLevel()).isEqualTo(WARN);
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown by removal listener");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(RejectedExecutionException.class);
+    assertThat(logEvents()
+        .withMessage("Exception thrown by removal listener")
+        .withThrowable(RejectedExecutionException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @CheckMaxLogLevel(ERROR)
@@ -859,13 +888,12 @@ public final class CacheTest {
       removalListener = Listener.CONSUMING)
   public void removalListener_submit_error_log(Cache<Int, Int> cache, CacheContext context) {
     cache.invalidateAll();
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents().stream()
-        .filter(e -> e.getLevel() == ERROR)
-        .collect(toImmutableList()));
-    assertThat(event.getFormattedMessage()).isEqualTo(
-        "Exception thrown when submitting removal listener");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(RejectedExecutionException.class);
+    assertThat(logEvents()
+        .withMessage("Exception thrown when submitting removal listener")
+        .withThrowable(RejectedExecutionException.class)
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
   }
 
   @CheckNoStats
@@ -1114,5 +1142,10 @@ public final class CacheTest {
       tester.addEqualityGroup(group.toArray());
     }
     tester.testEquals();
+  }
+
+  @SuppressWarnings({"TypeParameterUnusedInFormals", "unchecked"})
+  static <E extends Throwable> E uncheckedThrow(Throwable throwable) throws E {
+    throw (E) throwable;
   }
 }
