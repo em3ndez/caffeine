@@ -17,22 +17,16 @@ package com.github.benmanes.caffeine.jcache.event;
 
 import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-
-import java.util.Arrays;
-import java.util.Iterator;
 
 import javax.cache.Cache;
 import javax.cache.configuration.MutableCacheEntryListenerConfiguration;
 import javax.cache.event.CacheEntryExpiredListener;
 import javax.cache.event.CacheEntryRemovedListener;
 
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.mockito.Mockito;
 
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.jcache.Expirable;
@@ -41,49 +35,30 @@ import com.github.benmanes.caffeine.jcache.management.JCacheStatisticsMXBean;
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class JCacheEvictionListenerTest {
-  JCacheEvictionListener<Integer, Integer> listener;
-  JCacheStatisticsMXBean statistics;
+final class JCacheEvictionListenerTest {
 
-  @Mock EvictionListener entryListener;
-  @Mock Cache<Integer, Integer> cache;
-
-  @BeforeMethod
-  public void before() throws Exception {
-    MockitoAnnotations.openMocks(this).close();
-    statistics = new JCacheStatisticsMXBean();
+  @ParameterizedTest
+  @EnumSource(names = {"COLLECTED", "EXPIRED", "SIZE"})
+  void publishIfEvicted(RemovalCause cause) {
+    var statistics = new JCacheStatisticsMXBean();
+    EvictionListener entryListener = Mockito.mock();
     var dispatcher = new EventDispatcher<Integer, Integer>(Runnable::run);
-    listener = new JCacheEvictionListener<>(dispatcher, statistics);
-    listener.setCache(cache);
+    var listener = new JCacheEvictionListener<>(dispatcher, statistics);
+    dispatcher.register(new MutableCacheEntryListenerConfiguration<>(
+        /* listenerFactory= */ () -> entryListener, /* filterFactory= */ null,
+        /* isOldValueRequired= */ false, /* isSynchronous= */ false));
+    try (Cache<Integer, Integer> cache = Mockito.mock()) {
+      listener.setCache(cache);
+    }
     statistics.enable(true);
 
-    dispatcher.register(new MutableCacheEntryListenerConfiguration<>(
-        () -> entryListener, null, false, false));
-  }
-
-  @DataProvider
-  public Iterator<Object[]> notifications() {
-    return Arrays.stream(RemovalCause.values())
-        .filter(RemovalCause::wasEvicted)
-        .map(cause -> new Object[] { 1, new Expirable<>(2, 3), cause })
-        .iterator();
-  }
-
-  @Test(dataProvider = "notifications")
-  public void publishIfEvicted(Integer key, Expirable<Integer> value, RemovalCause cause) {
-    listener.onRemoval(key, value, cause);
-
-    if (cause.wasEvicted()) {
-      if (cause == RemovalCause.EXPIRED) {
-        verify(entryListener).onExpired(any());
-      } else {
-        verify(entryListener).onRemoved(any());
-      }
-      assertThat(statistics.getCacheEvictions()).isEqualTo(1L);
+    listener.onRemoval(1, new Expirable<>(2, 3), cause);
+    if (cause == RemovalCause.EXPIRED) {
+      verify(entryListener).onExpired(any());
     } else {
-      verify(entryListener, never()).onRemoved(any());
-      assertThat(statistics.getCacheEvictions()).isEqualTo(0L);
+      verify(entryListener).onRemoved(any());
     }
+    assertThat(statistics.getCacheEvictions()).isEqualTo(1L);
   }
 
   interface EvictionListener extends CacheEntryRemovedListener<Integer, Integer>,

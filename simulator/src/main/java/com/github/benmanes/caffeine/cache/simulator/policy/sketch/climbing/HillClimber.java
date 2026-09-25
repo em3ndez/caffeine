@@ -16,7 +16,6 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.sketch.climbing;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * A hill climbing algorithm to tune the admission window size.
@@ -58,20 +57,11 @@ public interface HillClimber {
   }
 
   /** The adaptation type and its magnitude. */
-  final class Adaptation {
-    public enum Type {
-      HOLD, INCREASE_WINDOW, DECREASE_WINDOW
-    }
-
+  record Adaptation(double amount, Type type) {
     private static final Adaptation HOLD = new Adaptation(0, Type.HOLD);
 
-    public final double amount;
-    public final Type type;
-
-    private Adaptation(double amount, Type type) {
+    public Adaptation {
       checkArgument(amount >= 0, "Step size %s must be positive", amount);
-      this.type = checkNotNull(type);
-      this.amount = amount;
     }
 
     /** Returns the adaption based on the amount, where a negative value decreases the window. */
@@ -83,9 +73,6 @@ public interface HillClimber {
       } else {
         return increaseWindow(amount);
       }
-    }
-    public static int roundToInt(double amount) {
-      return (amount < 0) ? (int) Math.floor(amount) : (int) Math.ceil(amount);
     }
 
     public static Adaptation hold() {
@@ -100,12 +87,15 @@ public interface HillClimber {
 
     @Override
     public String toString() {
-      switch (type) {
-        case HOLD: return "0";
-        case INCREASE_WINDOW: return "+" + amount;
-        case DECREASE_WINDOW: return "-" + amount;
-        default: throw new IllegalStateException();
-      }
+      return switch (type) {
+        case HOLD -> "0";
+        case INCREASE_WINDOW -> "+" + amount;
+        case DECREASE_WINDOW -> "-" + amount;
+      };
+    }
+
+    public enum Type {
+      HOLD, INCREASE_WINDOW, DECREASE_WINDOW
     }
   }
 }

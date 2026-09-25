@@ -15,13 +15,15 @@
  */
 package com.github.benmanes.caffeine.cache;
 
+import static java.util.Objects.requireNonNull;
+
 import java.util.Comparator;
 import java.util.ConcurrentModificationException;
 import java.util.Deque;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 /**
  * A linked list extension of the {@link Deque} interface where the link pointers are tightly
@@ -29,7 +31,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * to support usage. They are not thread-safe; in the absence of external synchronization, they do
  * not support concurrent access by multiple threads. Null elements are prohibited.
  * <p>
- * Most <tt>LinkedDeque</tt> operations run in constant time by assuming that the element parameter
+ * Most {@code LinkedDeque} operations run in constant time by assuming that the element parameter
  * is associated with the deque instance. Any usage that violates this assumption will result in
  * non-deterministic behavior.
  * <p>
@@ -55,14 +57,14 @@ interface LinkedDeque<E> extends Deque<E> {
    *
    * @param e the linked element
    */
-  boolean isFirst(E e);
+  boolean isFirst(@Nullable E e);
 
   /**
    * Returns if the element is at the back of the deque.
    *
    * @param e the linked element
    */
-  boolean isLast(E e);
+  boolean isLast(@Nullable E e);
 
   /**
    * Moves the element to the front of the deque so that it becomes the first element.
@@ -79,21 +81,21 @@ interface LinkedDeque<E> extends Deque<E> {
   void moveToBack(E e);
 
   /**
-   * Retrieves the previous element or <tt>null</tt> if either the element is unlinked or the first
+   * Retrieves the previous element or {@code null} if either the element is unlinked or the first
    * element on the deque.
    */
   @Nullable E getPrevious(E e);
 
-  /** Sets the previous element or <tt>null</tt> if there is no link. */
+  /** Sets the previous element or {@code null} if there is no link. */
   void setPrevious(E e, @Nullable E prev);
 
   /**
-   * Retrieves the next element or <tt>null</tt> if either the element is unlinked or the last
+   * Retrieves the next element or {@code null} if either the element is unlinked or the last
    * element on the deque.
    */
   @Nullable E getNext(E e);
 
-  /** Sets the next element or <tt>null</tt> if there is no link. */
+  /** Sets the next element or {@code null} if there is no link. */
   void setNext(E e, @Nullable E next);
 
   @Override
@@ -140,8 +142,8 @@ interface LinkedDeque<E> extends Deque<E> {
           } else if (!second.hasNext()) {
             return first.next();
           }
-          E o1 = first.peek();
-          E o2 = second.peek();
+          E o1 = requireNonNull(first.peek());
+          E o2 = requireNonNull(second.peek());
           boolean greaterOrEqual = (comparator.compare(o1, o2) >= 0);
           return greaterOrEqual ? first.next() : second.next();
         }
@@ -151,10 +153,10 @@ interface LinkedDeque<E> extends Deque<E> {
           } else if (!second.hasNext()) {
             return first.peek();
           }
-          E o1 = first.peek();
-          E o2 = second.peek();
+          E o1 = requireNonNull(first.peek());
+          E o2 = requireNonNull(second.peek());
           boolean greaterOrEqual = (comparator.compare(o1, o2) >= 0);
-          return greaterOrEqual ? first.peek() : second.peek();
+          return greaterOrEqual ? o1 : o2;
         }
       };
     }

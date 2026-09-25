@@ -16,14 +16,17 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.linked;
 
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
 import java.util.Arrays;
 import java.util.Set;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.admission.Admission;
-import com.github.benmanes.caffeine.cache.simulator.admission.Admittor;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admitter;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
@@ -41,7 +44,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
  * total cache size and items are evicted from the tail of a queue to the head of the next lower
  * queue to maintain the size invariants. Items evicted from queue 0 are evicted from the cache."
  * <p>
- * For more details, see <a href="http://www.cs.cornell.edu/~qhuang/papers/sosp_fbanalysis.pdf">An
+ * For more details, see <a href="https://www.cs.cornell.edu/~qhuang/papers/sosp_fbanalysis.pdf">An
  * Analysis of Facebook Photo Caching</a>.
  *
  * @author ben.manes@gmail.com (Ben Manes)
@@ -50,17 +53,17 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 public final class S4LruPolicy implements KeyOnlyPolicy {
   private final Long2ObjectMap<Node> data;
   private final PolicyStats policyStats;
-  private final Admittor admittor;
+  private final Admitter admitter;
   private final int maximumSize;
   private final Node[] headQ;
   private final int[] sizeQ;
   private final int levels;
 
   public S4LruPolicy(Admission admission, Config config) {
-    S4LruSettings settings = new S4LruSettings(config);
+    var settings = new S4LruSettings(config);
     this.policyStats = new PolicyStats(admission.format(name()));
     this.maximumSize = Math.toIntExact(settings.maximumSize());
-    this.admittor = admission.from(config, policyStats);
+    this.admitter = admission.from(config, policyStats);
     this.data = new Long2ObjectOpenHashMap<>();
     this.levels = settings.levels();
     this.headQ = new Node[levels];
@@ -71,7 +74,7 @@ public final class S4LruPolicy implements KeyOnlyPolicy {
 
   /** Returns all variations of this policy based on the configuration parameters. */
   public static Set<Policy> policies(Config config) {
-    BasicSettings settings = new BasicSettings(config);
+    var settings = new BasicSettings(config);
     return settings.admission().stream().map(admission ->
       new S4LruPolicy(admission, config)
     ).collect(toUnmodifiableSet());
@@ -79,9 +82,9 @@ public final class S4LruPolicy implements KeyOnlyPolicy {
 
   @Override
   public void record(long key) {
+    var node = data.get(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
-    admittor.record(key);
+    admitter.record(key);
     if (node == null) {
       onMiss(key);
       policyStats.recordMiss();
@@ -106,7 +109,7 @@ public final class S4LruPolicy implements KeyOnlyPolicy {
   }
 
   private void onMiss(long key) {
-    Node node = new Node(key);
+    var node = new Node(key);
     data.put(key, node);
     node.appendToTail(headQ[0]);
     sizeQ[0]++;
@@ -119,7 +122,7 @@ public final class S4LruPolicy implements KeyOnlyPolicy {
     int maxPerLevel = maximumSize / levels;
     for (int i = levels - 1; i > 0; i--) {
       if (sizeQ[i] > maxPerLevel) {
-        Node demote = headQ[i].next;
+        Node demote = requireNonNull(headQ[i].next);
         demote.remove();
         sizeQ[i]--;
 
@@ -134,8 +137,8 @@ public final class S4LruPolicy implements KeyOnlyPolicy {
     if (data.size() > maximumSize) {
       policyStats.recordEviction();
 
-      Node victim = headQ[0].next;
-      boolean admit = admittor.admit(candidate.key, victim.key);
+      Node victim = requireNonNull(headQ[0].next);
+      boolean admit = admitter.admit(candidate.key, victim.key);
       if (admit) {
         evictEntry(victim);
         sizeQ[0]--;
@@ -168,16 +171,18 @@ public final class S4LruPolicy implements KeyOnlyPolicy {
   static final class Node {
     final long key;
 
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
+
     int level;
 
     Node(long key) {
       this.key = key;
+      prev = next = this;
     }
 
     static Node sentinel(int level) {
-      Node node = new Node(Long.MIN_VALUE);
+      var node = new Node(Long.MIN_VALUE);
       node.level = level;
       node.prev = node;
       node.next = node;
@@ -186,7 +191,7 @@ public final class S4LruPolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void appendToTail(Node head) {
-      Node tail = head.prev;
+      Node tail = requireNonNull(head.prev);
       head.prev = this;
       tail.next = this;
       next = head;
@@ -195,6 +200,9 @@ public final class S4LruPolicy implements KeyOnlyPolicy {
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       prev.next = next;
       next.prev = prev;
       prev = next = null;

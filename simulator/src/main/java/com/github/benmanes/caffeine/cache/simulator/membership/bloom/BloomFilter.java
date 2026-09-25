@@ -19,11 +19,9 @@ import static com.google.common.base.Preconditions.checkArgument;
 
 import java.util.Arrays;
 
-import org.checkerframework.checker.index.qual.NonNegative;
-
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
-import com.github.benmanes.caffeine.cache.simulator.BasicSettings.MembershipSettings;
 import com.github.benmanes.caffeine.cache.simulator.membership.Membership;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 /**
@@ -35,6 +33,7 @@ import com.typesafe.config.Config;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@SuppressWarnings("NotNullFieldNotInitialized")
 public final class BloomFilter implements Membership {
   static final long[] SEED = { // A mixture of seeds from FNV-1a, CityHash, and Murmur3
       0xc3a5c85c97cb3127L, 0xb492b66fbe98f273L, 0x9ae16a3b2f90404fL, 0xcbf29ce484222325L};
@@ -48,6 +47,7 @@ public final class BloomFilter implements Membership {
    * Creates a lazily initialized membership sketch, requiring {@link #ensureCapacity} be called
    * when the expected number of insertions and the false positive probability have been determined.
    */
+  @SuppressWarnings("NullAway.Init")
   public BloomFilter() {}
 
   /**
@@ -55,27 +55,33 @@ public final class BloomFilter implements Membership {
    * probability.
    */
   public BloomFilter(Config config) {
-    MembershipSettings settings = new BasicSettings(config).membership();
+    var settings = new BasicSettings(config).membership();
     ensureCapacity(settings.expectedInsertions(), settings.fpp());
   }
 
   /**
-   * Initializes and increases the capacity of this <tt>BloomFilter</tt> instance, if necessary,
+   * Initializes and increases the capacity of this {@code BloomFilter} instance, if necessary,
    * to ensure that it can accurately estimate the membership of elements given the expected
    * number of insertions. This operation forgets all previous memberships when resizing.
    *
    * @param expectedInsertions the number of expected insertions
    * @param fpp the false positive probability, where {@literal 0.0 > fpp < 1.0}
    */
-  public void ensureCapacity(@NonNegative long expectedInsertions, @NonNegative double fpp) {
+  @SuppressWarnings("Varifier")
+  public void ensureCapacity(long expectedInsertions, double fpp) {
     checkArgument(expectedInsertions >= 0);
     checkArgument(fpp > 0 && fpp < 1);
 
-    double optimalBitsFactor = -Math.log(fpp) / (Math.log(2) * Math.log(2));
-    int optimalNumberOfBits = (int) (expectedInsertions * optimalBitsFactor);
-    int optimalSize = Math.max(2, optimalNumberOfBits >>> BITS_PER_LONG_SHIFT);
-    if ((table == null) || (table.length < optimalSize)) {
-      int powerOfTwoShift = Integer.SIZE - Integer.numberOfLeadingZeros(optimalSize - 1);
+    // Sized with the standard bits-per-element formula (which assumes the optimal hash count) but
+    // probed with a fixed 4 hashes to allow future reuse if combined with the frequency sketch. The
+    // fpp is approximate as the realized rate runs at or above it for the small values used. That
+    // lean bias is intentional as this used with the doorkeeper in order to trade accuracy for a
+    // smaller footprint.
+    double bitsFactor = -Math.log(fpp) / (Math.log(2) * Math.log(2));
+    int numberOfBits = Math.toIntExact((long) (expectedInsertions * bitsFactor));
+    int tableSize = Math.max(2, numberOfBits >>> BITS_PER_LONG_SHIFT);
+    if ((table == null) || (table.length < tableSize)) {
+      int powerOfTwoShift = Integer.SIZE - Integer.numberOfLeadingZeros(tableSize - 1);
       tableShift = Integer.SIZE - powerOfTwoShift;
       table = new long[1 << powerOfTwoShift];
     }
@@ -126,7 +132,7 @@ public final class BloomFilter implements Membership {
    * Applies a supplemental hash function to a given hashCode, which defends against poor quality
    * hash functions.
    */
-  int spread(int x) {
+  int spread(@Var int x) {
     x = ((x >>> 16) ^ x) * 0x45d9f3b;
     x = ((x >>> 16) ^ x) * 0x45d9f3b;
     return (x >>> 16) ^ x;
@@ -140,7 +146,7 @@ public final class BloomFilter implements Membership {
    * @return the table index
    */
   static int seeded(int item, int i) {
-    long hash = (item + SEED[i]) * SEED[i];
+    @Var long hash = (item + SEED[i]) * SEED[i];
     hash += hash >>> 32;
     return (int) hash;
   }

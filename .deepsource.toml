@@ -1,5 +1,12 @@
 version = 1
 
+exclude_patterns = [
+  "**/generated/**",
+  "**/*Test*/**",
+  "**/test*/**",
+  "**/jmh/**",
+]
+
 [[analyzers]]
 name = "java"
 enabled = true
@@ -13,4 +20,8 @@ enabled = true
 
 [[analyzers]]
 name = "shell"
+enabled = true
+
+[[analyzers]]
+name = "test-coverage"
 enabled = true

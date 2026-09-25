@@ -15,14 +15,18 @@
  */
 package com.github.benmanes.caffeine.cache;
 
+import static com.github.benmanes.caffeine.cache.Buffer.FAILED;
+import static com.github.benmanes.caffeine.cache.Buffer.FULL;
+import static com.github.benmanes.caffeine.cache.Buffer.SUCCESS;
+import static com.github.benmanes.caffeine.testing.Nullness.nullRef;
 import static com.google.common.truth.Truth.assertThat;
 
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
 
@@ -32,28 +36,50 @@ import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @SuppressWarnings("ClassEscapesDefinedScope")
-public final class BoundedBufferTest {
+final class BoundedBufferTest {
 
-  @DataProvider
-  public Object[][] buffer() {
-    return new Object[][] {{ new BoundedBuffer<Boolean>() }};
-  }
-
-  @Test(dataProvider = "buffer")
-  public void offer(BoundedBuffer<Boolean> buffer) {
+  @Test
+  void offer() {
+    var buffer = new BoundedBuffer<Boolean>();
+    var invalid = new AtomicReference<Integer>();
     ConcurrentTestHarness.timeTasks(10, () -> {
       for (int i = 0; i < 100; i++) {
-        assertThat(buffer.offer(Boolean.TRUE)).isAnyOf(Buffer.SUCCESS, Buffer.FULL, Buffer.FAILED);
+        int added = buffer.offer(true);
+        if ((added != SUCCESS) && (added != FULL) && (added != FAILED)) {
+          invalid.set(added);
+        }
       }
     });
+    assertThat(invalid.get()).isNull();
     assertThat(buffer.writes()).isGreaterThan(0);
     assertThat(buffer.writes()).isEqualTo(buffer.size());
   }
 
-  @Test(dataProvider = "buffer")
-  public void drain(BoundedBuffer<Boolean> buffer) {
+  @Test
+  void offer_fillReportsFull() {
+    var buffer = new BoundedBuffer<Boolean>();
+    for (int i = 0; i < (BoundedBuffer.BUFFER_SIZE - 1); i++) {
+      assertThat(buffer.offer(true)).isEqualTo(SUCCESS);
+    }
+
+    // the insertion that fills the last free slot is recorded and signals a drain
+    assertThat(buffer.offer(true)).isEqualTo(FULL);
+    assertThat(buffer.writes()).isEqualTo(BoundedBuffer.BUFFER_SIZE);
+
+    // an insertion into a full buffer is rejected
+    assertThat(buffer.offer(true)).isEqualTo(FULL);
+    assertThat(buffer.writes()).isEqualTo(BoundedBuffer.BUFFER_SIZE);
+
+    long[] read = new long[1];
+    buffer.drainTo(e -> read[0]++);
+    assertThat(read[0]).isEqualTo(BoundedBuffer.BUFFER_SIZE);
+  }
+
+  @Test
+  void drain() {
+    var buffer = new BoundedBuffer<Boolean>();
     for (int i = 0; i < BoundedBuffer.BUFFER_SIZE; i++) {
-      assertThat(buffer.offer(Boolean.TRUE)).isAnyOf(Buffer.SUCCESS, Buffer.FULL);
+      assertThat(buffer.offer(true)).isAnyOf(SUCCESS, FULL);
     }
     long[] read = new long[1];
     buffer.drainTo(e -> read[0]++);
@@ -61,14 +87,15 @@ public final class BoundedBufferTest {
     assertThat(read[0]).isEqualTo(buffer.writes());
   }
 
-  @Test(dataProvider = "buffer")
+  @Test
   @SuppressWarnings("ThreadPriorityCheck")
-  public void offerAndDrain(BoundedBuffer<Boolean> buffer) {
+  void offerAndDrain() {
+    var buffer = new BoundedBuffer<Boolean>();
     var lock = new ReentrantLock();
     var reads = new AtomicInteger();
     ConcurrentTestHarness.timeTasks(10, () -> {
       for (int i = 0; i < 1000; i++) {
-        boolean shouldDrain = (buffer.offer(Boolean.TRUE) == Buffer.FULL);
+        boolean shouldDrain = (buffer.offer(true) == FULL);
         if (shouldDrain && lock.tryLock()) {
           buffer.drainTo(e -> reads.incrementAndGet());
           lock.unlock();
@@ -82,20 +109,29 @@ public final class BoundedBufferTest {
   }
 
   @Test
-  public void overflow() {
-    var buffer = new BoundedBuffer.RingBuffer<Boolean>(null);
+  void overflow() {
+    Boolean first = nullRef();
+    var buffer = new BoundedBuffer.RingBuffer<>(first);
     buffer.writeCounter = Long.MAX_VALUE;
     buffer.readCounter = Long.MAX_VALUE;
 
-    assertThat(buffer.offer(Boolean.TRUE)).isEqualTo(Buffer.SUCCESS);
+    assertThat(buffer.offer(true)).isEqualTo(SUCCESS);
     var data = new ArrayList<>();
     buffer.drainTo(data::add);
 
     for (var e : buffer.buffer) {
       assertThat(e).isNull();
     }
-    assertThat(data).containsExactly(Boolean.TRUE);
+    assertThat(data).containsExactly(true);
     assertThat(buffer.readCounter).isEqualTo(Long.MIN_VALUE);
     assertThat(buffer.writeCounter).isEqualTo(Long.MIN_VALUE);
+  }
+
+  @Test
+  @SuppressWarnings("PMD.AvoidAccessibilityAlteration")
+  void reflectivelyConstruct() throws ReflectiveOperationException {
+    var constructor = BBHeader.class.getDeclaredConstructor();
+    constructor.setAccessible(true);
+    constructor.newInstance();
   }
 }

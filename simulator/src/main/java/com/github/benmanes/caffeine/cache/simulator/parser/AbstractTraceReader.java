@@ -18,28 +18,34 @@ package com.github.benmanes.caffeine.cache.simulator.parser;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import java.io.BufferedInputStream;
+import java.io.EOFException;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.SequenceInputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.List;
-import java.util.function.UnaryOperator;
+import java.util.function.Function;
 
 import org.apache.commons.compress.archivers.ArchiveException;
 import org.apache.commons.compress.archivers.ArchiveStreamFactory;
+import org.apache.commons.compress.archivers.StreamingNotSupportedException;
 import org.apache.commons.compress.compressors.CompressorException;
 import org.apache.commons.compress.compressors.CompressorStreamFactory;
-import org.apache.commons.io.input.CloseShieldInputStream;
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
+import org.tukaani.xz.XZFormatException;
 import org.tukaani.xz.XZInputStream;
 
+import com.facebook.infer.annotation.SuppressLint;
 import com.google.common.base.Throwables;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Iterators;
+import com.google.errorprone.annotations.Var;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * A skeletal implementation that reads the trace files into a data stream.
@@ -66,78 +72,100 @@ public abstract class AbstractTraceReader implements TraceReader {
 
   @SuppressWarnings("PMD.CloseResource")
   protected BufferedInputStream readInput(InputStream input) {
-    BufferedInputStream buffered = null;
+    @Var BufferedInputStream bufferedStream = null;
     try {
-      buffered = new BufferedInputStream(input, BUFFER_SIZE);
-      List<UnaryOperator<InputStream>> extractors = List.of(
-          this::tryXZ, this::tryCompressed, this::tryArchived);
+      bufferedStream = new BufferedInputStream(input, BUFFER_SIZE);
+      var extractors = List.<Function<InputStream, @Nullable InputStream>>of(
+          AbstractTraceReader::tryXz, AbstractTraceReader::tryCompressed, this::tryArchived);
       for (var extractor : extractors) {
-        buffered.mark(100);
-        InputStream next = extractor.apply(buffered);
+        bufferedStream.mark(100);
+        InputStream next = extractor.apply(bufferedStream);
         if (next == null) {
-          buffered.reset();
-        } else if (next instanceof BufferedInputStream) {
-          buffered = (BufferedInputStream) next;
+          bufferedStream.reset();
+        } else if (next instanceof BufferedInputStream buffered) {
+          bufferedStream = buffered;
         } else {
-          buffered = new BufferedInputStream(next, BUFFER_SIZE);
+          bufferedStream = new BufferedInputStream(next, BUFFER_SIZE);
         }
       }
-      return buffered;
+      return bufferedStream;
     } catch (Throwable t) {
       try {
-        if (buffered != null) {
-          buffered.close();
+        if (bufferedStream != null) {
+          bufferedStream.close();
         }
       } catch (IOException e) {
         t.addSuppressed(e);
       }
       Throwables.throwIfUnchecked(t);
-      throw new RuntimeException(t);
+      throw new IllegalStateException(t);
     }
   }
 
-  /** Returns a uncompressed stream if XZ encoded, else {@code null}. */
-  private @Nullable InputStream tryXZ(InputStream input) {
+  /** Returns an uncompressed stream if XZ encoded, else {@code null}. */
+  private static @Nullable InputStream tryXz(InputStream input) {
     try {
       return new XZInputStream(input);
+    } catch (XZFormatException | EOFException _) {
+      return null;
     } catch (IOException e) {
-      return null;
+      throw new UncheckedIOException(e);
     }
   }
 
-  /** Returns a uncompressed stream, else {@code null}. */
-  private @Nullable InputStream tryCompressed(InputStream input) {
+  /** Returns an uncompressed stream, else {@code null}. */
+  private static @Nullable InputStream tryCompressed(InputStream input) {
+    String format;
     try {
-      return new CompressorStreamFactory().createCompressorInputStream(input);
+      format = CompressorStreamFactory.detect(input);
     } catch (CompressorException e) {
-      return null;
+      if (e.getCause() == null) {
+        return null;
+      }
+      throw new UncheckedIOException(e);
+    }
+    try {
+      return new CompressorStreamFactory().createCompressorInputStream(format, input);
+    } catch (CompressorException e) {
+      if (e.getCause() instanceof EOFException) {
+        return null;
+      }
+      throw new UncheckedIOException("Could not decode the " + format + " stream", e);
     }
   }
 
-  /** Returns a unarchived stream, else {@code null}. */
+  /** Returns an unarchived stream, else {@code null}. */
   private @Nullable InputStream tryArchived(InputStream input) {
     try {
       var archive = new ArchiveStreamFactory().createArchiveInputStream(input);
       var entries = new AbstractIterator<InputStream>() {
-        @Override protected InputStream computeNext() {
+        @SuppressLint("PULSE_RESOURCE_LEAK")
+        @Override protected @Nullable InputStream computeNext() {
           try {
             return (archive.getNextEntry() == null)
                 ? endOfData()
-                : readInput(CloseShieldInputStream.wrap(archive));
+                : readInput(new FilterInputStream(archive) {
+                    @Override public void close() {
+                      in = InputStream.nullInputStream();
+                    }
+                  });
           } catch (IOException e) {
             throw new UncheckedIOException(e);
           }
         }
       };
       return new MultiInputStream(archive, entries);
-    } catch (ArchiveException e) {
+    } catch (StreamingNotSupportedException e) {
+      throw new IllegalStateException(e);
+    } catch (ArchiveException _) {
       return null;
     }
   }
 
   /** Returns the input stream for the raw file. */
+  @SuppressFBWarnings("UI_INHERITANCE_UNSAFE_GETRESOURCE")
   private InputStream openFile() throws IOException {
-    var file = Paths.get(filePath);
+    var file = Path.of(filePath);
     if (Files.exists(file)) {
       return Files.newInputStream(file);
     }
@@ -149,7 +177,7 @@ public abstract class AbstractTraceReader implements TraceReader {
   private static final class MultiInputStream extends FilterInputStream {
     private final InputStream parent;
 
-    public MultiInputStream(InputStream parent, Iterator<InputStream> children) {
+    MultiInputStream(InputStream parent, Iterator<InputStream> children) {
       super(new SequenceInputStream(Iterators.asEnumeration(children)));
       this.parent = parent;
     }

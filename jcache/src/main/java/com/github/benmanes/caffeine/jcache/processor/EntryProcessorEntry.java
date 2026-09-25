@@ -20,10 +20,11 @@ import static java.util.Objects.requireNonNull;
 import java.util.Optional;
 
 import javax.cache.integration.CacheLoader;
+import javax.cache.integration.CacheLoaderException;
 import javax.cache.processor.EntryProcessor;
 import javax.cache.processor.MutableEntry;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 /**
  * An entry that is consumed by an {@link EntryProcessor}. The updates to the entry are replayed
@@ -31,6 +32,7 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@SuppressWarnings("OptionalUsedAsFieldOrParameterType")
 public final class EntryProcessorEntry<K, V> implements MutableEntry<K, V> {
   private final boolean hasEntry;
   private final K key;
@@ -49,7 +51,7 @@ public final class EntryProcessorEntry<K, V> implements MutableEntry<K, V> {
 
   @Override
   public boolean exists() {
-    return (getValue() != null);
+    return (action == Action.NONE) ? hasEntry : (value != null);
   }
 
   @Override
@@ -58,13 +60,24 @@ public final class EntryProcessorEntry<K, V> implements MutableEntry<K, V> {
   }
 
   @Override
+  @SuppressWarnings({"CatchingUnchecked", "ConstantValue",
+      "PMD.AvoidInstanceofChecksInCatchClause"})
   public @Nullable V getValue() {
     if (action != Action.NONE) {
       return value;
     } else if (value != null) {
       action = Action.READ;
     } else if (cacheLoader.isPresent()) {
-      value = cacheLoader.orElseThrow().load(key);
+      try {
+        value = cacheLoader.orElseThrow().load(key);
+      } catch (CacheLoaderException e) {
+        throw e;
+      } catch (Exception e) {
+        if (e instanceof InterruptedException) {
+          Thread.currentThread().interrupt();
+        }
+        throw new CacheLoaderException(e);
+      }
       cacheLoader = Optional.empty();
       if (value != null) {
         action = Action.LOADED;
@@ -76,16 +89,14 @@ public final class EntryProcessorEntry<K, V> implements MutableEntry<K, V> {
   @Override
   public void remove() {
     action = (action == Action.CREATED) ? Action.NONE : Action.DELETED;
-    if (value != null) {
-      value = null;
-    }
+    value = null;
   }
 
   @Override
   public void setValue(V value) {
     requireNonNull(value);
     if (action != Action.CREATED) {
-      action = (hasEntry && exists()) ? Action.UPDATED : Action.CREATED;
+      action = hasEntry ? Action.UPDATED : Action.CREATED;
     }
     this.value = value;
   }
@@ -101,12 +112,12 @@ public final class EntryProcessorEntry<K, V> implements MutableEntry<K, V> {
       throw new IllegalArgumentException("Class " + clazz + " is unknown to this implementation");
     }
     @SuppressWarnings("unchecked")
-    T castedEntry = (T) this;
+    var castedEntry = (T) this;
     return castedEntry;
   }
 
   @Override
   public String toString() {
-    return key + "=" + getValue();
+    return key + "=" + value;
   }
 }

@@ -29,14 +29,14 @@ import org.openjdk.jmh.infra.Blackhole;
 /**
  * This benchmark can be run by optionally specifying the target jvm in the command.
  * <p>
- * <pre>{@code
- *   JAVA_VERSION=20 ./gradlew jmh -PincludePattern=FactoryBenchmark --no-daemon
- * }</pre>
+ * {@snippet lang="shell" :
+ * ./gradlew jmh -PincludePattern=FactoryBenchmark --rerun
+ * }
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @State(Scope.Benchmark)
-@SuppressWarnings("PMD.MethodNamingConventions")
+@SuppressWarnings({"IdentifierName", "JavadocDeclaration", "PMD.MethodNamingConventions", "unused"})
 public class FactoryBenchmark {
   private final ReflectionFactory reflectionFactory = new ReflectionFactory();
   private final MethodHandleFactory methodHandleFactory = new MethodHandleFactory();
@@ -81,7 +81,7 @@ public class FactoryBenchmark {
                 methodHandle.type(), methodHandle, methodHandle.type())
             .getTarget().invokeExact();
       } catch (Throwable e) {
-        throw new RuntimeException(e);
+        throw new IllegalStateException(e);
       }
     }
 
@@ -89,7 +89,7 @@ public class FactoryBenchmark {
       try {
         return (Alpha) methodHandle.invoke();
       } catch (Throwable e) {
-        throw new RuntimeException(e);
+        throw new IllegalStateException(e);
       }
     }
 
@@ -97,7 +97,7 @@ public class FactoryBenchmark {
       try {
         return (Alpha) methodHandle.invokeExact();
       } catch (Throwable e) {
-        throw new RuntimeException(e);
+        throw new IllegalStateException(e);
       }
     }
 
@@ -113,7 +113,7 @@ public class FactoryBenchmark {
       try {
         constructor = Alpha.class.getConstructor();
       } catch (NoSuchMethodException | SecurityException e) {
-        throw new RuntimeException(e);
+        throw new IllegalStateException(e);
       }
     }
 
@@ -121,7 +121,7 @@ public class FactoryBenchmark {
       try {
         return constructor.newInstance();
       } catch (Throwable e) {
-        throw new RuntimeException(e);
+        throw new IllegalStateException(e);
       }
     }
   }
@@ -130,6 +130,7 @@ public class FactoryBenchmark {
     public Alpha() {}
   }
 
+  @FunctionalInterface
   private interface AlphaConstructor {
     Alpha construct();
   }

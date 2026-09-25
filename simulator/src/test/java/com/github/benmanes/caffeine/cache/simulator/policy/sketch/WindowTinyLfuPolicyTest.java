@@ -1,0 +1,207 @@
+/*
+ * Copyright 2026 Ben Manes. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.github.benmanes.caffeine.cache.simulator.policy.sketch;
+
+import static com.github.benmanes.caffeine.cache.simulator.policy.Policy.Characteristic.WEIGHTED;
+import static com.google.common.truth.Truth.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import java.util.Map;
+import java.util.Set;
+
+import org.junit.jupiter.api.Test;
+
+import com.github.benmanes.caffeine.cache.simulator.policy.AccessEvent;
+import com.github.benmanes.caffeine.cache.simulator.policy.Policy.Characteristic;
+import com.github.benmanes.caffeine.cache.simulator.policy.sketch.WindowTinyLfuPolicy.WindowTinyLfuSettings;
+import com.typesafe.config.ConfigFactory;
+
+/**
+ * The boundary properties of the weighted form: region weights are conserved and the capacity is
+ * honored (asserted by {@code finished}), an entry that can never fit is discarded, an entry too
+ * heavy for the protected region is not promoted into it, and an unweighted trace ignores the
+ * event weight.
+ *
+ * @author ben.manes@gmail.com (Ben Manes)
+ */
+final class WindowTinyLfuPolicyTest {
+
+  @Test
+  void weighted_oversizedEntry_isDiscarded() {
+    var policy = policy(Set.of(WEIGHTED), 100);
+    policy.record(AccessEvent.forKeyAndWeight(1, 101));
+    policy.record(AccessEvent.forKeyAndWeight(1, 101));
+    policy.finished();
+
+    assertThat(policy.stats().hitCount()).isEqualTo(0);
+    assertThat(policy.stats().missCount()).isEqualTo(2);
+    assertThat(policy.stats().evictionCount()).isEqualTo(2);
+  }
+
+  @Test
+  void weighted_oversizedCandidate_doesNotDisplaceResidents() {
+    var policy = policy(Set.of(WEIGHTED), 100);
+    for (int key = 1; key <= 9; key++) {
+      policy.record(AccessEvent.forKeyAndWeight(key, 10));
+      policy.record(AccessEvent.forKeyAndWeight(key, 10));
+    }
+    long misses = policy.stats().missCount();
+
+    // the candidate cannot fit, so the admission filter discards it rather than the victims
+    policy.record(AccessEvent.forKeyAndWeight(100, 101));
+    policy.finished();
+    assertThat(policy.stats().evictionCount()).isEqualTo(1);
+
+    policy.record(AccessEvent.forKeyAndWeight(100, 101));
+    assertThat(policy.stats().missCount()).isEqualTo(misses + 2);
+  }
+
+  @Test
+  void weighted_oversizedPromotion_keepsProtectedIntact() {
+    var policy = policy(Set.of(WEIGHTED), 100);
+    for (int key = 1; key <= 2; key++) {
+      policy.record(AccessEvent.forKeyAndWeight(key, 10));
+      policy.record(AccessEvent.forKeyAndWeight(key, 10));
+    }
+
+    // a probation hit on an entry heavier than the protected maximum must not promote it, else
+    // the demotions flush the protected region and its residents become the next eviction victims
+    policy.record(AccessEvent.forKeyAndWeight(9, 80));
+    policy.record(AccessEvent.forKeyAndWeight(9, 80));
+    policy.record(AccessEvent.forKeyAndWeight(20, 10));
+    policy.record(AccessEvent.forKeyAndWeight(1, 10));
+    policy.finished();
+
+    assertThat(policy.stats().hitCount()).isEqualTo(4);
+    assertThat(policy.stats().missCount()).isEqualTo(4);
+    assertThat(policy.stats().evictionCount()).isEqualTo(1);
+  }
+
+  @Test
+  void weighted_update_evictsBackUnderCapacity() {
+    var policy = policy(Set.of(WEIGHTED), 100);
+    for (int key = 1; key <= 6; key++) {
+      policy.record(AccessEvent.forKeyAndWeight(key, 15));
+      policy.record(AccessEvent.forKeyAndWeight(key, 15));
+    }
+
+    // growing a resident forces evictions until the cache fits again
+    policy.record(AccessEvent.forKeyAndWeight(1, 60));
+    policy.finished();
+    assertThat(policy.stats().evictionCount()).isAtLeast(1);
+  }
+
+  @Test
+  void unweighted_ignoresTheEventWeight() {
+    var policy = policy(Set.of(), 3);
+    for (int key = 1; key <= 3; key++) {
+      policy.record(AccessEvent.forKeyAndWeight(key, 1000));
+    }
+    for (int key = 1; key <= 3; key++) {
+      policy.record(AccessEvent.forKeyAndWeight(key, 1000));
+    }
+    policy.finished();
+
+    assertThat(policy.stats().hitCount()).isEqualTo(3);
+    assertThat(policy.stats().missCount()).isEqualTo(3);
+    assertThat(policy.stats().evictionCount()).isEqualTo(0);
+  }
+
+  @Test
+  void weighted_nonResizableSketch_isRejected() {
+    // The weighted admitter is seeded at zero for the retrack to grow, which a sketch that cannot
+    // resize would hold forever, aging away every count it was given
+    var error = assertThrows(IllegalArgumentException.class,
+        () -> policy(Set.of(WEIGHTED), 100, Map.of("tiny-lfu.sketch", "count-min-64")));
+    assertThat(error).hasMessageThat().contains("count-min-64");
+  }
+
+  @Test
+  void unweighted_nonResizableSketch_isAllowed() {
+    var policy = policy(Set.of(), 3, Map.of("tiny-lfu.sketch", "count-min-64"));
+    for (int key = 1; key <= 3; key++) {
+      policy.record(AccessEvent.forKey(key));
+    }
+    policy.finished();
+    assertThat(policy.stats().missCount()).isEqualTo(3);
+  }
+
+  @Test
+  void explicitSegmentSizes_window() {
+    var settings = settings(3, Map.of());
+    var smallWindow = WindowTinyLfuPolicy.withSegmentSizes(1, 0, Set.of(), settings);
+    var largeWindow = WindowTinyLfuPolicy.withSegmentSizes(3, 0, Set.of(), settings);
+    for (int key : new int[] {1, 2, 3, 4, 1}) {
+      smallWindow.record(AccessEvent.forKey(key));
+      largeWindow.record(AccessEvent.forKey(key));
+    }
+    smallWindow.finished();
+    largeWindow.finished();
+
+    // The small window rejects the scan candidate and retains key 1
+    assertThat(smallWindow.stats().hitCount()).isEqualTo(1);
+    assertThat(smallWindow.stats().missCount()).isEqualTo(4);
+    assertThat(largeWindow.stats().hitCount()).isEqualTo(0);
+    assertThat(largeWindow.stats().missCount()).isEqualTo(5);
+  }
+
+  @Test
+  void explicitSegmentSizes_protected() {
+    var settings = settings(3, Map.of("tiny-lfu.sketch", "always"));
+    var withoutProtected = WindowTinyLfuPolicy.withSegmentSizes(1, 0, Set.of(), settings);
+    var withProtected = WindowTinyLfuPolicy.withSegmentSizes(1, 1, Set.of(), settings);
+    for (int key : new int[] {1, 2, 3, 1, 4, 5, 1}) {
+      withoutProtected.record(AccessEvent.forKey(key));
+      withProtected.record(AccessEvent.forKey(key));
+    }
+    withoutProtected.finished();
+    withProtected.finished();
+
+    // Key 1 survives the later insertions only when it can enter protected
+    assertThat(withoutProtected.stats().hitCount()).isEqualTo(1);
+    assertThat(withoutProtected.stats().missCount()).isEqualTo(6);
+    assertThat(withProtected.stats().hitCount()).isEqualTo(2);
+    assertThat(withProtected.stats().missCount()).isEqualTo(5);
+  }
+
+  @Test
+  void explicitSegmentSizes_rejectsInvalidGeometry() {
+    var settings = settings(3, Map.of());
+
+    assertThrows(IllegalArgumentException.class,
+        () -> WindowTinyLfuPolicy.withSegmentSizes(-1, 0, Set.of(), settings));
+    assertThrows(IllegalArgumentException.class,
+        () -> WindowTinyLfuPolicy.withSegmentSizes(0, -1, Set.of(), settings));
+    assertThrows(IllegalArgumentException.class,
+        () -> WindowTinyLfuPolicy.withSegmentSizes(2, 2, Set.of(), settings));
+  }
+
+  private static WindowTinyLfuPolicy policy(Set<Characteristic> characteristics, long maximum) {
+    return policy(characteristics, maximum, Map.of());
+  }
+
+  private static WindowTinyLfuPolicy policy(Set<Characteristic> characteristics,
+      long maximum, Map<String, Object> overrides) {
+    return new WindowTinyLfuPolicy(0.99, characteristics, settings(maximum, overrides));
+  }
+
+  private static WindowTinyLfuSettings settings(long maximum, Map<String, Object> overrides) {
+    var config = ConfigFactory.parseMap(Map.of("maximum-size", maximum))
+        .withFallback(ConfigFactory.parseMap(overrides))
+        .withFallback(ConfigFactory.load().getConfig("caffeine.simulator"));
+    return new WindowTinyLfuSettings(config);
+  }
+}

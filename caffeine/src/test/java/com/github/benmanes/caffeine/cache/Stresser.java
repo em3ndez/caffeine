@@ -18,18 +18,24 @@ package com.github.benmanes.caffeine.cache;
 import static java.util.Locale.US;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
+import java.time.Duration;
 import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
 import com.google.common.base.Stopwatch;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.google.errorprone.annotations.Var;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Help;
@@ -39,13 +45,16 @@ import picocli.CommandLine.Option;
  * A stress test to observe if the cache is able to drain the buffers fast enough under a synthetic
  * load.
  * <p>
- * <pre>{@code
- *   ./gradlew :caffeine:stress --workload=[read, write, refresh]
- * }</pre>
+ * {@snippet lang="shell" :
+ * ./gradlew :caffeine:stress --workload=[read, write, refresh]
+ * }
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@SuppressFBWarnings("DM_EXIT")
 @Command(mixinStandardHelpOptions = true)
+@SuppressWarnings({"DefaultAnnotationParam", "JavadocDeclaration",
+    "NotNullFieldNotInitialized", "SystemOut", "unused"})
 public final class Stresser implements Runnable {
   private static final String[] STATUS =
     { "Idle", "Required", "Processing -> Idle", "Processing -> Required" };
@@ -58,26 +67,38 @@ public final class Stresser implements Runnable {
   @Option(names = "--workload", required = true,
       description = "The workload type: ${COMPLETION-CANDIDATES}")
   private Workload workload;
+  @Option(names = "--duration", required = false, description = "The run duration (e.g. PT30S)")
+  private @Nullable Duration duration;
 
   private BoundedLocalCache<Integer, Integer> local;
   private LoadingCache<Integer, Integer> cache;
+  private ScheduledExecutorService scheduler;
   private Stopwatch stopwatch;
   private Integer[] ints;
 
   @Override
   public void run() {
-    initialize();
-    execute();
+    try {
+      initialize();
+      execute();
+    } finally {
+      scheduler.shutdown();
+    }
   }
 
-  @SuppressWarnings({"CheckReturnValue", "FutureReturnValueIgnored"})
+  @SuppressWarnings({"CheckReturnValue", "FutureReturnValueIgnored",
+      "PMD.DoNotTerminateVM", "ResultOfMethodCallIgnored"})
   private void initialize() {
-    var threadFactory = new ThreadFactoryBuilder()
-        .setPriority(Thread.MAX_PRIORITY)
-        .setDaemon(true)
-        .build();
-    Executors.newSingleThreadScheduledExecutor(threadFactory)
-        .scheduleAtFixedRate(this::status, STATUS_INTERVAL, STATUS_INTERVAL, SECONDS);
+    scheduler = Executors.newSingleThreadScheduledExecutor(
+        new ThreadFactoryBuilder().setDaemon(true).build());
+    scheduler.scheduleAtFixedRate(this::status, STATUS_INTERVAL, STATUS_INTERVAL, SECONDS);
+    if (duration != null) {
+      System.out.printf(US, "Executing for %s%n%n", duration);
+      scheduler.schedule(() -> {
+        System.out.println("Done");
+        System.exit(0);
+      }, duration.toNanos(), TimeUnit.NANOSECONDS);
+    }
     cache = Caffeine.newBuilder()
         .maximumSize(workload.maxEntries)
         .recordStats()
@@ -94,10 +115,10 @@ public final class Stresser implements Runnable {
     status();
   }
 
-  @SuppressWarnings({"CheckReturnValue", "FutureReturnValueIgnored"})
+  @SuppressWarnings({"CheckReturnValue", "FutureReturnValueIgnored", "ResultOfMethodCallIgnored"})
   private void execute() {
     ConcurrentTestHarness.timeTasks(workload.maxThreads, () -> {
-      int index = ThreadLocalRandom.current().nextInt();
+      @Var int index = ThreadLocalRandom.current().nextInt();
       for (;;) {
         Integer key = ints[index++ & MASK];
         switch (workload) {
@@ -115,15 +136,18 @@ public final class Stresser implements Runnable {
     });
   }
 
+  @SuppressWarnings("resource")
   private void status() {
-    int drainStatus;
+    var evictionLock = local.evictionLock;
     int pendingWrites;
-    local.evictionLock.lock();
+    int drainStatus;
+
+    evictionLock.lock();
     try {
       pendingWrites = local.writeBuffer.size();
       drainStatus = local.drainStatusAcquire();
     } finally {
-      local.evictionLock.unlock();
+      evictionLock.unlock();
     }
 
     var elapsedTime = LocalTime.ofSecondOfDay(stopwatch.elapsed(SECONDS));
@@ -134,9 +158,8 @@ public final class Stresser implements Runnable {
     System.out.printf(US, "Evictions = %,d%n", cache.stats().evictionCount());
     System.out.printf(US, "Size = %,d (max: %,d)%n",
         local.data.mappingCount(), workload.maxEntries);
-    System.out.printf(US, "Lock = [%s%n", StringUtils.substringAfter(
-        local.evictionLock.toString(), "["));
-    System.out.printf(US, "Pending reloads = %,d%n", local.refreshes.size());
+    System.out.printf(US, "Lock = [%s%n", StringUtils.substringAfter(evictionLock.toString(), "["));
+    System.out.printf(US, "Pending reloads = %,d%n", local.refreshes().size());
     System.out.printf(US, "Pending tasks = %,d%n",
         ForkJoinPool.commonPool().getQueuedSubmissionCount());
 
@@ -163,8 +186,8 @@ public final class Stresser implements Runnable {
     WRITE(MAX_THREADS, WRITE_MAX_SIZE),
     REFRESH(MAX_THREADS, TOTAL_KEYS / 4);
 
-    private final int maxThreads;
-    private final int maxEntries;
+    final int maxThreads;
+    final int maxEntries;
 
     Workload(int maxThreads, int maxEntries) {
       this.maxThreads = maxThreads;

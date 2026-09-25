@@ -18,13 +18,13 @@ package com.github.benmanes.caffeine.jcache.spi;
 import static javax.cache.configuration.OptionalFeature.STORE_BY_REFERENCE;
 
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.net.URI;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.WeakHashMap;
@@ -34,11 +34,13 @@ import javax.cache.Caching;
 import javax.cache.configuration.OptionalFeature;
 import javax.cache.spi.CachingProvider;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
 
 import com.github.benmanes.caffeine.jcache.CacheManagerImpl;
+import com.google.errorprone.annotations.Var;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 
 /**
@@ -54,11 +56,13 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @Component
+@NullMarked
 public final class CaffeineCachingProvider implements CachingProvider {
-  private static final ClassLoader DEFAULT_CLASS_LOADER = new JCacheClassLoader();
+  private static final ClassLoader DEFAULT_CLASS_LOADER =
+      new JCacheClassLoader(Thread.currentThread().getContextClassLoader());
 
   @GuardedBy("itself")
-  final Map<ClassLoader, Map<URI, CacheManager>> cacheManagers;
+  private final Map<ClassLoader, Map<URI, CacheManager>> cacheManagers;
 
   boolean isOsgiComponent;
 
@@ -92,17 +96,18 @@ public final class CaffeineCachingProvider implements CachingProvider {
   }
 
   @Override
-  public CacheManager getCacheManager(URI uri, ClassLoader classLoader, Properties properties) {
-    URI managerURI = getManagerUri(uri);
+  public CacheManager getCacheManager(URI uri,
+      ClassLoader classLoader, @Nullable Properties properties) {
+    URI managerUri = getManagerUri(uri);
     ClassLoader managerClassLoader = getManagerClassLoader(classLoader);
 
     synchronized (cacheManagers) {
-      Map<URI, CacheManager> cacheManagersByURI = cacheManagers.computeIfAbsent(
+      Map<URI, CacheManager> cacheManagersByUri = cacheManagers.computeIfAbsent(
           managerClassLoader, any -> new HashMap<>());
-      return cacheManagersByURI.computeIfAbsent(managerURI, any -> {
+      return cacheManagersByUri.computeIfAbsent(managerUri, any -> {
         Properties managerProperties = (properties == null) ? getDefaultProperties() : properties;
         return new CacheManagerImpl(this, isOsgiComponent,
-            managerURI, managerClassLoader, managerProperties);
+            managerUri, managerClassLoader, managerProperties);
       });
     }
   }
@@ -121,9 +126,9 @@ public final class CaffeineCachingProvider implements CachingProvider {
   public void close(ClassLoader classLoader) {
     synchronized (cacheManagers) {
       ClassLoader managerClassLoader = getManagerClassLoader(classLoader);
-      Map<URI, CacheManager> cacheManagersByURI = cacheManagers.remove(managerClassLoader);
-      if (cacheManagersByURI != null) {
-        for (CacheManager cacheManager : cacheManagersByURI.values()) {
+      Map<URI, CacheManager> cacheManagersByUri = cacheManagers.remove(managerClassLoader);
+      if (cacheManagersByUri != null) {
+        for (CacheManager cacheManager : cacheManagersByUri.values()) {
           cacheManager.close();
         }
       }
@@ -135,14 +140,14 @@ public final class CaffeineCachingProvider implements CachingProvider {
   public void close(URI uri, ClassLoader classLoader) {
     synchronized (cacheManagers) {
       ClassLoader managerClassLoader = getManagerClassLoader(classLoader);
-      Map<URI, CacheManager> cacheManagersByURI = cacheManagers.get(managerClassLoader);
+      Map<URI, CacheManager> cacheManagersByUri = cacheManagers.get(managerClassLoader);
 
-      if (cacheManagersByURI != null) {
-        CacheManager cacheManager = cacheManagersByURI.remove(getManagerUri(uri));
+      if (cacheManagersByUri != null) {
+        CacheManager cacheManager = cacheManagersByUri.remove(getManagerUri(uri));
         if (cacheManager != null) {
           cacheManager.close();
         }
-        if (cacheManagersByURI.isEmpty()) {
+        if (cacheManagersByUri.isEmpty()) {
           cacheManagers.remove(managerClassLoader);
         }
       }
@@ -154,11 +159,11 @@ public final class CaffeineCachingProvider implements CachingProvider {
     return (optionalFeature == STORE_BY_REFERENCE);
   }
 
-  private URI getManagerUri(URI uri) {
+  private URI getManagerUri(@Nullable URI uri) {
     return (uri == null) ? getDefaultURI() : uri;
   }
 
-  private ClassLoader getManagerClassLoader(ClassLoader classLoader) {
+  private ClassLoader getManagerClassLoader(@Nullable ClassLoader classLoader) {
     return (classLoader == null) ? getDefaultClassLoader() : classLoader;
   }
 
@@ -166,16 +171,19 @@ public final class CaffeineCachingProvider implements CachingProvider {
    * A {@link ClassLoader} that combines {@code Thread.currentThread().getContextClassLoader()}
    * and {@code getClass().getClassLoader()}.
    */
-  private static final class JCacheClassLoader extends ClassLoader {
+  static class JCacheClassLoader extends ClassLoader {
+    final WeakReference<ClassLoader> parent;
 
-    public JCacheClassLoader() {
-      super(Thread.currentThread().getContextClassLoader());
+    JCacheClassLoader(@Nullable ClassLoader parent) {
+      super(/* parent= */ null);
+      this.parent = new WeakReference<>(parent);
     }
 
     @Override
     public Class<?> loadClass(String name) throws ClassNotFoundException {
+      @Var ClassNotFoundException error = null;
+
       ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
-      ClassNotFoundException error = null;
       if ((contextClassLoader != null) && (contextClassLoader != DEFAULT_CLASS_LOADER)) {
         try {
           return contextClassLoader.loadClass(name);
@@ -184,7 +192,7 @@ public final class CaffeineCachingProvider implements CachingProvider {
         }
       }
 
-      ClassLoader classClassLoader = getClass().getClassLoader();
+      ClassLoader classClassLoader = getClassClassLoader();
       if ((classClassLoader != null) && (classClassLoader != contextClassLoader)) {
         try {
           return classClassLoader.loadClass(name);
@@ -193,7 +201,7 @@ public final class CaffeineCachingProvider implements CachingProvider {
         }
       }
 
-      ClassLoader parentClassLoader = getParent();
+      ClassLoader parentClassLoader = parent.get();
       if ((parentClassLoader != null)
           && (parentClassLoader != classClassLoader)
           && (parentClassLoader != contextClassLoader)) {
@@ -216,7 +224,7 @@ public final class CaffeineCachingProvider implements CachingProvider {
         }
       }
 
-      ClassLoader classClassLoader = getClass().getClassLoader();
+      ClassLoader classClassLoader = getClassClassLoader();
       if ((classClassLoader != null) && (classClassLoader != contextClassLoader)) {
         URL resource = classClassLoader.getResource(name);
         if (resource != null) {
@@ -224,14 +232,11 @@ public final class CaffeineCachingProvider implements CachingProvider {
         }
       }
 
-      ClassLoader parentClassLoader = getParent();
+      ClassLoader parentClassLoader = parent.get();
       if ((parentClassLoader != null)
           && (parentClassLoader != classClassLoader)
           && (parentClassLoader != contextClassLoader)) {
-        URL resource = parentClassLoader.getResource(name);
-        if (resource != null) {
-          return resource;
-        }
+        return parentClassLoader.getResource(name);
       }
 
       return null;
@@ -239,19 +244,19 @@ public final class CaffeineCachingProvider implements CachingProvider {
 
     @Override
     public Enumeration<URL> getResources(String name) throws IOException {
-      List<URL> resources = new ArrayList<>();
+      var resources = new ArrayList<URL>();
 
       ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
-      if (contextClassLoader != null && contextClassLoader != DEFAULT_CLASS_LOADER) {
+      if ((contextClassLoader != null) && contextClassLoader != DEFAULT_CLASS_LOADER) {
         resources.addAll(Collections.list(contextClassLoader.getResources(name)));
       }
 
-      ClassLoader classClassLoader = getClass().getClassLoader();
+      ClassLoader classClassLoader = getClassClassLoader();
       if ((classClassLoader != null) && (classClassLoader != contextClassLoader)) {
         resources.addAll(Collections.list(classClassLoader.getResources(name)));
       }
 
-      ClassLoader parentClassLoader = getParent();
+      ClassLoader parentClassLoader = parent.get();
       if ((parentClassLoader != null)
           && (parentClassLoader != classClassLoader)
           && (parentClassLoader != contextClassLoader)) {
@@ -259,6 +264,10 @@ public final class CaffeineCachingProvider implements CachingProvider {
       }
 
       return Collections.enumeration(resources);
+    }
+
+    @Nullable ClassLoader getClassClassLoader() {
+      return getClass().getClassLoader();
     }
   }
 

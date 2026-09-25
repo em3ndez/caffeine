@@ -15,17 +15,22 @@
  */
 package com.github.benmanes.caffeine.cache.simulator.policy.product;
 
+import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.Sets.toImmutableEnumSet;
+import static java.util.Locale.US;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
-import java.util.EnumSet;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
+import com.github.benmanes.caffeine.cache.simulator.policy.AccessEvent;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
-import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.CaseFormat;
+import com.google.common.base.Enums;
+import com.google.common.collect.ImmutableSet;
 import com.trivago.triava.tcache.Cache;
 import com.trivago.triava.tcache.EvictionPolicy;
 import com.trivago.triava.tcache.TCacheFactory;
@@ -37,7 +42,7 @@ import com.typesafe.config.Config;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @PolicySpec(name = "product.TCache")
-public final class TCachePolicy implements KeyOnlyPolicy {
+public final class TCachePolicy implements Policy {
   private final Cache<Long, Boolean> cache;
   private final PolicyStats policyStats;
   private final TCacheFactory factory;
@@ -47,6 +52,7 @@ public final class TCachePolicy implements KeyOnlyPolicy {
     factory = new TCacheFactory();
     cache = factory.<Long, Boolean>builder()
         .setMaxElements(Math.toIntExact(settings.maximumSize()))
+        .setMaxCacheTime(Integer.MAX_VALUE, TimeUnit.SECONDS)
         .setEvictionPolicy(policy.type)
         .setStatistics(true)
         .build();
@@ -61,11 +67,12 @@ public final class TCachePolicy implements KeyOnlyPolicy {
   }
 
   @Override
-  public void record(long key) {
-    Object value = cache.get(key);
+  public void record(AccessEvent event) {
+    Long key = event.longKey();
+    var value = cache.get(key);
     if (value == null) {
       policyStats.recordMiss();
-      cache.put(key, Boolean.TRUE);
+      cache.put(key, true);
     } else {
       policyStats.recordHit();
     }
@@ -78,26 +85,23 @@ public final class TCachePolicy implements KeyOnlyPolicy {
 
   @Override
   public void finished() {
+    var stats = cache.statistics();
     factory.close();
-    policyStats.addEvictions(cache.statistics().getEvictionCount());
+
+    policyStats.addEvictions(stats.getEvictionCount());
+    checkState(policyStats.hitCount() == stats.getHitCount());
+    checkState(policyStats.missCount() == stats.getMissCount());
   }
 
   public static final class TCacheSettings extends BasicSettings {
     public TCacheSettings(Config config) {
       super(config);
     }
-    public Set<Eviction> policy() {
-      var policies = EnumSet.noneOf(Eviction.class);
-      for (var policy : config().getStringList("tcache.policy")) {
-        if (policy.equalsIgnoreCase("lru")) {
-          policies.add(Eviction.LRU);
-        } else if (policy.equalsIgnoreCase("lfu")) {
-          policies.add(Eviction.LFU);
-        } else {
-          throw new IllegalArgumentException("Unknown policy: " + policy);
-        }
-      }
-      return policies;
+    public ImmutableSet<Eviction> policy() {
+      return config().getStringList("tcache.policy").stream()
+          .map(policy -> Enums.getIfPresent(Eviction.class, policy.toUpperCase(US)).toJavaUtil()
+            .orElseThrow(() -> new IllegalArgumentException("Unknown policy: " + policy)))
+          .collect(toImmutableEnumSet());
     }
   }
 

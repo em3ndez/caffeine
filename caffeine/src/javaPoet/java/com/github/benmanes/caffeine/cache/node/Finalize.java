@@ -15,57 +15,26 @@
  */
 package com.github.benmanes.caffeine.cache.node;
 
-import static com.github.benmanes.caffeine.cache.Specifications.LOOKUP;
-import static com.github.benmanes.caffeine.cache.Specifications.METHOD_HANDLES;
-
-import org.apache.commons.lang3.StringUtils;
-
-import com.squareup.javapoet.AnnotationSpec;
-import com.squareup.javapoet.CodeBlock;
+import com.github.benmanes.caffeine.cache.Rule;
 
 /**
  * Finishes construction of the node.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public class Finalize extends NodeRule {
+public final class Finalize implements Rule<NodeContext> {
 
   @Override
-  protected boolean applies() {
+  public boolean applies(NodeContext context) {
     return true;
   }
 
   @Override
-  protected void execute() {
-    if (!context.suppressedWarnings.isEmpty()) {
-      var format = (context.suppressedWarnings.size() == 1)
-          ? "$S"
-          : "{" + StringUtils.repeat("$S", ", ", context.suppressedWarnings.size()) + "}";
-      context.nodeSubtype.addAnnotation(AnnotationSpec.builder(SuppressWarnings.class)
-          .addMember("value", format, context.suppressedWarnings.toArray())
-          .build());
-    }
-    context.nodeSubtype
+  public void execute(NodeContext context) {
+    context.classSpec
         .addMethod(context.constructorDefault.build())
-        .addMethod(context.constructorByKey.build())
         .addMethod(context.constructorByKeyRef.build());
-    addStaticBlock();
-  }
-
-  private void addStaticBlock() {
-    if (context.varHandles.isEmpty()) {
-      return;
-    }
-    var codeBlock = CodeBlock.builder()
-        .addStatement("$T lookup = $T.lookup()", LOOKUP, METHOD_HANDLES)
-        .beginControlFlow("try");
-    for (var varHandle : context.varHandles) {
-      varHandle.accept(codeBlock);
-    }
-    codeBlock
-        .nextControlFlow("catch ($T e)", ReflectiveOperationException.class)
-          .addStatement("throw new ExceptionInInitializerError(e)")
-        .endControlFlow();
-    context.nodeSubtype.addStaticBlock(codeBlock.build());
+    context.addSuppressedWarnings();
+    context.addStaticBlock();
   }
 }

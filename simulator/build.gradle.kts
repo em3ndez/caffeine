@@ -1,13 +1,12 @@
 /** Cache simulator using tracing data and a family of eviction policy options. */
-import org.gradle.plugins.ide.eclipse.model.Classpath as EclipseClasspath
-import org.gradle.plugins.ide.eclipse.model.SourceFolder
+@file:Suppress("UnstableApiUsage")
 import net.ltgt.gradle.errorprone.errorprone
 import net.ltgt.gradle.nullaway.nullaway
+import org.gradle.api.tasks.PathSensitivity.RELATIVE
 
 plugins {
   id("application")
-  id("auto-value-caffeine-conventions")
-  id("java-library-caffeine-conventions")
+  id("java-library.caffeine")
 }
 
 dependencies {
@@ -17,146 +16,195 @@ dependencies {
   implementation(libs.ycsb) {
     isTransitive = false
   }
-  implementation(libs.zstd)
   implementation(libs.guava)
   implementation(libs.config)
   implementation(libs.stream)
   implementation(libs.tcache)
   implementation(libs.cache2k)
+  implementation(libs.fastcsv)
   implementation(libs.picocli)
   implementation(libs.ehcache3)
   implementation(libs.fastutil)
   implementation(libs.hazelcast)
   implementation(libs.jfreechart)
-  implementation(libs.commons.io)
   implementation(libs.fast.filter)
-  implementation(libs.flip.tables)
+  implementation(libs.ascii.table)
   implementation(libs.expiring.map)
+  implementation(libs.jackson.core)
   implementation(libs.commons.lang3)
   implementation(libs.commons.math3)
   implementation(libs.commons.compress)
   implementation(libs.bundles.coherence)
-  implementation(libs.bundles.slf4j.jdk)
-  implementation(libs.univocity.parsers)
+  implementation(libs.infer.annotations)
+  implementation(libs.spotbugs.annotations)
   implementation(libs.zero.allocation.hashing)
+
+  runtimeOnly(libs.zstd)
+  runtimeOnly(libs.bundles.slf4j.jdk)
+}
+
+configurations.configureEach {
+  resolutionStrategy.dependencySubstitution {
+    substitute(module("it.unimi.dsi:fastutil")).using(module(libs.fastutil.get().toString()))
+  }
 }
 
 application {
   mainClass = "com.github.benmanes.caffeine.cache.simulator.Simulator"
 }
 
-forbiddenApis {
-  bundledSignatures.addAll(listOf("commons-io-unsafe-2.15.1", "jdk-deprecated",
-    "jdk-internal", "jdk-non-portable", "jdk-reflection", "jdk-unsafe"))
-}
+java.toolchain.languageVersion = javaRuntimeVersion()
 
-tasks.withType<JavaCompile>().configureEach {
-  options.errorprone {
-    disableWarningsInGeneratedCode = true
-    nullaway.disable()
+testing.suites {
+  named<JvmTestSuite>("test") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(libs.truth)
+    }
   }
-  modularity.inferModulePath = true
 }
 
-tasks.withType<Test>().configureEach {
-  useJUnitPlatform()
+forbiddenApis {
+  bundledSignatures.addAll(listOf("jdk-deprecated", "jdk-internal",
+    "jdk-non-portable", "jdk-reflection", "jdk-unsafe"))
 }
 
-tasks.jar {
+tasks.named<JavaCompile>("compileJava").configure {
+  options.apply {
+    compilerArgs.addAll(listOf("-Xlint:-classfile", "-Xlint:-processing"))
+    errorprone {
+      disable("SystemOut")
+
+      nullaway {
+        externalInitAnnotations.add("picocli.CommandLine.Command")
+      }
+    }
+  }
+}
+
+tasks.named<Jar>("jar").configure {
   bundle.bnd(mapOf(
     "Bundle-SymbolicName" to "com.github.benmanes.caffeine.simulator",
     "Automatic-Module-Name" to "com.github.benmanes.caffeine.simulator"))
 }
 
+listOf("jar", "sourcesJar").forEach { taskName ->
+  tasks.named<Jar>(taskName).configure {
+    exclude {
+      !it.isDirectory
+        && it.path.startsWith("com/github/benmanes/caffeine/cache/simulator/parser/")
+        && it.name.substringAfterLast('.', "") !in setOf("class", "java")
+    }
+  }
+}
+
 tasks.withType<Javadoc>().configureEach {
   javadocOptions {
-    addStringOption("Xdoclint:none", "-quiet")
+    addBooleanOption("Xdoclint:all,-missing", true)
   }
 }
 
 tasks.named<JavaExec>("run").configure {
-  systemProperties(caffeineSystemProperties())
-  jvmArgs(javaExecJvmArgs())
+  description = "Runs a single simulation and generates a report"
 }
 
-tasks.register<Simulate>("simulate") {
-  description = "Runs multiple simulations and generates an aggregate report"
-  mainClass = "com.github.benmanes.caffeine.cache.simulator.Simulate"
-  configureSimulatorTask()
-}
+val runTasks = listOf(
+  tasks.named<JavaExec>("run"),
+  tasks.register<Rewrite>("rewrite"),
+  tasks.register<Simulate>("simulate"))
 
-tasks.register<Rewrite>("rewrite") {
-  description = "Rewrite traces into the format used by other simulators"
-  mainClass = "com.github.benmanes.caffeine.cache.simulator.parser.Rewriter"
-  configureSimulatorTask()
-}
+runTasks.forEach { task ->
+  task.configure {
+    inputs.files(tasks.named<ProcessResources>("processResources").map { it.outputs.files })
+      .withPathSensitivity(RELATIVE)
+    inputs.files(tasks.named<JavaCompile>("compileJava").map { it.outputs.files })
+      .withPathSensitivity(RELATIVE)
+    classpath(sourceSets.named("main").map { it.runtimeClasspath })
+    jvmArgs("-XX:+UseCompactObjectHeaders")
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
 
-eclipse.classpath.file.beforeMerged {
-  if (this is EclipseClasspath) {
-    val absolutePath = layout.buildDirectory.dir("generated/sources/annotationProcessor/java/main")
-    entries.add(SourceFolder(relativePath(absolutePath), "bin/main"))
+    val defaultJvmArguments = defaultJvmArgs()
+    jvmArgumentProviders.add { defaultJvmArguments.get() }
+    val overrides = providers.systemPropertiesPrefixedBy("caffeine")
+    doFirst {
+      systemProperties(overrides.get())
+    }
   }
-}
-
-fun JavaExec.configureSimulatorTask() {
-  group = "Application"
-  dependsOn(tasks.processResources, tasks.compileJava)
-  classpath(sourceSets["main"].runtimeClasspath)
-  systemProperties(caffeineSystemProperties())
-  outputs.upToDateWhen { false }
-  jvmArgs(javaExecJvmArgs())
 }
 
 abstract class Simulate @Inject constructor(
                         @Internal val projectLayout: ProjectLayout) : JavaExec() {
-  @Input @Option(option = "maximumSize", description = "The maximum sizes")
-  var maximumSize: List<String> = emptyList()
-  @Input @Option(option = "metric", description = "The metric to compare")
-  var metric = "Hit Rate"
-  @Input @Option(option = "theme", description = "The chart theme")
-  var theme = "light"
-  @Input @Option(option = "title", description = "The chart title")
-  var title = ""
-  @OutputDirectory
-  val reportDir = File(projectLayout.buildDirectory.get().asFile, "/reports/$name")
+  @get:Input @get:Option(option = "maximumSize", description = "The maximum sizes")
+  abstract val maximumSize: ListProperty<String>
+  @get:Input @get:Option(option = "metric", description = "The metric to compare")
+  abstract val metric: Property<String>
+  @get:Input @get:Option(option = "theme", description = "The chart theme")
+  abstract val theme: Property<String>
+  @get:Input @get:Option(option = "title", description = "The chart title")
+  abstract val title: Property<String>
+  @get:Input @get:Option(option = "outputDir", description = "The output directory")
+  abstract val outputDir: Property<String>
+  @get:OutputDirectory
+  val reportDir: Provider<Directory> = projectLayout.buildDirectory.dir("reports/$name")
 
-  @TaskAction
-  override fun exec() {
-    if (maximumSize.isNotEmpty()) {
-      args("--maximumSize", maximumSize.joinToString(","))
+  init {
+    group = "Application"
+    mainClass = "com.github.benmanes.caffeine.cache.simulator.Simulate"
+    description = "Runs multiple simulations and generates an aggregate report"
+    outputDir.convention(reportDir.map { it.asFile.path })
+    maximumSize.convention(emptyList())
+    metric.convention("Hit Rate")
+    theme.convention("light")
+    title.convention("")
+    argumentProviders.add {
+      buildList {
+        if (maximumSize.get().isNotEmpty()) {
+          addAll(listOf("--maximumSize", maximumSize.get().joinToString(",")))
+        }
+        addAll(listOf("--outputDir", outputDir.get()))
+        addAll(listOf("--metric", metric.get()))
+        addAll(listOf("--title", title.get()))
+        addAll(listOf("--theme", theme.get()))
+      }
     }
-    args("--outputDir", reportDir)
-    args("--metric", metric)
-    args("--title", title)
-    args("--theme", theme)
-    super.exec()
   }
 }
 
 abstract class Rewrite : JavaExec() {
-  @Input @Option(option = "inputFiles", description = "The trace input files")
-  var inputFiles: List<String> = emptyList()
-  @Input @Option(option = "inputFormat", description = "The input format")
-  var inputFormat: String = ""
-  @Input @Option(option = "outputFile", description = "The output file")
-  var outputFile: String = ""
-  @Input @Option(option = "outputFormat", description = "The output format")
-  var outputFormat: String = ""
+  @get:Input @get:Option(option = "inputFiles", description = "The trace input files")
+  abstract val inputFiles: ListProperty<String>
+  @get:Input @get:Option(option = "inputFormat", description = "The input format")
+  abstract val inputFormat: Property<String>
+  @get:Input @get:Option(option = "outputFile", description = "The output file")
+  abstract val outputFile: Property<String>
+  @get:Input @get:Option(option = "outputFormat", description = "The output format")
+  abstract val outputFormat: Property<String>
 
-  @TaskAction
-  override fun exec() {
-    if (inputFiles.isNotEmpty()) {
-      args("--inputFiles", inputFiles.joinToString(","))
+  init {
+    group = "Application"
+    description = "Rewrite traces into the format used by other simulators"
+    mainClass = "com.github.benmanes.caffeine.cache.simulator.parser.Rewriter"
+    inputFiles.convention(emptyList())
+    outputFormat.convention("")
+    inputFormat.convention("")
+    outputFile.convention("")
+    argumentProviders.add {
+      buildList {
+        if (inputFiles.get().isNotEmpty()) {
+          addAll(listOf("--inputFiles", inputFiles.get().joinToString(",")))
+        }
+        if (outputFormat.get().isNotEmpty()) {
+          addAll(listOf("--outputFormat", outputFormat.get()))
+        }
+        if (inputFormat.get().isNotEmpty()) {
+          addAll(listOf("--inputFormat", inputFormat.get()))
+        }
+        if (outputFile.get().isNotEmpty()) {
+          addAll(listOf("--outputFile", outputFile.get()))
+        }
+      }
     }
-    if (outputFormat.isNotEmpty()) {
-      args("--outputFormat", outputFormat)
-    }
-    if (inputFormat.isNotEmpty()) {
-      args("--inputFormat", inputFormat)
-    }
-    if (outputFile.isNotEmpty()) {
-      args("--outputFile", outputFile)
-    }
-    super.exec()
   }
 }

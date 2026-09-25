@@ -16,13 +16,16 @@
 package com.github.benmanes.caffeine.cache;
 
 import static com.github.benmanes.caffeine.cache.Caffeine.ceilingPowerOfTwo;
+import static java.lang.invoke.ConstantBootstraps.fieldVarHandle;
 import static java.util.Objects.requireNonNull;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 /**
  * A pacing scheduler that prevents executions from happening too frequently. Only one task may be
@@ -33,6 +36,8 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  */
 final class Pacer {
   static final long TOLERANCE = ceilingPowerOfTwo(TimeUnit.SECONDS.toNanos(1)); // 1.07s
+  static final VarHandle FUTURE = fieldVarHandle(MethodHandles.lookup(),
+      "future", VarHandle.class, Pacer.class, Future.class);
 
   final Scheduler scheduler;
 
@@ -52,29 +57,31 @@ final class Pacer {
       if (nextFireTime != 0L) {
         return;
       }
-    } else if ((nextFireTime - now) > 0L) {
-      // Determine whether to reschedule
-      if (maySkip(scheduleAt)) {
+    } else {
+      // Skip if a pending fire is still soon enough; otherwise cancel the future being replaced
+      if (((nextFireTime - now) > 0L) && !future.isDone() && maySkip(scheduleAt)) {
         return;
       }
-      future.cancel(/* mayInterruptIfRunning */ false);
+      cancel();
     }
     long actualDelay = calculateSchedule(now, delay, scheduleAt);
-    future = scheduler.schedule(executor, command, actualDelay, TimeUnit.NANOSECONDS);
+    var f = scheduler.schedule(executor, command, actualDelay, TimeUnit.NANOSECONDS);
+    FUTURE.setRelease(this, f);
   }
 
   /** Attempts to cancel execution of the scheduled task, if present. */
   public void cancel() {
     if (future != null) {
-      future.cancel(/* mayInterruptIfRunning */ false);
+      future.cancel(/* mayInterruptIfRunning= */ false);
       nextFireTime = 0L;
-      future = null;
+      FUTURE.setRelease(this, null);
     }
   }
 
   /** Returns if a task is scheduled to run. */
   public boolean isScheduled() {
-    return (future != null) && !future.isDone();
+    var f = (Future<?>) FUTURE.getAcquire(this);
+    return (f != null) && !f.isDone();
   }
 
   /**
@@ -82,17 +89,20 @@ final class Pacer {
    */
   boolean maySkip(long scheduleAt) {
     long delta = (scheduleAt - nextFireTime);
-    return (delta >= 0L) || (-delta <= TOLERANCE);
+    return (delta >= -TOLERANCE);
   }
 
-  /** Returns the delay and sets the next fire time. */
+  /** Returns the delay and sets the next fire time, avoiding the 0L unscheduled sentinel. */
   long calculateSchedule(long now, long delay, long scheduleAt) {
     if (delay <= TOLERANCE) {
       // Use a minimum delay if close to now
       nextFireTime = (now + TOLERANCE);
+      if (nextFireTime == 0L) {
+        nextFireTime = 1L;
+      }
       return TOLERANCE;
     }
-    nextFireTime = scheduleAt;
+    nextFireTime = (scheduleAt == 0L) ? 1L : scheduleAt;
     return delay;
   }
 }

@@ -15,6 +15,7 @@
  */
 package com.github.benmanes.caffeine.cache.stats;
 
+import static com.github.benmanes.caffeine.testing.LoggingEvents.logEvents;
 import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -22,29 +23,24 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.slf4j.event.Level.TRACE;
 import static org.slf4j.event.Level.WARN;
 
+import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
 
+import com.github.benmanes.caffeine.cache.CheckMaxLogLevel;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
-import com.github.valfirst.slf4jtest.TestLoggerFactory;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class StatsCounterTest {
-
-  @BeforeMethod @AfterMethod
-  public void reset() {
-    TestLoggerFactory.clear();
-  }
+@CheckMaxLogLevel(TRACE)
+final class StatsCounterTest {
 
   @Test
-  public void disabled() {
+  void disabled() {
     var counter = DisabledStatsCounter.INSTANCE;
     counter.recordHits(1);
     counter.recordMisses(1);
@@ -60,7 +56,7 @@ public final class StatsCounterTest {
   }
 
   @Test
-  public void enabled() {
+  void enabled() {
     var counter = new ConcurrentStatsCounter();
     counter.recordHits(1);
     counter.recordMisses(1);
@@ -77,7 +73,7 @@ public final class StatsCounterTest {
   }
 
   @Test
-  public void concurrent() {
+  void concurrent() {
     var counter = new ConcurrentStatsCounter();
     ConcurrentTestHarness.timeTasks(5, () -> {
       counter.recordHits(1);
@@ -90,7 +86,7 @@ public final class StatsCounterTest {
   }
 
   @Test
-  public void guarded() {
+  void guarded() {
     var counter = StatsCounter.guardedStatsCounter(new ConcurrentStatsCounter());
     counter.recordHits(1);
     counter.recordMisses(1);
@@ -99,19 +95,20 @@ public final class StatsCounterTest {
     counter.recordLoadFailure(1);
     var expected = CacheStats.of(1, 1, 1, 1, 2, 1, 10);
     assertThat(counter.snapshot()).isEqualTo(expected);
-    assertThat(TestLoggerFactory.getLoggingEvents()).isEmpty();
     assertThat(counter.toString()).isEqualTo(expected.toString());
     assertThat(counter.snapshot().toString()).isEqualTo(expected.toString());
+    assertThat(logEvents()).isEmpty();
   }
 
   @Test
-  public void guarded_sameInstance() {
+  void guarded_sameInstance() {
     var counter = StatsCounter.guardedStatsCounter(new ConcurrentStatsCounter());
     assertThat(StatsCounter.guardedStatsCounter(counter)).isSameInstanceAs(counter);
   }
 
   @Test
-  public void guarded_exception() {
+  @CheckMaxLogLevel(WARN)
+  void guarded_exception() {
     StatsCounter statsCounter = Mockito.mock();
     when(statsCounter.snapshot()).thenThrow(new NullPointerException());
     doThrow(NullPointerException.class).when(statsCounter).recordHits(anyInt());
@@ -134,17 +131,16 @@ public final class StatsCounterTest {
     verify(statsCounter).recordLoadFailure(1);
     verify(statsCounter).recordEviction(10, RemovalCause.SIZE);
 
-    var events = TestLoggerFactory.getLoggingEvents();
-    assertThat(events).hasSize(6);
-    for (var event : events) {
-      assertThat(event.getLevel()).isEqualTo(WARN);
-      assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown by stats counter");
-      assertThat(event.getThrowable().orElseThrow()).isInstanceOf(NullPointerException.class);
-    }
+    assertThat(logEvents()
+        .withMessage("Exception thrown by stats counter")
+        .withThrowable(NullPointerException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(6);
   }
 
   @Test
-  public void overflow_loadSuccess() {
+  void overflow_loadSuccess() {
     var counter = new ConcurrentStatsCounter();
     counter.recordLoadSuccess(Long.MAX_VALUE);
     counter.recordLoadSuccess(1);
@@ -153,7 +149,7 @@ public final class StatsCounterTest {
   }
 
   @Test
-  public void overflow_loadFailure() {
+  void overflow_loadFailure() {
     var counter = new ConcurrentStatsCounter();
     counter.recordLoadFailure(Long.MAX_VALUE);
     counter.recordLoadFailure(1);

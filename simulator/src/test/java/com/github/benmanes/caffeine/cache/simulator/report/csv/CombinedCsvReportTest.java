@@ -1,0 +1,130 @@
+/*
+ * Copyright 2026 Ben Manes. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.github.benmanes.caffeine.cache.simulator.report.csv;
+
+import static com.google.common.truth.Truth.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import com.google.common.collect.ImmutableMap;
+
+/**
+ * The metric is a human-typed argument, so it is matched against the column headers ignoring case,
+ * and an absent metric fails loudly rather than silently emitting an all-empty report (which the
+ * chart step later cannot render).
+ *
+ * @author ben.manes@gmail.com (Ben Manes)
+ */
+final class CombinedCsvReportTest {
+
+  @Test
+  void resolvesMetricIgnoringCase(@TempDir Path dir) throws IOException {
+    Path input = Files.writeString(dir.resolve("in.csv"),
+        "Policy,Hit Rate,Hit Penalty\nLru,50.0,1.0\nFifo,40.0,2.0\n");
+    Path output = dir.resolve("out.csv");
+
+    new CombinedCsvReport(ImmutableMap.of(512L, input), "hit rate", output).run();
+
+    String report = Files.readString(output);
+    assertThat(report).contains("Lru,50.0");
+    assertThat(report).contains("Fifo,40.0");
+  }
+
+  @Test
+  void failsOnUnknownMetric(@TempDir Path dir) throws IOException {
+    Path input = Files.writeString(dir.resolve("in.csv"), "Policy,Hit Rate\nLru,50.0\n");
+    var report = new CombinedCsvReport(
+        ImmutableMap.of(512L, input), "Bogus", dir.resolve("out.csv"));
+
+    var error = assertThrows(IllegalArgumentException.class, report::run);
+    assertThat(error).hasMessageThat().contains("Bogus");
+    assertThat(error).hasMessageThat().contains("Hit Rate");
+  }
+
+  @Test
+  void failsOnUnknownMetricBeforeDuplicatePolicies(@TempDir Path dir) throws IOException {
+    Path input = Files.writeString(dir.resolve("in.csv"),
+        "Policy,Hit Rate\nLru,50.0\nLru,40.0\n");
+    var report = new CombinedCsvReport(
+        ImmutableMap.of(512L, input), "Bogus", dir.resolve("out.csv"));
+
+    var error = assertThrows(IllegalArgumentException.class, report::run);
+    assertThat(error).hasMessageThat().contains("Bogus");
+    assertThat(error).hasMessageThat().contains("Hit Rate");
+  }
+
+  @Test
+  void leavesCellsEmptyWhenAReportOmitsTheMetric(@TempDir Path dir) throws IOException {
+    Path small = Files.writeString(dir.resolve("512.csv"), "Policy,Hit Penalty\nLru,1.0\n");
+    Path large = Files.writeString(dir.resolve("1024.csv"), "Policy,Hit Rate\nLru,60.0\n");
+    Path output = dir.resolve("out.csv");
+
+    new CombinedCsvReport(
+        ImmutableMap.of(512L, small, 1024L, large), "Hit Rate", output).run();
+
+    assertThat(Files.readAllLines(output))
+        .containsExactly("Policy,512,\"1,024\"", "Lru,,60.0").inOrder();
+  }
+
+  @Test
+  void retainsPoliciesAbsentFromTheFirstReport(@TempDir Path dir) throws IOException {
+    // A policy may be reported at one size and not another, so the rows are the union of the
+    // inputs rather than whichever set the smallest size happened to produce
+    Path small = Files.writeString(dir.resolve("512.csv"), "Policy,Hit Rate\nLru,50.0\n");
+    Path large = Files.writeString(dir.resolve("1024.csv"),
+        "Policy,Hit Rate\nLru,60.0\nFifo,40.0\n");
+    Path output = dir.resolve("out.csv");
+
+    new CombinedCsvReport(
+        ImmutableMap.of(512L, small, 1024L, large), "Hit Rate", output).run();
+
+    assertThat(Files.readAllLines(output))
+        .containsExactly("Policy,512,\"1,024\"", "Lru,50.0,60.0", "Fifo,,40.0").inOrder();
+  }
+
+  @Test
+  void failsOnDuplicatePolicyNameInALaterReport(@TempDir Path dir) throws IOException {
+    Path small = Files.writeString(dir.resolve("512.csv"), "Policy,Hit Rate\nLru,50.0\n");
+    Path large = Files.writeString(dir.resolve("1024.csv"),
+        "Policy,Hit Rate\nLru,60.0\nLru,40.0\n");
+    Path output = Files.writeString(dir.resolve("out.csv"), "Previous report\n");
+    var report = new CombinedCsvReport(
+        ImmutableMap.of(512L, small, 1024L, large), "Hit Rate", output);
+
+    var error = assertThrows(IllegalStateException.class, report::run);
+    assertThat(error).hasMessageThat().contains("Lru");
+    assertThat(Files.readString(output)).isEqualTo("Previous report\n");
+  }
+
+  @Test
+  void failsOnDuplicatePolicyName(@TempDir Path dir) throws IOException {
+    // Two policies reported under one display name would collapse into a single row, silently
+    // dropping one of them from the comparison
+    Path input = Files.writeString(dir.resolve("in.csv"),
+        "Policy,Hit Rate\nLru,50.0\nLru,40.0\n");
+    var report = new CombinedCsvReport(
+        ImmutableMap.of(512L, input), "Hit Rate", dir.resolve("out.csv"));
+
+    var error = assertThrows(IllegalStateException.class, report::run);
+    assertThat(error).hasMessageThat().contains("Lru");
+  }
+}

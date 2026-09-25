@@ -15,16 +15,25 @@
  */
 package com.github.benmanes.caffeine.jcache.copy;
 
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.nullRef;
 import static com.github.benmanes.caffeine.jcache.copy.AbstractCopier.javaDeepCopyStrategies;
+import static com.github.benmanes.caffeine.jcache.copy.AbstractCopier.javaImmutableClasses;
 import static com.google.common.truth.Truth.assertThat;
 import static java.util.Locale.US;
-import static org.junit.Assert.assertThrows;
+import static java.util.Objects.requireNonNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.ObjectInputFilter;
 import java.io.ObjectInputStream;
 import java.io.ObjectStreamClass;
-import java.io.UncheckedIOException;
+import java.io.Serializable;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.time.Month;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -34,85 +43,191 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
 import javax.cache.CacheException;
 
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import com.google.common.collect.ImmutableSet;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class JavaSerializationCopierTest {
+@SuppressFBWarnings("SEC_SIDE_EFFECT_CONSTRUCTOR")
+final class JavaSerializationCopierTest {
 
-  @Test(dataProvider = "nullArgs")
-  public void constructor_null(Set<Class<?>> immutableClasses,
+  @ParameterizedTest @MethodSource("nullArgs")
+  void constructor_null(Set<Class<?>> immutableClasses,
       Map<Class<?>, Function<Object, Object>> deepCopyStrategies) {
     assertThrows(NullPointerException.class, () ->
         new JavaSerializationCopier(immutableClasses, deepCopyStrategies));
   }
 
-  @Test(dataProvider = "copier")
-  public void null_object(Copier copier) {
-    assertThrows(NullPointerException.class, () -> copy(copier, null));
+  @ParameterizedTest @MethodSource("copiers")
+  void null_object(Copier copier) {
+    assertThrows(NullPointerException.class, () -> copy(copier, nullRef()));
   }
 
-  @Test(dataProvider = "copier")
-  public void null_classLoader(Copier copier) {
-    assertThrows(NullPointerException.class, () -> copier.copy(1, null));
+  @ParameterizedTest @MethodSource("copiers")
+  void null_classLoader(Copier copier) {
+    assertThrows(NullPointerException.class, () -> copier.copy(1, nullRef()));
   }
 
-  @Test(dataProvider = "copier")
-  public void serializable_fail(JavaSerializationCopier copier) {
-    assertThrows(UncheckedIOException.class, () -> copier.serialize(new Object()));
+  @ParameterizedTest @MethodSource("copiers")
+  void serializable_fail(JavaSerializationCopier copier) {
+    assertThrows(CacheException.class, () -> copier.serialize(new Object()));
   }
 
   @Test
-  public void deserializable_resolveClass() {
+  void deserializable_resolveClass() {
     var copier = new JavaSerializationCopier();
     var copy = copier.copy(ImmutableSet.of(), ClassLoader.getPlatformClassLoader());
     assertThat(copy).isInstanceOf(ImmutableSet.class);
   }
 
-  @Test(dataProvider = "copier")
-  public void deserializable_badData(JavaSerializationCopier copier) {
-    assertThrows(CacheException.class, () ->
-        copier.deserialize(new byte[0], Thread.currentThread().getContextClassLoader()));
+  @Test
+  void deserializable_resolveProxyClass() {
+    // a proxy's interfaces are resolved through resolveProxyClass, not resolveClass, so without
+    // that override the supplied class loader is bypassed for the manager's own types
+    var requested = new ArrayList<String>();
+    var classLoader = new ClassLoader(getClass().getClassLoader()) {
+      @Override public Class<?> loadClass(String name) throws ClassNotFoundException {
+        requested.add(name);
+        return super.loadClass(name);
+      }
+    };
+    var proxy = Proxy.newProxyInstance(getClass().getClassLoader(),
+        new Class<?>[] { SerializableGreeter.class }, new GreeterHandler());
+
+    var copier = new JavaSerializationCopier();
+    var copy = copier.copy(proxy, classLoader);
+
+    assertThat(copy).isInstanceOf(SerializableGreeter.class);
+    assertThat(((SerializableGreeter) copy).greet()).isEqualTo("hello");
+    assertThat(requested).contains(SerializableGreeter.class.getName());
   }
 
   @Test
-  public void deserializable_classNotFound() {
+  void deserializable_resolveProxyClass_notVisible() {
+    // an interface that the supplied class loader cannot see falls back to the stream's resolution
+    var proxy = Proxy.newProxyInstance(getClass().getClassLoader(),
+        new Class<?>[] { SerializableGreeter.class }, new GreeterHandler());
+
+    var copier = new JavaSerializationCopier();
+    var copy = copier.copy(proxy, ClassLoader.getPlatformClassLoader());
+
+    assertThat(copy).isInstanceOf(SerializableGreeter.class);
+    assertThat(((SerializableGreeter) copy).greet()).isEqualTo("hello");
+  }
+
+  /** An interface for a serializable dynamic proxy. */
+  @FunctionalInterface
+  public interface SerializableGreeter extends Serializable {
+    String greet();
+  }
+
+  /** A handler that is itself serializable, as a proxy is written with its handler. */
+  @SuppressFBWarnings("DESERIALIZATION_GADGET")
+  private static final class GreeterHandler implements InvocationHandler, Serializable {
+    private static final long serialVersionUID = 1L;
+
+    @SuppressFBWarnings("URV_INHERITED_METHOD_WITH_RELATED_TYPES")
+    @Override public Object invoke(
+        Object proxy, Method method, @Nullable Object @Nullable [] args) {
+      switch (method.getName()) {
+        case "hashCode": return System.identityHashCode(proxy);
+        case "equals": return (proxy == requireNonNull(args)[0]);
+        case "toString": return "greeter";
+        default: return "hello";
+      }
+    }
+  }
+
+  @ParameterizedTest @MethodSource("copiers")
+  void deserializable_badData(JavaSerializationCopier copier) {
+    assertThrows(CacheException.class, () ->
+        copier.deserialize(new byte[0], requireNonNull(Thread.currentThread().getContextClassLoader())));
+  }
+
+  @Test
+  void deserializable_rejected() {
+    ObjectInputFilter rejectAll = info -> ObjectInputFilter.Status.REJECTED;
+    var copier = new JavaSerializationCopier(
+        javaImmutableClasses(), javaDeepCopyStrategies(), rejectAll);
+    assertThrows(CacheException.class, () ->
+        copier.roundtrip(100, requireNonNull(Thread.currentThread().getContextClassLoader())));
+  }
+
+  @Test
+  void deserializable_allowed() {
+    ObjectInputFilter allowJavaLang = info -> {
+      var clazz = info.serialClass();
+      if (clazz == null) {
+        return ObjectInputFilter.Status.ALLOWED;
+      }
+      return clazz.getName().startsWith("java.lang.")
+          ? ObjectInputFilter.Status.ALLOWED
+          : ObjectInputFilter.Status.REJECTED;
+    };
+    var copier = new JavaSerializationCopier(
+        javaImmutableClasses(), javaDeepCopyStrategies(), allowJavaLang);
+    assertThat(copier.roundtrip(100, requireNonNull(Thread.currentThread().getContextClassLoader())))
+        .isEqualTo(100);
+  }
+
+  @Test
+  void deserializable_classNotFound() {
     var copier = new JavaSerializationCopier() {
-      @Override protected ObjectInputStream newInputStream(
+      @Override ObjectInputStream newInputStream(
           InputStream in, ClassLoader classLoader) throws IOException {
         return new ObjectInputStream(in) {
           @Override protected Class<?> resolveClass(ObjectStreamClass desc)
-              throws IOException, ClassNotFoundException {
+              throws ClassNotFoundException {
             throw new ClassNotFoundException();
           }
         };
       }
     };
     assertThrows(CacheException.class, () ->
-        copier.roundtrip(100, Thread.currentThread().getContextClassLoader()));
+        copier.roundtrip(100, requireNonNull(Thread.currentThread().getContextClassLoader())));
   }
 
-  @Test(dataProvider = "copier")
-  public void mutable(Copier copier) {
+  @ParameterizedTest @MethodSource("copiers")
+  void mutable(Copier copier) {
     var ints = new ArrayList<>(Arrays.asList(0, 1, 2, 3, 4));
     assertThat(copy(copier, ints)).containsExactlyElementsIn(ints).inOrder();
   }
 
   @Test
-  public void immutable() {
+  void immutable() {
     String text = "test";
     assertThat(copy(new JavaSerializationCopier(), text)).isSameInstanceAs(text);
+    assertThat(copy(new JavaSerializationCopier(), Month.JANUARY)).isSameInstanceAs(Month.JANUARY);
   }
 
   @Test
-  public void canDeeplyCopy() {
+  void defaultConstructor() {
+    var copier = new AbstractCopier<>() {
+      @Override protected Object serialize(Object object) {
+        throw new UnsupportedOperationException();
+      }
+      @Override protected Object deserialize(Object data, ClassLoader classLoader) {
+        throw new UnsupportedOperationException();
+      }
+    };
+    String text = "test";
+    assertThat(copy(copier, text)).isSameInstanceAs(text);
+  }
+
+  @Test
+  void canDeeplyCopy() {
     var copier = new JavaSerializationCopier();
     assertThat(copier.canDeeplyCopy(Object.class)).isFalse();
     for (var clazz : javaDeepCopyStrategies().keySet()) {
@@ -120,53 +235,50 @@ public final class JavaSerializationCopierTest {
     }
   }
 
-  @Test(dataProvider = "copier")
-  @SuppressWarnings({"JavaUtilDate", "JdkObsolete", "UndefinedEquals"})
-  public void deepCopy_date(Copier copier) {
-    Date date = new Date();
+  @ParameterizedTest @MethodSource("copiers")
+  @SuppressWarnings({"JavaUtilDate", "PMD.ReplaceJavaUtilDate", "UndefinedEquals"})
+  void deepCopy_date(Copier copier) {
+    var date = new Date();
     assertThat(copy(copier, date)).isEqualTo(date);
   }
 
-  @Test(dataProvider = "copier")
-  @SuppressWarnings({"JavaUtilDate", "JdkObsolete"})
-  public void deepCopy_calendar(Copier copier) {
-    Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone("UTC"), US);
+  @ParameterizedTest @MethodSource("copiers")
+  @SuppressWarnings({"JavaUtilDate", "PMD.ReplaceJavaUtilDate"})
+  void deepCopy_calendar(Copier copier) {
+    var calendar = Calendar.getInstance(TimeZone.getTimeZone("UTC"), US);
     calendar.setTime(new Date());
     assertThat(copy(copier, calendar)).isEqualTo(calendar);
   }
 
-  @Test(dataProvider = "copier")
-  public void array_primitive(Copier copier) {
+  @ParameterizedTest @MethodSource("copiers")
+  void array_primitive(Copier copier) {
     int[] ints = { 0, 1, 2, 3, 4 };
     assertThat(copy(copier, ints)).isEqualTo(ints);
   }
 
-  @Test(dataProvider = "copier")
-  public void array_immutable(Copier copier) {
+  @ParameterizedTest @MethodSource("copiers")
+  void array_immutable(Copier copier) {
     Integer[] ints = { 0, 1, 2, 3, 4 };
     assertThat(copy(copier, ints)).asList().containsExactlyElementsIn(ints).inOrder();
   }
 
-  @Test(dataProvider = "copier")
-  public void array_mutable(Copier copier) {
+  @ParameterizedTest @MethodSource("copiers")
+  void array_mutable(Copier copier) {
     Object[] array = { new ArrayList<>(List.of(0, 1, 2, 3, 4)) };
     assertThat(copy(copier, array)).asList().containsExactlyElementsIn(array).inOrder();
   }
 
-  private <T> T copy(Copier copier, T object) {
-    return copier.copy(object, Thread.currentThread().getContextClassLoader());
+  private static <T> T copy(Copier copier, T object) {
+    return copier.copy(object, requireNonNull(Thread.currentThread().getContextClassLoader()));
   }
 
-  @DataProvider(name = "copier")
-  public Object[] providesCopiers() {
-    return new Object[] {
+  static Stream<Copier> copiers() {
+    return Stream.of(
         new JavaSerializationCopier(),
-        new JavaSerializationCopier(Set.of(), Map.of())
-    };
+        new JavaSerializationCopier(Set.of(), Map.of()));
   }
 
-  @DataProvider(name = "nullArgs")
-  public Object[][] providesNullArgs() {
-    return new Object[][] { { null, null }, { null, Map.of() }, { Set.of(), null } };
+  static Stream<Arguments> nullArgs() {
+    return Stream.of(arguments(null, null), arguments(null, Map.of()), arguments(Set.of(), null));
   }
 }

@@ -19,6 +19,7 @@ import java.util.Random;
 
 import com.github.benmanes.caffeine.cache.BasicCache;
 import com.github.benmanes.caffeine.cache.CacheType;
+import com.google.errorprone.annotations.Var;
 
 import site.ycsb.generator.NumberGenerator;
 import site.ycsb.generator.ScrambledZipfianGenerator;
@@ -30,7 +31,6 @@ import site.ycsb.generator.ScrambledZipfianGenerator;
  */
 public final class CacheProfiler extends ProfilerHook {
   static final CacheType cacheType = CacheType.Caffeine;
-  static final int MAX_SIZE = 10 * NUM_THREADS;
   static final int SIZE = (2 << 14);
   static final int MASK = SIZE - 1;
   static final int ITEMS = SIZE / 4;
@@ -45,7 +45,7 @@ public final class CacheProfiler extends ProfilerHook {
 
     // Ensure full initialization of internal structures
     for (int i = 0; i < 2 * SIZE; i++) {
-      cache.put(i, Boolean.TRUE);
+      cache.put(i, true);
     }
     cache.clear();
 
@@ -53,7 +53,7 @@ public final class CacheProfiler extends ProfilerHook {
     NumberGenerator generator = new ScrambledZipfianGenerator(ITEMS);
     for (int i = 0; i < SIZE; i++) {
       ints[i] = generator.nextValue().intValue();
-      cache.put(ints[i], Boolean.TRUE);
+      cache.put(ints[i], true);
     }
 
     reads = true;
@@ -69,9 +69,9 @@ public final class CacheProfiler extends ProfilerHook {
   }
 
   /** Spins forever reading from the cache. */
-  @SuppressWarnings("CheckReturnValue")
+  @SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored"})
   private void reads() {
-    int index = random.nextInt();
+    @Var int index = random.nextInt();
     for (;;) {
       Integer key = ints[index++ & MASK];
       cache.get(key);
@@ -81,16 +81,16 @@ public final class CacheProfiler extends ProfilerHook {
 
   /** Spins forever writing into the cache. */
   private void writes() {
-    int index = random.nextInt();
+    @Var int index = random.nextInt();
     for (;;) {
       Integer key = ints[index++ & MASK];
-      cache.put(key, Boolean.TRUE);
+      cache.put(key, true);
       calls.increment();
     }
   }
 
   public static void main(String[] args) {
-    CacheProfiler profile = new CacheProfiler();
+    var profile = new CacheProfiler();
     profile.run();
   }
 }

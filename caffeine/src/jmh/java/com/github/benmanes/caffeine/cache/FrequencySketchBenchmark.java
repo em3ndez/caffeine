@@ -28,14 +28,15 @@ import com.github.benmanes.caffeine.cache.sketch.TinyLfuSketch;
 import site.ycsb.generator.ScrambledZipfianGenerator;
 
 /**
- * <pre>{@code
- *   ./gradlew jmh -PincludePattern=FrequencySketchBenchmark
- * }</pre>
+ * {@snippet lang="shell" :
+ * ./gradlew jmh -PincludePattern=FrequencySketchBenchmark --rerun
+ * }
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @State(Scope.Benchmark)
-@SuppressWarnings("LexicographicalAnnotationAttributeListing")
+@SuppressWarnings({"LexicographicalAnnotationAttributeListing",
+    "JavadocDeclaration", "NotNullFieldNotInitialized", "unused"})
 public class FrequencySketchBenchmark {
   private static final int SIZE = (2 << 14);
   private static final int MASK = SIZE - 1;

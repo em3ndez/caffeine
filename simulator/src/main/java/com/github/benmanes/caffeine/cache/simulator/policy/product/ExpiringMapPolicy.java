@@ -15,17 +15,22 @@
  */
 package com.github.benmanes.caffeine.cache.simulator.policy.product;
 
+import static com.google.common.collect.Sets.toImmutableEnumSet;
+import static java.util.Locale.US;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
-import java.util.EnumSet;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
+import com.github.benmanes.caffeine.cache.simulator.policy.AccessEvent;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
-import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.CaseFormat;
+import com.google.common.base.Enums;
+import com.google.common.collect.ImmutableSet;
 import com.typesafe.config.Config;
 
 import net.jodah.expiringmap.ExpirationPolicy;
@@ -37,16 +42,18 @@ import net.jodah.expiringmap.ExpiringMap;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @PolicySpec(name = "product.ExpiringMap")
-public final class ExpiringMapPolicy implements KeyOnlyPolicy {
-  @SuppressWarnings("PMD.LooseCoupling")
-  private final ExpiringMap<Long, Boolean> cache;
+public final class ExpiringMapPolicy implements Policy {
+  private final Map<Long, Boolean> cache;
   private final PolicyStats policyStats;
+  private final int maximumSize;
 
   public ExpiringMapPolicy(ExpiringMapSettings settings, Eviction policy) {
     policyStats = new PolicyStats(name() + " (%s)", policy);
+    maximumSize = Math.toIntExact(settings.maximumSize());
     cache = ExpiringMap.builder()
-        .maxSize(Math.toIntExact(settings.maximumSize()))
+        .expiration(365, TimeUnit.DAYS)
         .expirationPolicy(policy.type)
+        .maxSize(maximumSize)
         .build();
   }
 
@@ -59,13 +66,14 @@ public final class ExpiringMapPolicy implements KeyOnlyPolicy {
   }
 
   @Override
-  public void record(long key) {
+  public void record(AccessEvent event) {
+    Long key = event.longKey();
     var value = cache.get(key);
     if (value == null) {
-      if (cache.size() == cache.getMaxSize()) {
+      if (cache.size() == maximumSize) {
         policyStats.recordEviction();
       }
-      cache.put(key, Boolean.TRUE);
+      cache.put(key, true);
       policyStats.recordMiss();
     } else {
       policyStats.recordHit();
@@ -81,18 +89,11 @@ public final class ExpiringMapPolicy implements KeyOnlyPolicy {
     public ExpiringMapSettings(Config config) {
       super(config);
     }
-    public Set<Eviction> policy() {
-      var policies = EnumSet.noneOf(Eviction.class);
-      for (var policy : config().getStringList("expiring-map.policy")) {
-        if (policy.equalsIgnoreCase("fifo")) {
-          policies.add(Eviction.FIFO);
-        } else if (policy.equalsIgnoreCase("lru")) {
-          policies.add(Eviction.LRU);
-        } else {
-          throw new IllegalArgumentException("Unknown policy: " + policy);
-        }
-      }
-      return policies;
+    public ImmutableSet<Eviction> policy() {
+      return config().getStringList("expiring-map.policy").stream()
+          .map(policy -> Enums.getIfPresent(Eviction.class, policy.toUpperCase(US)).toJavaUtil()
+            .orElseThrow(() -> new IllegalArgumentException("Unknown policy: " + policy)))
+          .collect(toImmutableEnumSet());
     }
   }
 

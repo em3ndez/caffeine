@@ -19,6 +19,8 @@ import static java.util.Objects.requireNonNull;
 
 import java.util.Map;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.Policy.CacheEntry;
 import com.google.errorprone.annotations.Immutable;
 
@@ -38,10 +40,10 @@ class SnapshotEntry<K, V> implements CacheEntry<K, V> {
     this.key = requireNonNull(key);
     this.value = requireNonNull(value);
   }
-  @Override public K getKey() {
+  @Override public final K getKey() {
     return key;
   }
-  @Override public V getValue() {
+  @Override public final V getValue() {
     return value;
   }
   @Override public V setValue(V value) {
@@ -56,10 +58,10 @@ class SnapshotEntry<K, V> implements CacheEntry<K, V> {
   @Override public long refreshableAt() {
     return snapshot + Long.MAX_VALUE;
   }
-  @Override public long snapshotAt() {
+  @Override public final long snapshotAt() {
     return snapshot;
   }
-  @Override public boolean equals(Object o) {
+  @Override public final boolean equals(@Nullable Object o) {
     if (o == this) {
       return true;
     } else if (!(o instanceof Map.Entry)) {
@@ -68,19 +70,20 @@ class SnapshotEntry<K, V> implements CacheEntry<K, V> {
     var entry = (Map.Entry<?, ?>) o;
     return key.equals(entry.getKey()) && value.equals(entry.getValue());
   }
-  @Override public int hashCode() {
+  @Override public final int hashCode() {
     return key.hashCode() ^ value.hashCode();
   }
-  @Override public String toString() {
+  @Override public final String toString() {
     return key + "=" + value;
   }
 
   /** Returns a cache entry containing the given key, value, and snapshot. */
   public static <K, V> SnapshotEntry<K, V> forEntry(K key, V value) {
-    return new SnapshotEntry<>(key, value, /* snapshot */ 0);
+    return new SnapshotEntry<>(key, value, /* snapshot= */ 0);
   }
 
   /** Returns a cache entry with the specified metadata. */
+  @SuppressWarnings("StatementSwitchToExpressionSwitch")
   public static <K, V> SnapshotEntry<K, V> forEntry(K key, V value,
       long snapshot, int weight, long expiresAt, long refreshableAt) {
     long unsetTicks = snapshot + Long.MAX_VALUE;
@@ -109,7 +112,7 @@ class SnapshotEntry<K, V> implements CacheEntry<K, V> {
       super(key, value, snapshot);
       this.weight = weight;
     }
-    @Override public int weight() {
+    @Override public final int weight() {
       return weight;
     }
   }
@@ -121,7 +124,7 @@ class SnapshotEntry<K, V> implements CacheEntry<K, V> {
       super(key, value, snapshot);
       this.expiresAt = expiresAt;
     }
-    @Override public long expiresAt() {
+    @Override public final long expiresAt() {
       return expiresAt;
     }
   }
@@ -133,7 +136,7 @@ class SnapshotEntry<K, V> implements CacheEntry<K, V> {
       super(key, value, snapshot, weight);
       this.expiresAt = expiresAt;
     }
-    @Override public long expiresAt() {
+    @Override public final long expiresAt() {
       return expiresAt;
     }
   }
@@ -145,7 +148,7 @@ class SnapshotEntry<K, V> implements CacheEntry<K, V> {
       super(key, value, snapshot, expiresAt);
       this.refreshableAt = refreshableAt;
     }
-    @Override public long refreshableAt() {
+    @Override public final long refreshableAt() {
       return refreshableAt;
     }
   }

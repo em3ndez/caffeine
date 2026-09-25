@@ -16,81 +16,105 @@
 package com.github.benmanes.caffeine.cache;
 
 import static com.github.benmanes.caffeine.cache.Async.ASYNC_EXPIRY;
+import static com.github.benmanes.caffeine.testing.Nullness.nullRef;
 import static com.github.benmanes.caffeine.cache.BoundedLocalCache.MAXIMUM_EXPIRY;
 import static com.github.benmanes.caffeine.testing.Awaits.await;
 import static com.google.common.truth.Truth.assertThat;
-import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.not;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mockito;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
 
+import com.github.benmanes.caffeine.cache.Async.AsyncEvictionListener;
 import com.github.benmanes.caffeine.cache.Async.AsyncExpiry;
+import com.github.benmanes.caffeine.cache.Async.AsyncRemovalListener;
 import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
+import com.github.benmanes.caffeine.testing.Int;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class AsyncTest {
+final class AsyncTest {
   private static final long ONE_MINUTE = TimeUnit.MINUTES.toNanos(1);
 
   @Test
-  public void reflectivelyConstruct() throws ReflectiveOperationException {
+  @SuppressWarnings("PMD.AvoidAccessibilityAlteration")
+  void reflectivelyConstruct() throws ReflectiveOperationException {
     var constructor = Async.class.getDeclaredConstructor();
     constructor.setAccessible(true);
     constructor.newInstance();
   }
 
-  @Test(dataProvider = "successful")
-  public void isReady_success(CompletableFuture<Integer> future) {
-    assertThat(Async.isReady(future)).isTrue();
+  @Test
+  void isReady_success() {
+    assertThat(Async.isReady(CompletableFuture.completedFuture(1))).isTrue();
   }
 
-  @Test(dataProvider = "unsuccessful")
-  public void isReady_fails(CompletableFuture<Integer> future) {
+  @ParameterizedTest @MethodSource("unsuccessful")
+  void isReady_fails(@Nullable CompletableFuture<Integer> future) {
     assertThat(Async.isReady(future)).isFalse();
   }
 
-  @Test(dataProvider = "successful")
-  public void getIfReady_success(CompletableFuture<Integer> future) {
-    assertThat(Async.getIfReady(future)).isEqualTo(1);
+  @Test
+  void getIfReady_success() {
+    assertThat(Async.getIfReady(CompletableFuture.completedFuture(1))).isEqualTo(1);
   }
 
-  @Test(dataProvider = "unsuccessful")
-  public void getIfReady_fails(CompletableFuture<Integer> future) {
+  @ParameterizedTest @MethodSource("unsuccessful")
+  void getIfReady_fails(@Nullable CompletableFuture<Integer> future) {
     assertThat(Async.getIfReady(future)).isNull();
   }
 
-  @Test(dataProvider = "successful")
-  public void getWhenSuccessful_success(CompletableFuture<Integer> future) {
-    assertThat(Async.getWhenSuccessful(future)).isEqualTo(1);
+  @Test
+  void getIfReady_obtrudedAfterCheck() {
+    // Obtruding from the readiness check schedules the race where another thread obtrudes an
+    // exception onto a successful future after it was observed as ready
+    var future = new CompletableFuture<Integer>() {
+      @Override public boolean isCompletedExceptionally() {
+        boolean completedExceptionally = super.isCompletedExceptionally();
+        obtrudeException(new IllegalStateException());
+        return completedExceptionally;
+      }
+    };
+    future.complete(1);
+    assertThat(Async.getIfReady(future)).isNull();
   }
 
   @Test
-  public void getWhenSuccessful_success_async() {
+  void getWhenSuccessful_success() {
+    assertThat(Async.getWhenSuccessful(CompletableFuture.completedFuture(1))).isEqualTo(1);
+  }
+
+  @Test
+  void getWhenSuccessful_success_async() {
     var future = new CompletableFuture<Integer>();
-    var result = new AtomicInteger();
+    var result = new AtomicReference<@Nullable Integer>();
     ConcurrentTestHarness.execute(() -> {
       result.set(1);
       result.set(Async.getWhenSuccessful(future));
     });
-    await().untilAtomic(result, is(1));
+    await().untilAsserted(() -> assertThat(result.get()).isEqualTo(1));
     future.complete(2);
-    await().untilAtomic(result, is(2));
+    await().untilAsserted(() -> assertThat(result.get()).isEqualTo(2));
   }
 
-  @Test(dataProvider = "unsuccessful")
-  public void getWhenSuccessful_fails(CompletableFuture<?> future) {
+  @ParameterizedTest @MethodSource("unsuccessful")
+  void getWhenSuccessful_fails(@Nullable CompletableFuture<?> future) {
     if ((future != null) && !future.isDone()) {
       var result = new AtomicInteger();
       ConcurrentTestHarness.execute(() -> {
@@ -98,16 +122,16 @@ public final class AsyncTest {
         Object value = Async.getWhenSuccessful(future);
         result.set((value == null) ? 2 : 3);
       });
-      await().untilAtomic(result, is(1));
+      await().untilAsserted(() -> assertThat(result.get()).isEqualTo(1));
       future.obtrudeException(new IllegalStateException());
-      await().untilAtomic(result, is(not(1)));
+      await().untilAsserted(() -> assertThat(result.get()).isNotEqualTo(1));
       assertThat(result.get()).isEqualTo(2);
     }
     assertThat(Async.getWhenSuccessful(future)).isNull();
   }
 
   @Test
-  public void asyncExpiry_pending() {
+  void asyncExpiry_pending() {
     var expiry = makeAsyncExpiry(ONE_MINUTE, ONE_MINUTE, ONE_MINUTE);
     var future = new CompletableFuture<Integer>();
 
@@ -122,7 +146,7 @@ public final class AsyncTest {
   }
 
   @Test
-  public void asyncExpiry_completed() {
+  void asyncExpiry_completed() {
     var expiry = makeAsyncExpiry(ONE_MINUTE, 2 * ONE_MINUTE, 3 * ONE_MINUTE);
     var future = CompletableFuture.completedFuture(100);
 
@@ -137,7 +161,17 @@ public final class AsyncTest {
   }
 
   @Test
-  public void asyncExpiry_bounded() {
+  void asyncExpiry_completion() {
+    var expiry = makeAsyncExpiry(ONE_MINUTE, 2 * ONE_MINUTE, 3 * ONE_MINUTE);
+    var future = CompletableFuture.completedFuture(100);
+
+    assertThat(expiry.expireAfterUpdate(0, future, 1, ASYNC_EXPIRY)).isEqualTo(ONE_MINUTE);
+    verify(expiry.delegate).expireAfterCreate(0, 100, 1);
+    verify(expiry.delegate, never()).expireAfterUpdate(any(), any(), anyLong(), anyLong());
+  }
+
+  @Test
+  void asyncExpiry_bounded() {
     var expiry = makeAsyncExpiry(Long.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE);
     var future = CompletableFuture.completedFuture(100);
 
@@ -146,20 +180,41 @@ public final class AsyncTest {
     assertThat(expiry.expireAfterRead(0, future, 1, 2)).isEqualTo(MAXIMUM_EXPIRY);
   }
 
-  @DataProvider(name = "successful")
-  public Object[][] providesSuccessful() {
-    return new Object[][] {{ CompletableFuture.completedFuture(1) }};
+  @Test
+  void asyncRemoval_null() {
+    RemovalListener<Int, Int> delegate = Mockito.mock();
+    var listener = new AsyncRemovalListener<>(delegate, Runnable::run);
+    listener.onRemoval(Int.MAX_VALUE, null, RemovalCause.EXPLICIT);
+    verifyNoInteractions(delegate);
   }
 
-  @DataProvider(name = "unsuccessful")
-  public Object[][] providesUnsuccessful() {
-    return new Object[][] {
-        { null },
-        { new CompletableFuture<Integer>() },
-        { CompletableFuture.completedFuture(null) },
-        { newFailedFuture(new InterruptedException()) },
-        { newFailedFuture(new IllegalStateException()) },
-    };
+  @Test
+  void asyncRemoval_executorRejection() {
+    var invoked = new AtomicReference<RemovalCause>();
+    RemovalListener<Int, Int> delegate = (key, value, cause) -> invoked.set(cause);
+    var listener = new AsyncRemovalListener<>(delegate, task -> {
+      throw new RejectedExecutionException();
+    });
+    listener.onRemoval(Int.valueOf(1),
+        CompletableFuture.completedFuture(Int.valueOf(2)), RemovalCause.EXPLICIT);
+    assertThat(invoked.get()).isEqualTo(RemovalCause.EXPLICIT);
+  }
+
+  @Test
+  void asyncEviction_null() {
+    RemovalListener<Int, Int> delegate = Mockito.mock();
+    var listener = new AsyncEvictionListener<>(delegate);
+    listener.onRemoval(Int.MAX_VALUE, null, RemovalCause.SIZE);
+    verifyNoInteractions(delegate);
+  }
+
+  static Stream<@Nullable CompletableFuture<Integer>> unsuccessful() {
+    return Stream.of(
+        null,
+        new CompletableFuture<>(),
+        CompletableFuture.completedFuture(nullRef()),
+        newFailedFuture(new InterruptedException()),
+        newFailedFuture(new IllegalStateException()));
   }
 
   private static AsyncExpiry<Integer, Integer> makeAsyncExpiry(

@@ -21,6 +21,9 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.References.LookupKeyEqualsReference;
 import com.github.benmanes.caffeine.cache.References.WeakKeyEqualsReference;
 
@@ -34,6 +37,7 @@ import com.github.benmanes.caffeine.cache.References.WeakKeyEqualsReference;
  * @param <E> the type of elements
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@NullMarked
 @FunctionalInterface
 public interface Interner<E> {
 
@@ -106,7 +110,7 @@ final class WeakInterner<E> implements Interner<E> {
         return canonical;
       }
 
-      var value = cache.putIfAbsent(sample, Boolean.TRUE);
+      var value = cache.putIfAbsent(sample, true);
       if (value == null) {
         return sample;
       }
@@ -114,21 +118,25 @@ final class WeakInterner<E> implements Interner<E> {
   }
 }
 
-@SuppressWarnings({"NullAway", "unchecked"})
+@SuppressWarnings({"BooleanLiteral", "unchecked"})
 final class Interned<K, V> extends Node<K, V> implements NodeFactory<K, V> {
   static final NodeFactory<Object, Object> FACTORY = new Interned<>();
 
-  volatile Reference<?> keyReference;
+  volatile Reference<? extends @Nullable Object> keyReference;
 
-  Interned() {}
-
+  Interned() {
+    this.keyReference = NodeFactory.DEAD_WEAK_KEY;
+  }
   Interned(Reference<K> keyReference) {
     this.keyReference = keyReference;
   }
-  @Override public K getKey() {
+  @Override public @Nullable K getKey() {
     return (K) keyReference.get();
   }
   @Override public Object getKeyReference() {
+    return keyReference;
+  }
+  @Override public Object getKeyReferenceOrNull() {
     return keyReference;
   }
   @Override public V getValue() {
@@ -137,16 +145,12 @@ final class Interned<K, V> extends Node<K, V> implements NodeFactory<K, V> {
   @Override public V getValueReference() {
     return (V) Boolean.TRUE;
   }
-  @Override public void setValue(V value, ReferenceQueue<V> referenceQueue) {}
+  @Override public void setValue(V value, @Nullable ReferenceQueue<V> referenceQueue) {}
   @Override public boolean containsValue(Object value) {
     return Objects.equals(value, getValue());
   }
-  @Override public Node<K, V> newNode(K key, ReferenceQueue<K> keyReferenceQueue,
-      V value, ReferenceQueue<V> valueReferenceQueue, int weight, long now) {
-    return new Interned<>(new WeakKeyEqualsReference<>(key, keyReferenceQueue));
-  }
   @Override public Node<K, V> newNode(Object keyReference, V value,
-      ReferenceQueue<V> valueReferenceQueue, int weight, long now) {
+      @Nullable ReferenceQueue<V> valueReferenceQueue, int weight, long now) {
     return new Interned<>((Reference<K>) keyReference);
   }
   @Override public Object newLookupKey(Object key) {

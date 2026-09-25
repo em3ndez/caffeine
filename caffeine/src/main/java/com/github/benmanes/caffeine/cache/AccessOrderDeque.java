@@ -17,7 +17,7 @@ package com.github.benmanes.caffeine.cache;
 
 import java.util.Deque;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.AccessOrderDeque.AccessOrder;
 
@@ -30,7 +30,7 @@ import com.github.benmanes.caffeine.cache.AccessOrderDeque.AccessOrder;
 final class AccessOrderDeque<E extends AccessOrder<E>> extends AbstractLinkedDeque<E> {
 
   @Override
-  public boolean contains(Object o) {
+  public boolean contains(@Nullable Object o) {
     return (o instanceof AccessOrder<?>) && contains((AccessOrder<?>) o);
   }
 
@@ -43,7 +43,7 @@ final class AccessOrderDeque<E extends AccessOrder<E>> extends AbstractLinkedDeq
 
   @Override
   @SuppressWarnings("unchecked")
-  public boolean remove(Object o) {
+  public boolean remove(@Nullable Object o) {
     return (o instanceof AccessOrder<?>) && remove((E) o);
   }
 
@@ -82,21 +82,21 @@ final class AccessOrderDeque<E extends AccessOrder<E>> extends AbstractLinkedDeq
   interface AccessOrder<T extends AccessOrder<T>> {
 
     /**
-     * Retrieves the previous element or <tt>null</tt> if either the element is unlinked or the
+     * Retrieves the previous element or {@code null} if either the element is unlinked or the
      * first element on the deque.
      */
     @Nullable T getPreviousInAccessOrder();
 
-    /** Sets the previous element or <tt>null</tt> if there is no link. */
+    /** Sets the previous element or {@code null} if there is no link. */
     void setPreviousInAccessOrder(@Nullable T prev);
 
     /**
-     * Retrieves the next element or <tt>null</tt> if either the element is unlinked or the last
+     * Retrieves the next element or {@code null} if either the element is unlinked or the last
      * element on the deque.
      */
     @Nullable T getNextInAccessOrder();
 
-    /** Sets the next element or <tt>null</tt> if there is no link. */
+    /** Sets the next element or {@code null} if there is no link. */
     void setNextInAccessOrder(@Nullable T next);
   }
 }

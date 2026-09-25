@@ -20,32 +20,35 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Scheduler;
 import com.google.common.util.concurrent.Uninterruptibles;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+
 /**
  * Issue #859: Removal listener not called (due to no activity and pending work in write buffer)
  * <p>
- * While a maintenance cycle is running it disables scheduling of a clean up by concurrent writers.
+ * While a maintenance cycle is running it disables scheduling of a cleanup by concurrent writers.
  * When complete the drain status is restored to required and previously this may have had to wait
- * for other activity to trigger the clean up. That could be an excessive delay if the write buffer
+ * for other activity to trigger the cleanup. That could be an excessive delay if the write buffer
  * contains inserted entries, they expire, and a prompt removal notification is expected due to a
  * configured scheduler. To avoid this delay, the maintenance cycle should be scheduled.
  *
  * @author mario-schwede-hivemq (Mario Schwede)
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@Test(groups = "isolated")
-public final class Issue859Test {
+@Isolated
+final class Issue859Test {
   private static final int NUMBER_OF_RUNS = 100_000;
   private static final int NUMBER_OF_KEYS = 10;
 
   @Test
-  public void scheduleIfPendingWrites() {
+  void scheduleIfPendingWrites() {
     var runs = new ArrayList<TestRun>();
     for (int i = 1; i <= NUMBER_OF_RUNS; i++) {
       runs.add(runTest());
@@ -56,7 +59,7 @@ public final class Issue859Test {
     }
   }
 
-  private TestRun runTest() {
+  private static TestRun runTest() {
     var latch = new CountDownLatch(NUMBER_OF_KEYS);
     Cache<Integer, Boolean> cache = Caffeine.newBuilder()
         .removalListener((key, value, cause) -> latch.countDown())
@@ -65,8 +68,8 @@ public final class Issue859Test {
         .executor(executor)
         .build();
     for (int i = 0; i < NUMBER_OF_KEYS; i++) {
-      var key = i;
-      executor.execute(() -> cache.put(key, Boolean.TRUE));
+      int key = i;
+      executor.execute(() -> cache.put(key, true));
     }
 
     // The scheduler maintains a weak reference to the cache, so it must be held strongly until the
@@ -74,9 +77,11 @@ public final class Issue859Test {
     return new TestRun(cache, latch);
   }
 
-  static final class TestRun {
-    final Cache<Integer, Boolean> cache;
-    final CountDownLatch latch;
+  private static final class TestRun {
+    @SuppressFBWarnings("URF_UNREAD_FIELD")
+    @SuppressWarnings({"FieldCanBeLocal", "unused"})
+    private final Cache<Integer, Boolean> cache;
+    private final CountDownLatch latch;
 
     TestRun(Cache<Integer, Boolean> cache, CountDownLatch latch) {
       this.cache = cache;

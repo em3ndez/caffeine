@@ -15,8 +15,12 @@
  */
 package com.github.benmanes.caffeine.cache.buffer;
 
+import static java.lang.invoke.ConstantBootstraps.fieldVarHandle;
+
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+
+import com.google.errorprone.annotations.Var;
 
 /**
  * A ring buffer implemented using the FastFlow technique to reduce contention caused by the
@@ -25,9 +29,9 @@ import java.lang.invoke.VarHandle;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 final class FastFlowBuffer<E> extends FastFlowHeader.ReadAndWriteCounterRef<E> {
-  static final VarHandle BUFFER = MethodHandles.arrayElementVarHandle(Object[].class);
+  private static final VarHandle BUFFER = MethodHandles.arrayElementVarHandle(Object[].class);
 
-  final Object[] buffer;
+  private final Object[] buffer;
 
   public FastFlowBuffer() {
     buffer = new Object[BUFFER_SIZE];
@@ -35,7 +39,7 @@ final class FastFlowBuffer<E> extends FastFlowHeader.ReadAndWriteCounterRef<E> {
 
   @Override
   public int offer(E e) {
-    long head = readCache;
+    @Var long head = readCache;
     long tail = writeCounterOpaque();
 
     long wrap = (tail - BUFFER_SIZE);
@@ -48,6 +52,7 @@ final class FastFlowBuffer<E> extends FastFlowHeader.ReadAndWriteCounterRef<E> {
     }
 
     if (casWriteCounter(tail, tail + 1)) {
+      @SuppressWarnings("Varifier")
       int index = (int) (tail & BUFFER_MASK);
       BUFFER.setRelease(buffer, index, e);
       return SUCCESS;
@@ -56,16 +61,18 @@ final class FastFlowBuffer<E> extends FastFlowHeader.ReadAndWriteCounterRef<E> {
   }
 
   @Override
-  public void drainTo(Consumer<E> consumer) {
-    long head = readCounter;
+  @SuppressWarnings("unchecked")
+  protected void drainTo(Consumer<E> consumer) {
+    @Var long head = readCounter;
     long tail = writeCounterOpaque();
     long size = (tail - head);
     if (size == 0) {
       return;
     }
     do {
+      @SuppressWarnings("Varifier")
       int index = (int) (head & BUFFER_MASK);
-      E e = (E) BUFFER.getAcquire(buffer, index);
+      var e = (E) BUFFER.getAcquire(buffer, index);
       if (e == null) {
         // not published yet
         break;
@@ -89,8 +96,12 @@ final class FastFlowBuffer<E> extends FastFlowHeader.ReadAndWriteCounterRef<E> {
 }
 
 /** The namespace for field padding through inheritance. */
+@SuppressWarnings("MultiVariableDeclaration")
 final class FastFlowHeader {
 
+  private FastFlowHeader() {}
+
+  @SuppressWarnings("unused")
   abstract static class PadReadCache<E> extends ReadBuffer<E> {
     byte p000, p001, p002, p003, p004, p005, p006, p007;
     byte p008, p009, p010, p011, p012, p013, p014, p015;
@@ -114,6 +125,7 @@ final class FastFlowHeader {
     volatile long readCache;
   }
 
+  @SuppressWarnings("unused")
   abstract static class PadReadCounter<E> extends ReadCacheRef<E> {
     byte p120, p121, p122, p123, p124, p125, p126, p127;
     byte p128, p129, p130, p131, p132, p133, p134, p135;
@@ -137,6 +149,7 @@ final class FastFlowHeader {
     volatile long readCounter;
   }
 
+  @SuppressWarnings("unused")
   abstract static class PadWriteCounter<E> extends ReadCounterRef<E> {
     byte p240, p241, p242, p243, p244, p245, p246, p247;
     byte p248, p249, p250, p251, p252, p253, p254, p255;
@@ -157,7 +170,12 @@ final class FastFlowHeader {
 
   /** Enforces a memory layout to avoid false sharing by padding the write counter. */
   abstract static class ReadAndWriteCounterRef<E> extends PadWriteCounter<E> {
-    static final VarHandle READ_CACHE, READ, WRITE;
+    static final VarHandle READ = fieldVarHandle(MethodHandles.lookup(),
+        "readCounter", VarHandle.class, ReadCounterRef.class, long.class);
+    static final VarHandle READ_CACHE = fieldVarHandle(MethodHandles.lookup(),
+        "readCache", VarHandle.class, ReadCacheRef.class, long.class);
+    static final VarHandle WRITE = fieldVarHandle(MethodHandles.lookup(),
+        "writeCounter", VarHandle.class, ReadAndWriteCounterRef.class, long.class);
 
     volatile long writeCounter;
 
@@ -171,17 +189,6 @@ final class FastFlowHeader {
 
     boolean casWriteCounter(long expect, long update) {
       return WRITE.weakCompareAndSet(this, expect, update);
-    }
-
-    static {
-      var lookup = MethodHandles.lookup();
-      try {
-        READ = lookup.findVarHandle(ReadCounterRef.class, "readCounter", long.class);
-        READ_CACHE = lookup.findVarHandle(ReadCacheRef.class, "readCache", long.class);
-        WRITE = lookup.findVarHandle(ReadAndWriteCounterRef.class, "writeCounter", long.class);
-      } catch (ReflectiveOperationException e) {
-        throw new ExceptionInInitializerError(e);
-      }
     }
   }
 }

@@ -15,17 +15,19 @@
  */
 package com.github.benmanes.caffeine.cache.buffer;
 
-import org.jctools.queues.MpmcArrayQueue;
+import org.jctools.queues.MessagePassingQueue;
+import org.jctools.queues.atomic.MpmcAtomicArrayQueue;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
 final class MpmcArrayBuffer<E> extends ReadBuffer<E> {
-  final MpmcArrayQueue<E> queue;
-  long reads;
+  private final MessagePassingQueue<E> queue;
+
+  private long reads;
 
   MpmcArrayBuffer() {
-    queue = new MpmcArrayQueue<>(BUFFER_SIZE);
+    queue = new MpmcAtomicArrayQueue<>(BUFFER_SIZE);
   }
 
   @Override
@@ -34,7 +36,7 @@ final class MpmcArrayBuffer<E> extends ReadBuffer<E> {
   }
 
   @Override
-  public void drainTo(Consumer<E> consumer) {
+  protected void drainTo(Consumer<E> consumer) {
     reads += queue.drain(consumer);
   }
 

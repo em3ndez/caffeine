@@ -15,72 +15,156 @@
  */
 package com.github.benmanes.caffeine.jcache.configuration;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
+import static java.util.Objects.requireNonNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.time.Duration;
+import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.concurrent.ForkJoinPool;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
 
 import javax.cache.Cache;
 import javax.cache.CacheException;
-import javax.cache.CacheManager;
-import javax.cache.Caching;
 import javax.cache.configuration.MutableConfiguration;
 
-import org.testng.annotations.BeforeClass;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import com.github.benmanes.caffeine.jcache.spi.CaffeineCachingProvider;
+import com.github.benmanes.caffeine.cache.Expiry;
+import com.github.benmanes.caffeine.cache.Scheduler;
+import com.github.benmanes.caffeine.cache.Ticker;
+import com.github.benmanes.caffeine.cache.Weigher;
+import com.github.benmanes.caffeine.jcache.JCacheFixture;
+import com.github.benmanes.caffeine.jcache.copy.Copier;
+import com.github.benmanes.caffeine.jcache.copy.JavaSerializationCopier;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 import com.google.common.testing.EqualsTester;
 
 /**
  * @author Nick Robison (github.com/nickrobison)
  */
-public final class JCacheConfigurationTest {
-  private static final String PROVIDER_NAME = CaffeineCachingProvider.class.getName();
+final class JCacheConfigurationTest {
 
-  private MutableConfiguration<String, String> cacheConfig;
-  private CacheManager cacheManager;
-
-  @BeforeClass
-  public void beforeClass() {
-    var provider = Caching.getCachingProvider(PROVIDER_NAME);
-    cacheManager = provider.getCacheManager();
-    cacheManager.getCacheNames().forEach(cacheManager::destroyCache);
-
-    cacheConfig = new MutableConfiguration<>();
-    cacheConfig.setTypes(String.class, String.class);
-    cacheConfig.setStatisticsEnabled(true);
+  @Test
+  void setMaximumSize() {
+    var config = new CaffeineConfiguration<>();
+    checkOptionalLongSetting(config::getMaximumSize, config::setMaximumSize);
   }
 
   @Test
-  public void equality() {
-    new EqualsTester()
+  void setMaximumWeight() {
+    var config = new CaffeineConfiguration<>();
+    checkOptionalLongSetting(config::getMaximumWeight, config::setMaximumWeight);
+  }
+
+  @Test
+  void setExpireAfterAccess() {
+    var config = new CaffeineConfiguration<>();
+    checkOptionalLongSetting(config::getExpireAfterAccess, config::setExpireAfterAccess);
+  }
+
+  @Test
+  void setExpireAfterWrite() {
+    var config = new CaffeineConfiguration<>();
+    checkOptionalLongSetting(config::getExpireAfterWrite, config::setExpireAfterWrite);
+  }
+
+  private static void checkOptionalLongSetting(
+      Supplier<OptionalLong> getter, Consumer<OptionalLong> setter) {
+    setter.accept(OptionalLong.of(1_000));
+    assertThat(getter.get()).hasValue(1_000);
+
+    setter.accept(OptionalLong.empty());
+    assertThat(getter.get()).isEmpty();
+  }
+
+  @Test
+  void setRefreshAfterWrite() {
+    var config = new CaffeineConfiguration<>();
+    config.setRefreshAfterWrite(OptionalLong.of(Duration.ofSeconds(1).toNanos()));
+    assertThat(config.getRefreshAfterWrite()).hasValue(Duration.ofSeconds(1).toNanos());
+
+    config.setRefreshAfterWrite(OptionalLong.empty());
+    assertThat(config.getRefreshAfterWrite()).isEmpty();
+  }
+
+  @Test
+  @SuppressWarnings("SequencedCollectionGetFirst")
+  void equality() {
+    var cacheConfig = new MutableConfiguration<String, String>()
+        .setTypes(String.class, String.class)
+        .setStatisticsEnabled(true);
+    var tester = new EqualsTester()
         .addEqualityGroup(cacheConfig,
             new MutableConfiguration<>(new CaffeineConfiguration<>(cacheConfig)))
-        .addEqualityGroup(new CaffeineConfiguration<>(cacheConfig))
-    .testEquals();
+        .addEqualityGroup(new CaffeineConfiguration<>(cacheConfig));
+    var configurations = Lists.cartesianProduct(IntStream.range(0, 12)
+        .mapToObj(i -> ImmutableList.of(true, false)).collect(toImmutableList()));
+    for (var config : configurations) {
+      var absent = OptionalLong.empty();
+      var configuration = new CaffeineConfiguration<>(cacheConfig);
+      configuration.setExpireAfterAccess(config.get(0) ? OptionalLong.of(1_000) : absent);
+      configuration.setExpireAfterWrite(config.get(1) ? OptionalLong.of(2_000) : absent);
+      configuration.setRefreshAfterWrite(config.get(2) ? OptionalLong.of(3_000) : absent);
+      configuration.setMaximumWeight(config.get(3) ? OptionalLong.of(4_000) : absent);
+      configuration.setMaximumSize(config.get(4) ? OptionalLong.of(5_000) : absent);
+      configuration.setWeigherFactory(config.get(5)
+          ? Optional.of(Weigher::singletonWeigher)
+          : Optional.empty());
+      configuration.setTickerFactory(config.get(6)
+          ? Ticker::systemTicker
+          : Ticker::disabledTicker);
+      configuration.setCopierFactory(config.get(7)
+          ? JavaSerializationCopier::new
+          : Copier::identity);
+      configuration.setExecutorFactory(config.get(8)
+          ? ForkJoinPool::commonPool
+          : () -> Runnable::run);
+      configuration.setSchedulerFactory(config.get(9)
+          ? Scheduler::systemScheduler
+          : Scheduler::disabledScheduler);
+      configuration.setNativeStatisticsEnabled(config.get(10));
+      configuration.setExpiryFactory(config.get(11)
+          ? Optional.of(() -> Expiry.creating((k, v) -> Duration.ZERO))
+          : Optional.empty());
+      tester.addEqualityGroup(config);
+      tester.addEqualityGroup(new CaffeineConfiguration<>(configuration));
+    }
+    tester.testEquals();
   }
 
   @Test
-  public void anonymousCache() {
-    checkConfiguration(() ->
-        cacheManager.createCache("cache-not-in-config-file", cacheConfig), 500L);
-    checkConfiguration(() ->
-        cacheManager.getCache("cache-not-in-config-file", String.class, String.class), 500L);
+  void anonymousCache() {
+    try (var fixture = JCacheFixture.builder().build()) {
+      var cacheConfig = new MutableConfiguration<String, String>()
+          .setTypes(String.class, String.class)
+          .setStatisticsEnabled(true);
+      checkConfiguration(fixture.cacheManager().createCache(
+          "cache-not-in-config-file", cacheConfig), 500L);
+      checkConfiguration(requireNonNull(fixture.cacheManager()
+          .getCache("cache-not-in-config-file", String.class, String.class)), 500L);
+    }
   }
 
   @Test
-  public void definedCache() {
-    assertThrows(CacheException.class, () ->
-        cacheManager.createCache("test-cache-2", cacheConfig));
-
-    checkConfiguration(() ->
-        cacheManager.getCache("test-cache-2", String.class, Integer.class), 1000L);
+  void definedCache() {
+    try (var fixture = JCacheFixture.builder().build()) {
+      var cacheConfig = new MutableConfiguration<String, String>()
+          .setTypes(String.class, String.class)
+          .setStatisticsEnabled(true);
+      assertThrows(CacheException.class, () ->
+          fixture.cacheManager().createCache("test-cache-2", cacheConfig));
+      checkConfiguration(requireNonNull(fixture.cacheManager()
+          .getCache("test-cache-2", String.class, Integer.class)), 1000L);
+    }
   }
 
-  private void checkConfiguration(Supplier<Cache<?, ?>> cacheSupplier, long expectedValue) {
-    Cache<?, ?> cache = cacheSupplier.get();
-
+  private static void checkConfiguration(Cache<?, ?> cache, long expectedValue) {
     @SuppressWarnings("unchecked")
     CaffeineConfiguration<?, ?> configuration =
         cache.getConfiguration(CaffeineConfiguration.class);

@@ -1,42 +1,65 @@
+@file:Suppress("UnstableApiUsage")
 import org.gradle.accessors.dm.LibrariesForLibs
 import org.gradle.api.Project
+import org.gradle.api.provider.ListProperty
+import org.gradle.api.provider.Provider
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+import org.gradle.jvm.toolchain.JvmVendorSpec
 import org.gradle.kotlin.dsl.the
 
 val Project.libs
   get() = the<LibrariesForLibs>()
 
-fun Project.version(major: Int, minor: Int, patch: Int, releaseBuild: Boolean) {
-  version = "$major.$minor.$patch" + if (releaseBuild) "" else "-SNAPSHOT"
-}
-
-fun Project.javaExecJvmArgs(): List<String> {
-  val arguments = findProperty("jvmArgs") as String?
-  val jvmArgs = mutableListOf("-Xmx4g")
-  if (arguments != null) {
-    jvmArgs.addAll(arguments.split(","))
+fun Project.defaultJvmArgs(): ListProperty<String> {
+  val jvmArgs = providers.gradleProperty("jvmArgs").map { it.split(",") }.orElse(emptyList())
+  val arguments = providers.zip(jvmArgs, isGraalVM()) { args, isGraalVM ->
+    buildList {
+      if (isGraalVM) {
+        add("-Djdk.graal.ShowConfiguration=info")
+        add("-XX:+UnlockExperimentalVMOptions")
+        add("-XX:+UseJVMCICompiler")
+        add("-XX:+EnableJVMCI")
+        add("-XX:+EagerJVMCI")
+      }
+      add("-Xmx4g")
+      addAll(args)
+    }
   }
-  return jvmArgs
+  return objects.listProperty(String::class.java).value(arguments)
 }
 
-fun caffeineSystemProperties(): Map<String, Any> {
-  return System.getProperties().stringPropertyNames()
-    .filter { it.startsWith("caffeine") }
-    .associateWith { System.getProperties().getProperty(it) }
-}
+fun Project.isEarlyAccess(): Provider<Boolean> =
+  providers.gradleProperty("earlyAccess").map { it == "true" }.orElse(false)
+fun Project.isLintEnabled(): Provider<Boolean> =
+  providers.gradleProperty("lint").map { it == "true" }.orElse(true)
+fun Project.isGraalVM(): Provider<Boolean> =
+  providers.gradleProperty("graalvm").map { it == "true" }.orElse(false)
+fun Project.isCI(): Provider<Boolean> =
+  providers.environmentVariable("CI").map { true }.orElse(false)
+fun Project.javaVersion(): Provider<JavaLanguageVersion> =
+  providers.gradleProperty("javaVersion")
+    .orElse(providers.environmentVariable("JAVA_VERSION"))
+    .map { it.toIntOrNull() }.orElse(11).map(JavaLanguageVersion::of)
+fun Project.javaRuntimeVersion(): Provider<JavaLanguageVersion> =
+  isGraalVM().zip(javaVersion()) { graalvm, version ->
+    if (graalvm) version else maxOf(version, JavaLanguageVersion.of(26))
+  }
+fun Project.javaTestVersion(): Provider<JavaLanguageVersion> =
+  javaVersion().flatMap {
+    providers.gradleProperty("javaTestVersion").map(JavaLanguageVersion::of).orElse(it)
+  }
+fun Project.javaDistribution(): Provider<String> =
+  providers.gradleProperty("javaDistribution")
+fun Project.javaVendor(): Provider<JvmVendorSpec> =
+  providers.gradleProperty("javaVendor").filter { it.isNotBlank() }.map(JvmVendorSpec::of)
 
-fun isCI(): Boolean {
-  return !System.getenv("CI").isNullOrEmpty()
+val DisableStrongEncapsulationJvmArgs = buildList {
+  listOf("api", "code", "file", "main", "parser", "processing", "tree", "util").forEach {
+    add("--add-exports")
+    add("jdk.compiler/com.sun.tools.javac.$it=ALL-UNNAMED")
+  }
+  listOf("code", "comp", "parser").forEach {
+    add("--add-opens")
+    add("jdk.compiler/com.sun.tools.javac.$it=ALL-UNNAMED")
+  }
 }
-
-val DisableStrongEncapsulationJvmArgs = listOf(
-  "--add-exports", "jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
-  "--add-exports", "jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED",
-  "--add-exports", "jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED",
-  "--add-exports", "jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED",
-  "--add-exports", "jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED",
-  "--add-exports", "jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED",
-  "--add-exports", "jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED",
-  "--add-exports", "jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED",
-  "--add-opens", "jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED",
-  "--add-opens", "jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED",
-  "--add-opens", "jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED")

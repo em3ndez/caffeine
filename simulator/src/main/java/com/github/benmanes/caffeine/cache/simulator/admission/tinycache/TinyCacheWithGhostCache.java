@@ -18,6 +18,7 @@ package com.github.benmanes.caffeine.cache.simulator.admission.tinycache;
 import java.util.Random;
 
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import com.google.errorprone.annotations.Var;
 
 /**
  * This is the TinyCache model that takes advantage of random eviction policy with a ghost cache as
@@ -59,17 +60,11 @@ public final class TinyCacheWithGhostCache {
     indexing.setChainStart(indexing.getChainStart() + offset);
     indexing.setChainEnd(indexing.getChainEnd() + offset);
 
-    // Gil : I think some of these tests are, I till carefully examine this function when I have
-    // time. As far as I understand it is working right now.
     while (indexing.getChainStart() <= indexing.getChainEnd()) {
-      try {
-        if (cache[indexing.getChainStart() % cache.length] == hashFunc.fpaux.value) {
-          return true;
-        }
-        indexing.setChainStart(indexing.getChainStart() + 1);
-      } catch (RuntimeException e) {
-        System.out.println("length: " + cache.length + " Access: " + indexing.getChainStart());
+      if (cache[indexing.getChainStart()] == hashFunc.fpaux.value) {
+        return true;
       }
+      indexing.setChainStart(indexing.getChainStart() + 1);
     }
     return false;
   }
@@ -91,7 +86,7 @@ public final class TinyCacheWithGhostCache {
     return removedOffset;
   }
 
-  public void recordItem(long item) {
+  public void recordItem() {
     if (ghostCache.countItem(hashFunc.fpaux.value) < sampleSize) {
       ghostCache.addItem(hashFunc.fpaux.value);
     }
@@ -108,6 +103,7 @@ public final class TinyCacheWithGhostCache {
     return false;
   }
 
+  @SuppressWarnings("Varifier")
   private boolean selectVictim(int bucketStart) {
     byte victimOffset = (byte) rnd.nextInt(itemsPerSet);
     int victimChain = indexing.getChainAtOffset(
@@ -121,18 +117,15 @@ public final class TinyCacheWithGhostCache {
       if (currItemScore > victimScore) {
         replace(hashFunc.fpaux, (byte) victimChain, bucketStart, victimOffset);
         return true;
-      } else {
-        return false;
       }
-    } else {
-      throw new RuntimeException("Failed to replace");
+      return false;
     }
+    throw new IllegalStateException("Failed to replace");
   }
 
-  @SuppressWarnings("PMD.LocalVariableNamingConventions")
-  private void replaceItems(int idx, long value, int start, int delta) {
+  private void replaceItems(int idx, @Var long value, @Var int start, int delta) {
+    @Var long entry;
     start += idx;
-    long entry;
     do {
       entry = cache[start];
       cache[start] = value;

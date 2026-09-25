@@ -1,62 +1,80 @@
-import com.google.common.collect.Sets
+@file:Suppress("UnstableApiUsage")
+import java.time.Year
+import java.time.ZoneId
+
 import de.thetaphi.forbiddenapis.gradle.CheckForbiddenApis
-import kotlin.math.max
 import net.ltgt.gradle.errorprone.errorprone
+import net.ltgt.gradle.nullaway.nullaway
 import org.gradle.api.tasks.PathSensitivity.RELATIVE
-import org.gradle.plugins.ide.eclipse.model.Classpath as EclipseClasspath
+import org.gradle.api.tasks.testing.logging.TestLogEvent.STARTED
+import org.gradle.kotlin.dsl.fray
+import org.gradle.kotlin.dsl.invoke
 import org.gradle.plugins.ide.eclipse.model.Library
+import org.gradle.plugins.ide.eclipse.model.SourceFolder
+import org.gradle.plugins.ide.eclipse.model.Classpath as EclipseClasspath
+import org.pastalab.fray.gradle.tasks.PrepareWorkspaceTask
 
 plugins {
-  id("java-library-caffeine-conventions")
-  id("jmh-caffeine-conventions")
+  id("org.pastalab.fray.gradle")
+  id("info.solidsoft.pitest")
+  id("java-library.caffeine")
+  id("java-test-fixtures")
+  id("jcstress.caffeine")
+  id("roseau.caffeine")
+  id("jmh.caffeine")
 }
 
 sourceSets {
-  create("javaPoet") {
+  register("javaPoet") {
     java.srcDir("src/javaPoet/java")
   }
-  create("codeGen") {
-    java.srcDir(layout.buildDirectory.dir("generated-sources/local"))
-    java.srcDir(layout.buildDirectory.dir("generated-sources/nodes"))
+  register("codeGen") {
+    java.srcDir(layout.buildDirectory.dir("generated/sources/node"))
+    java.srcDir(layout.buildDirectory.dir("generated/sources/local-cache"))
   }
 }
 
-val compileJavaPoetJava by tasks.existing
-val javaAgent: Configuration by configurations.creating
-val collections4Sources: Configuration by configurations.creating
-var javaPoetImplementation: Configuration = configurations["javaPoetImplementation"]
+val jar = tasks.named<Jar>("jar")
+val compileJava = tasks.named("compileJava")
+val compileJavaPoetJava = tasks.named("compileJavaPoetJava")
+val jammAgent = configurations.register("jammAgent")
+val collections4Sources = configurations.register("collections4Sources")
+val javaPoetImplementation = configurations.named("javaPoetImplementation")
+val javaPoetRuntimeOnly = configurations.named("javaPoetRuntimeOnly")
+val osgiBundleElements = configurations.register("osgiBundleElements") {
+  configureAsRuntimeOutgoing()
+}
+
+artifacts {
+  add(osgiBundleElements.name, jar)
+}
 
 dependencies {
-  api(libs.checker.annotations)
+  api(libs.jspecify)
   api(libs.errorprone.annotations)
 
-  testImplementation(libs.joor)
-  testImplementation(libs.ycsb) {
+  testFixturesApi(libs.truth)
+  testFixturesApi(libs.awaitility)
+  testFixturesApi(libs.junit.jupiter)
+  testFixturesApi(libs.guava.testlib)
+  testFixturesApi(libs.infer.annotations)
+  testFixturesApi(libs.bundles.slf4j.test)
+  testFixturesApi(libs.spotbugs.annotations)
+
+  testFixturesImplementation(libs.jctools)
+  testFixturesImplementation(libs.mockito)
+  testFixturesImplementation(libs.commons.lang3)
+  testFixturesImplementation(libs.junit.platform.launcher)
+
+  testImplementation(sourceSets.named("codeGen").map { it.output })
+
+  collections4Sources(libs.commons.collections4) {
+    artifact { classifier = "test-sources" }
+  }
+
+  jammAgent(libs.jamm) {
     isTransitive = false
   }
-  testImplementation(libs.jazzer)
-  testImplementation(libs.picocli)
-  testImplementation(libs.jctools)
-  testImplementation(libs.fastutil)
-  testImplementation(libs.lincheck)
-  testImplementation(libs.guava.testlib)
-  testImplementation(libs.commons.lang3)
-  testImplementation(libs.bundles.slf4j.test)
-  testImplementation(libs.commons.collections4)
-  testImplementation(libs.commons.collections4) {
-    artifact {
-      classifier = "tests"
-    }
-  }
-  collections4Sources(libs.commons.collections4) {
-    artifact {
-      classifier = "test-sources"
-    }
-  }
-  testImplementation(sourceSets["codeGen"].output)
-  testImplementation(libs.eclipse.collections.testutils)
-
-  javaAgent(libs.jamm)
 
   jmh(libs.jamm)
   jmh(libs.tcache)
@@ -64,245 +82,540 @@ dependencies {
   jmh(libs.ehcache3)
   jmh(libs.hazelcast)
   jmh(libs.jackrabbit)
-  jmh(libs.flip.tables)
+  jmh(libs.ascii.table)
   jmh(libs.expiring.map)
   jmh(libs.bundles.coherence)
+  jmh(libs.java.`object`.layout)
   jmh(libs.concurrentlinkedhashmap)
 
   javaPoetImplementation(libs.guava)
   javaPoetImplementation(libs.javapoet)
+  javaPoetImplementation(libs.jspecify)
   javaPoetImplementation(libs.commons.lang3)
-  javaPoetImplementation(libs.google.java.format)
+  javaPoetImplementation(libs.spotbugs.annotations)
+
+  javaPoetRuntimeOnly(libs.google.java.format)
+
+  pitest(libs.pitest)
+  pitest(libs.pitest.junit5)
 }
 
-val compileCodeGenJava by tasks.existing(JavaCompile::class) {
-  classpath = sourceSets["main"].runtimeClasspath + sourceSets["main"].output
-  dependsOn(tasks.compileJava)
-  options.isDebug = false
+configurations.configureEach {
+  resolutionStrategy {
+    if (java.toolchain.languageVersion.get().asInt() < 17) {
+      force("${libs.eclipse.collections.testutils.get().module}:12.0.0")
+      force("${libs.ehcache3.get().module}:3.11.1")
+    }
+  }
 }
 
-compileJavaPoetJava.configure {
-  finalizedBy(generateLocalCaches, generateNodes)
-}
-
-val generateLocalCaches by tasks.registering(JavaExec::class) {
-  mainClass = "com.github.benmanes.caffeine.cache.LocalCacheFactoryGenerator"
-  outputs.dir(layout.buildDirectory.dir("generated-sources/local"))
-    .withPropertyName("outputDir")
-  inputs.files(sourceSets["javaPoet"].output)
-    .withPropertyName("javaPoetOutput")
+val compileCodeGenJava = tasks.named<JavaCompile>("compileCodeGenJava") {
+  classpath = files(sourceSets.named("main").map { it.runtimeClasspath + it.output })
+  inputs.files(compileJava.map { it.outputs.files })
     .withPathSensitivity(RELATIVE)
-  classpath = sourceSets["javaPoet"].runtimeClasspath
-  args("build/generated-sources/local")
-  dependsOn(compileJavaPoetJava)
-  outputs.cacheIf { true }
+
+  options.apply {
+    compilerArgs.remove("-parameters")
+    isDebug = false
+
+    errorprone {
+      disable("FieldMissingNullable")
+      disable("MissingOverride")
+      disable("IdentifierName")
+      disable("Varifier")
+      disable("Var")
+      nullaway.disable()
+    }
+  }
 }
 
-val generateNodes by tasks.registering(JavaExec::class) {
-  mainClass = "com.github.benmanes.caffeine.cache.NodeFactoryGenerator"
-  outputs.dir(layout.buildDirectory.dir("generated-sources/nodes"))
-    .withPropertyName("outputDir")
-  inputs.files(sourceSets["javaPoet"].output)
-    .withPropertyName("javaPoetOutput")
+val generateLocalCaches = tasks.register<JavaExec>("generateLocalCaches") {
+  codeGenerationTask("LocalCache", "local-cache")
+}
+
+val generateNodes = tasks.register<JavaExec>("generateNodes") {
+  codeGenerationTask("Node", "node")
+}
+
+private fun JavaExec.codeGenerationTask(generator: String, directory: String) {
+  mainClass = "com.github.benmanes.caffeine.cache.${generator}FactoryGenerator"
+  val outputDir = layout.buildDirectory.dir("generated/sources/$directory")
+  classpath(sourceSets.named("javaPoet").map { it.runtimeClasspath })
+  argumentProviders.add(object : CommandLineArgumentProvider {
+    @get:Internal
+    val outputDirectory: Provider<Directory> = outputDir
+    override fun asArguments() = listOf(outputDirectory.get().asFile.absolutePath)
+  })
+  inputs.files(compileJavaPoetJava.map { it.outputs.files })
     .withPathSensitivity(RELATIVE)
-  classpath = sourceSets["javaPoet"].runtimeClasspath
-  args("build/generated-sources/nodes")
-  dependsOn(compileJavaPoetJava)
+  inputs.property("year", providers.provider { Year.now(ZoneId.of("America/Los_Angeles")) })
   outputs.cacheIf { true }
+  outputs.dir(outputDir)
 }
 
 tasks.named<JavaCompile>("compileJava").configure {
-  dependsOn(generateLocalCaches, generateNodes)
+  inputs.files(tasks.named<JavaExec>("generateLocalCaches").map { it.outputs.files })
+    .withPathSensitivity(RELATIVE)
+  inputs.files(tasks.named<JavaExec>("generateNodes").map { it.outputs.files })
+    .withPathSensitivity(RELATIVE)
   finalizedBy(compileCodeGenJava)
-  options.errorprone {
-    disable("CheckReturnValue")
+  options.apply {
+    compilerArgs.addAll(listOf("-Xlint:-auxiliaryclass", "-Xlint:-exports"))
   }
 }
 
 tasks.named<JavaCompile>("compileTestJava").configure {
-  dependsOn(tasks.jar, compileCodeGenJava)
+  inputs.files(compileCodeGenJava.map { it.outputs.files })
+    .withPathSensitivity(RELATIVE)
+  inputs.files(jar.map { it.outputs.files })
+    .withPathSensitivity(RELATIVE)
 }
 
-tasks.test.configure {
-  exclude("com/github/benmanes/caffeine/cache/**")
-  dependsOn(junitTest)
-
-  useTestNG {
-    threadCount = max(6, Runtime.getRuntime().availableProcessors() - 1)
-    jvmArgs("-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled")
-    excludeGroups("slow", "isolated", "lincheck")
-    parallel = "methods"
+tasks.withType<JavaCompile>().configureEach {
+  if (name.contains("Test") && name.contains("Java")) {
+    options.apply {
+      compilerArgs.add("-Xlint:-auxiliaryclass")
+    }
   }
 }
 
-tasks.register<Test>("isolatedTest") {
-  group = "Verification"
-  description = "Tests that must be run in isolation"
-  useTestNG {
-    includeGroups("isolated")
-    maxHeapSize = "3g"
+tasks.named<JavaCompile>("compileJmhJava").configure {
+  options.apply {
+    compilerArgs.add("-Xlint:-classfile")
   }
 }
 
-tasks.register<Test>("lincheckTest") {
-  group = "Verification"
-  description = "Tests that assert linearizability"
-  enabled = (System.getenv("JDK_EA") != "true")
-  useTestNG {
-    testLogging.events("started")
-    includeGroups("lincheck")
-    maxHeapSize = "3g"
-    failFast = true
+tasks.named<PrepareWorkspaceTask>("jlink").configure {
+  val frayJava = javaToolchains.launcherFor {
+    languageVersion = JavaLanguageVersion.of(25)
+    vendor = JvmVendorSpec.AMAZON
+  }
+  originalJdkPath = frayJava.map { it.metadata.installationPath.asFile.absolutePath }
+}
+
+fray.testTask = "frayTest"
+
+pitest {
+  fun fqcn(name: String) = "com.github.benmanes.caffeine.cache.$name"
+
+  // Scoped to self-contained data structure classes with focused standalone tests.
+  // BoundedLocalCache / UnboundedLocalCache are intentionally excluded because the
+  // @CacheSpec parameterized test suite makes PIT's main process OOM during coverage
+  // collection regardless of heap size.
+  targetClasses = setOf(fqcn("AbstractLinkedDeque"), fqcn("Async"), fqcn("BoundedBuffer"),
+    fqcn("Caffeine"), fqcn("CaffeineSpec"), fqcn("FrequencySketch"), fqcn("Interner"),
+    fqcn("MpscGrowableArrayQueue"), fqcn("Pacer"), fqcn("Scheduler"),
+    fqcn("StripedBuffer"), fqcn("TimerWheel"), fqcn("WindowClimber") + "*")
+  targetTests = setOf(fqcn("AsyncTest"), fqcn("BoundedBufferTest"),
+    fqcn("CaffeineSpecTest"), fqcn("CaffeineTest"), fqcn("FrequencySketchTest"),
+    fqcn("InternerTest"), fqcn("LinkedDequeTest"), fqcn("MpscGrowableArrayQueueTest"),
+    fqcn("PacerTest"), fqcn("SchedulerTest"), fqcn("StripedBufferTest"), fqcn("TimerWheelTest"),
+    fqcn("WindowClimberTest"))
+  threads = Runtime.getRuntime().availableProcessors()
+  junit5PluginVersion = libs.versions.pitest.junit5
+  pitestVersion = libs.versions.pitest.asProvider()
+  timestampedReports = false
+}
+
+testing.suites {
+  named<JvmTestSuite>("test") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(libs.ycsb) {
+        isTransitive = false
+      }
+      implementation(libs.guava)
+      implementation(libs.jazzer)
+      implementation(libs.testng)
+      implementation(libs.jctools)
+      implementation(libs.mockito)
+      implementation(libs.picocli)
+      implementation(libs.lincheck)
+      implementation(libs.awaitility)
+      implementation(libs.commons.lang3)
+      implementation(libs.guava.testlib)
+      implementation(libs.commons.collections4)
+      implementation(libs.commons.collections4) {
+        artifact { classifier = "tests" }
+      }
+      implementation.bundle(libs.bundles.slf4j.test)
+      implementation(libs.eclipse.collections.testutils)
+      implementation.bundle(libs.bundles.osgi.test.compile)
+
+      runtimeOnly.bundle(libs.bundles.osgi.test.runtime)
+    }
+    targets {
+      named("test") {
+        testTask.configure {
+          classpath = files(sourceSets.named("test").map { it.runtimeClasspath },
+            sourceSets.named("codeGen").map { it.runtimeClasspath })
+          testClassesDirs = files(sourceSets.named("test").map { it.output.classesDirs })
+          jvmArgs("-XX:+UseParallelGC", "--add-opens", "java.base/java.lang=ALL-UNNAMED")
+
+          val testOptions = listOf("implementation", "compute", "keys", "values", "stats")
+            .associateWith { providers.gradleProperty(it) }
+          inputs.properties(testOptions.filterValues { it.isPresent })
+          systemProperties(testOptions.mapValues { it.value.orNull })
+
+          val shardingOptions = mapOf(
+            "shardCount" to providers.gradleProperty("shardCount")
+              .map { it.toIntOrNull() }.getOrElse(1).coerceAtLeast(1),
+            "shardIndex" to providers.gradleProperty("shardIndex")
+              .map { it.toIntOrNull() }.getOrElse(0))
+          inputs.properties(shardingOptions)
+          systemProperties(shardingOptions)
+          useParallelJUnitJupiter()
+        }
+      }
+    }
+  }
+  register<JvmTestSuite>("apacheTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(testFixtures(project()))
+      implementation(libs.commons.collections4)
+      implementation(libs.commons.collections4) {
+        artifact { classifier = "tests" }
+      }
+    }
+    targets.configureEach {
+      testTask.configure {
+        useParallelJUnitJupiter()
+      }
+    }
+  }
+  register<JvmTestSuite>("eclipseTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(testFixtures(project()))
+      implementation(libs.eclipse.collections.testutils)
+    }
+    targets.configureEach {
+      testTask.configure {
+        useParallelJUnitJupiter()
+      }
+    }
+  }
+  register<JvmTestSuite>("frayTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(libs.fray.junit)
+      implementation(testFixtures(project()))
+    }
+    targets.configureEach {
+      testTask.configure {
+        incompatibleWithConfigurationCache()
+        maxParallelForks = Runtime.getRuntime().availableProcessors()
+        val isCompatibleJdk = java.toolchain.languageVersion.map { it.asInt() <= 25 }
+        onlyIf { isCompatibleJdk.get() }
+      }
+    }
+  }
+  register<JvmTestSuite>("fuzzTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(libs.truth)
+      implementation(libs.jazzer)
+      implementation(libs.mockito)
+      implementation(testFixtures(project()))
+      runtimeOnly.bundle(libs.bundles.slf4j.nop)
+    }
+    targets.configureEach {
+      testTask.configure {
+        maxParallelForks = Runtime.getRuntime().availableProcessors()
+        // https://github.com/CodeIntelligenceTesting/jazzer/issues/1035
+        if (java.toolchain.languageVersion.get().canCompileOrRun(25)) {
+          configure<JacocoTaskExtension> {
+            isEnabled = false
+          }
+        }
+        environment("JAZZER_FUZZ", "1")
+        failFast = true
+        forkEvery = 1
+      }
+    }
+  }
+  register<JvmTestSuite>("googleTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(libs.truth)
+      implementation(testFixtures(project()))
+
+      runtimeOnly(libs.junit.jupiter.vintage)
+    }
+    targets.configureEach {
+      testTask.configure {
+        useParallelJUnitJupiter()
+      }
+    }
+  }
+  register<JvmTestSuite>("moduleTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(libs.guava)
+      runtimeOnly.bundle(libs.bundles.slf4j.nop)
+    }
+    targets.configureEach {
+      testTask.configure {
+        useParallelJUnitJupiter()
+      }
+    }
+  }
+  register<JvmTestSuite>("jctoolsTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(libs.truth)
+      implementation(libs.jctools)
+      implementation(libs.spotbugs.annotations)
+
+      runtimeOnly(libs.junit.jupiter.vintage)
+      runtimeOnly.bundle(libs.bundles.slf4j.nop)
+    }
+    targets.configureEach {
+      testTask.configure {
+        useParallelJUnitJupiter()
+      }
+    }
+  }
+  register<JvmTestSuite>("jsr166Test") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(libs.junit)
+      implementation(libs.infer.annotations)
+      implementation(libs.spotbugs.annotations)
+
+      runtimeOnly(libs.junit.jupiter.vintage)
+      runtimeOnly.bundle(libs.bundles.slf4j.nop)
+    }
+    targets.configureEach {
+      testTask.configure {
+        useParallelJUnitJupiter()
+      }
+    }
+  }
+  register<JvmTestSuite>("lincheckTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(libs.lincheck)
+      runtimeOnly.bundle(libs.bundles.slf4j.nop)
+    }
+    targets.configureEach {
+      testTask.configure {
+        val isEnabled = isEarlyAccess().map { !it }
+        testLogging.events(STARTED)
+        onlyIf { isEnabled.get() }
+        useParallelJUnitJupiter()
+        maxHeapSize = "3g"
+        failFast = true
+
+        systemProperties(providers.systemPropertiesPrefixedBy("lincheck").get())
+        jvmArgs("-XX:+UseParallelGC")
+
+        // https://github.com/JetBrains/lincheck/issues/915
+        if (java.toolchain.languageVersion.get().canCompileOrRun(25)) {
+          jvmArgs("-XX:-UseCompactObjectHeaders")
+        }
+      }
+    }
+  }
+  register("openjdkTest", JvmTestSuite::class) {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(libs.truth)
+      implementation(libs.testng)
+      implementation(libs.infer.annotations)
+      implementation(libs.spotbugs.annotations)
+
+      runtimeOnly(libs.junit.jupiter.testng)
+      runtimeOnly.bundle(libs.bundles.slf4j.nop)
+    }
+    targets.configureEach {
+      testTask.configure {
+        useParallelJUnitJupiter()
+      }
+    }
+  }
+  register<JvmTestSuite>("osgiTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation.bundle(libs.bundles.osgi.test.compile)
+
+      runtimeOnly(libs.junit.jupiter.vintage)
+      runtimeOnly.bundle(libs.bundles.slf4j.nop)
+      runtimeOnly.bundle(libs.bundles.osgi.test.runtime)
+    }
+    targets.configureEach {
+      testTask.configure {
+        useParallelJUnitJupiter()
+        val relativeDir = projectDir
+        inputs.files(jar.map { it.outputs.files })
+          .withPathSensitivity(RELATIVE)
+        val jarPath = jar.flatMap { it.archiveFile }.relativePathFrom(relativeDir)
+        doFirst { systemProperty("caffeine.osgi.jar", jarPath.get()) }
+      }
+    }
   }
 }
 
-tasks.register<Test>("fuzzTest") {
-  group = "Verification"
-  description = "Fuzz tests"
-
-  forkEvery = 1
-  failFast = true
-  useJUnitPlatform()
-  testLogging.events("started")
-  environment("JAZZER_FUZZ", "1")
-  include("com/github/benmanes/caffeine/fuzz/**")
-}
-
-val junitTest = tasks.register<Test>("junitTest") {
-  group = "Verification"
-  description = "JUnit tests"
-
-  val jar by tasks.existing(Jar::class)
-  dependsOn(jar)
-
-  useJUnit()
-  failFast = true
-  maxHeapSize = "2g"
-  exclude("com/github/benmanes/caffeine/fuzz/**")
-  systemProperty("caffeine.osgi.jar", relativePath(jar.get().archiveFile.get().asFile.path))
-}
-
-tasks.jar {
-  from(sourceSets["main"].output + sourceSets["codeGen"].output)
-  dependsOn(compileCodeGenJava)
+tasks.named<Jar>("jar").configure {
+  from(sourceSets.named("main").map { it.output })
+  from(sourceSets.named("codeGen").map { it.output })
+  inputs.files(compileCodeGenJava.map { it.outputs.files })
+    .withPathSensitivity(RELATIVE)
   bundle.bnd(mapOf(
     "Bundle-SymbolicName" to "com.github.ben-manes.caffeine",
     "Import-Package" to "",
     "Export-Package" to listOf(
       "com.github.benmanes.caffeine",
       "com.github.benmanes.caffeine.cache",
-      "com.github.benmanes.caffeine.cache.stats").joinToString(","),
-    "Automatic-Module-Name" to "com.github.benmanes.caffeine"))
+      "com.github.benmanes.caffeine.cache.stats").joinToString(",")))
 }
 
 tasks.named<Jar>("sourcesJar").configure {
-  dependsOn(generateLocalCaches, generateNodes)
+  inputs.files(generateLocalCaches.map { it.outputs.files })
+    .withPathSensitivity(RELATIVE)
+  inputs.files(generateNodes.map { it.outputs.files })
+    .withPathSensitivity(RELATIVE)
+  from(sourceSets.named("codeGen").map { it.allSource })
 }
 
 tasks.named<Javadoc>("javadoc").configure {
   mustRunAfter(compileCodeGenJava)
 }
 
-val test by testing.suites.existing(JvmTestSuite::class)
-tasks.withType<Test>().configureEach {
-  classpath = files(test.map { it.sources.runtimeClasspath })
-    .plus(sourceSets["codeGen"].runtimeClasspath)
+tasks.named<Javadoc>("testFixturesJavadoc").configure {
+  javadocOptions {
+    addBooleanOption("Xdoclint:all,-missing", true)
+  }
 }
 
 tasks.named<CheckForbiddenApis>("forbiddenApisCodeGen").configure {
-  classpath = sourceSets["main"].output + sourceSets["codeGen"].output
-  bundledSignatures.addAll(listOf("jdk-deprecated", "jdk-internal",
-    "jdk-non-portable", "jdk-reflection", "jdk-system-out", "jdk-unsafe"))
+  classpath = files(
+    sourceSets.named("main").map { it.output },
+    sourceSets.named("codeGen").map { it.output })
 }
 
-tasks.named<CheckForbiddenApis>("forbiddenApisMain").configure {
-  bundledSignatures.addAll(listOf("jdk-deprecated-18", "jdk-internal",
-    "jdk-non-portable", "jdk-reflection", "jdk-system-out", "jdk-unsafe"))
-}
-
-tasks.named<CheckForbiddenApis>("forbiddenApisJavaPoet").configure {
-  bundledSignatures.addAll(listOf("jdk-deprecated", "jdk-internal",
-    "jdk-non-portable", "jdk-reflection", "jdk-system-out", "jdk-unsafe"))
-}
-
-tasks.named<CheckForbiddenApis>("forbiddenApisTest").configure {
-  bundledSignatures.add("jdk-deprecated-18")
-}
-
-tasks.named<CheckForbiddenApis>("forbiddenApisJmh").configure {
-  bundledSignatures.addAll(listOf("jdk-deprecated-18", "jdk-reflection"))
+tasks.withType<CheckForbiddenApis>().configureEach {
+  bundledSignatures.addAll(when (name) {
+    "forbiddenApisJavaPoet", "forbiddenApisJctoolsTest", "forbiddenApisJsr166Test" -> listOf(
+      "jdk-deprecated-18", "jdk-internal", "jdk-non-portable", "jdk-reflection", "jdk-unsafe")
+    "forbiddenApisOpenjdkTest", "forbiddenApisTestFixtures" -> listOf("jdk-deprecated-18",
+      "jdk-internal", "jdk-non-portable", "jdk-unsafe")
+    "forbiddenApisTest" -> listOf("jdk-deprecated-18", "jdk-internal", "jdk-non-portable")
+    "forbiddenApisJmh" -> listOf("jdk-deprecated-18", "jdk-reflection", "jdk-unsafe")
+    else -> listOf("jdk-deprecated-18", "jdk-internal", "jdk-non-portable",
+        "jdk-reflection", "jdk-system-out", "jdk-unsafe")
+  })
 }
 
 tasks.register<JavaExec>("memoryOverhead") {
   group = "Benchmarks"
   description = "Evaluates cache overhead"
   mainClass = "com.github.benmanes.caffeine.cache.MemoryBenchmark"
-  classpath(sourceSets["jmh"].runtimeClasspath + sourceSets["codeGen"].runtimeClasspath)
-  jvmArgs(
-    "--add-opens", "java.base/java.util.concurrent.atomic=ALL-UNNAMED",
-    "--add-opens", "java.base/java.util.concurrent.locks=ALL-UNNAMED",
-    "--add-opens", "java.base/java.util.concurrent=ALL-UNNAMED",
-    "--add-opens", "java.base/java.lang.ref=ALL-UNNAMED",
-    "--add-opens", "java.base/java.lang=ALL-UNNAMED",
-    "--add-opens", "java.base/java.util=ALL-UNNAMED",
-    "-javaagent:${configurations["javaAgent"].singleFile}")
+  systemProperties("jdk.attach.allowAttachSelf" to "true", "jol.tryWithSudo" to "true")
+  val javaAgent = jammAgent.map { it.asPath }
+  classpath(tasks.named("jmhJar"))
+  jvmArgumentProviders.add {
+    listOf(
+      "--add-opens", "java.base/java.util.concurrent.atomic=ALL-UNNAMED",
+      "--add-opens", "java.base/java.util.concurrent.locks=ALL-UNNAMED",
+      "--add-opens", "java.base/java.util.concurrent=ALL-UNNAMED",
+      "--add-opens", "java.base/java.lang.ref=ALL-UNNAMED",
+      "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+      "--add-opens", "java.base/java.util=ALL-UNNAMED",
+      "-Djdk.attach.allowAttachSelf=true",
+      "-XX:+EnableDynamicAgentLoading",
+      "-javaagent:${javaAgent.get()}",
+      "-XX:+UseCompactObjectHeaders",
+      "-Djol.magicFieldOffset=true")
+  }
 }
 
 tasks.register<Stress>("stress") {
-  group = "Cache tests"
+  group = "Verification"
   description = "Executes a stress test"
   mainClass = "com.github.benmanes.caffeine.cache.Stresser"
-  classpath = sourceSets["codeGen"].runtimeClasspath + sourceSets["test"].runtimeClasspath
+  inputs.files(tasks.named<JavaCompile>("compileTestJava").map { it.outputs.files })
+    .withPathSensitivity(RELATIVE)
+  classpath(
+    sourceSets.named("codeGen").map { it.runtimeClasspath },
+    sourceSets.named("test").map { it.runtimeClasspath })
   outputs.upToDateWhen { false }
-  dependsOn(tasks.compileTestJava)
+
+  // Use -Pjfr to generate a profile
+  if (providers.gradleProperty("jfr").isPresent) {
+    val jfr = layout.buildDirectory.file("jfr/stress.jfr")
+    jvmArgumentProviders.add {
+      val flags = listOf("filename=${jfr.get().asFile.absolutePath}", "settings=profile",
+        "jdk.Deoptimization#enabled=true", "jdk.ObjectAllocationSample#enabled=true",
+        "jdk.Compilation#enabled=true")
+      listOf("-XX:StartFlightRecording=${flags.joinToString(",")}")
+    }
+    doFirst {
+      jfr.get().asFile.parentFile.mkdirs()
+    }
+    doLast {
+      println("Java Flight Recording stored at: ${jfr.get().asFile}")
+    }
+  }
 }
 
-for (scenario in Scenario.all()) {
-  scenario.apply {
-    val task = tasks.register<Test>(testName()) {
-      group = "Parameterized Test"
-      description = "Runs tests with the given features."
+val javaComponent = components["java"] as AdhocComponentWithVariants
+javaComponent.withVariantsFromConfiguration(configurations.testFixturesApiElements.get()) {
+  skip()
+}
+javaComponent.withVariantsFromConfiguration(configurations.testFixturesRuntimeElements.get()) {
+  skip()
+}
 
-      enabled = (System.getenv("JITPACK") != "true")
-      include("com/github/benmanes/caffeine/cache/**")
+eclipse {
+  classpath {
+    plusConfigurations.add(configurations["javaPoetCompileClasspath"])
 
-      systemProperties(
-        "keys" to keys.name,
-        "stats" to stats.name,
-        "values" to values.name,
-        "compute" to compute.name,
-        "implementation" to implementation)
+    file.whenMerged {
+      if (this is EclipseClasspath) {
+        val collectionsRegex = ".*collections4.*-tests.jar".toRegex()
+        entries.filterIsInstance<Library>()
+          .filter { collectionsRegex.matches(it.path) }
+          .forEach {
+            it.sourcePath = fileReference(
+              file(collections4Sources.map { sources -> sources.singleFile }))
+          }
 
-      useTestNG {
-        if (slow == Slow.Enabled) {
-          maxParallelForks = 2
-          includeGroups.add("slow")
-          jvmArgs("-XX:+UseParallelGC")
-        } else {
-          parallel = "methods"
-          excludeGroups("slow", "isolated", "lincheck")
-          jvmArgs("-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled")
-          threadCount = max(6, Runtime.getRuntime().availableProcessors() - 1)
-        }
+        val testRegex = "src/(.*Test|testFixtures)/(java|resources)".toRegex()
+        entries.filterIsInstance<SourceFolder>()
+          .filter { testRegex.matches(it.path) }
+          .forEach {
+            it.entryAttributes["test"] = "true"
+            it.entryAttributes["module"] = "false"
+          }
       }
     }
-    tasks.test.configure {
-      dependsOn(task)
-    }
   }
-}
-
-eclipse.classpath {
-  plusConfigurations.add(configurations["javaPoetCompileClasspath"])
-
-  file.whenMerged {
-    if (this is EclipseClasspath) {
-      val regex = ".*collections4.*-tests.jar".toRegex()
-      entries.filterIsInstance<Library>()
-        .filter { regex.matches(it.path) }
-        .forEach { it.sourcePath = fileReference(file(collections4Sources.asPath)) }
-    }
-  }
+  synchronizationTasks(generateLocalCaches, generateNodes)
 }
 
 idea.module {
@@ -310,70 +623,26 @@ idea.module {
 }
 
 abstract class Stress : JavaExec() {
-  @Input @Option(option = "workload", description = "The workload type")
-  var operation: String = ""
+  @get:Input
+  @get:Option(option = "workload", description = "The workload type")
+  abstract val operation: Property<String>
 
-  @TaskAction
-  override fun exec() {
-    if (operation.isNotEmpty()) {
-      args("--workload", operation)
-    } else {
-      args("--help")
+  @get:Input
+  @get:Option(option = "duration", description = "The run duration (e.g. PT30S)")
+  abstract val duration: Property<String>
+
+  init {
+    operation.convention("")
+    duration.convention("")
+    argumentProviders.add {
+      buildList {
+        if (operation.get().isNotEmpty()) {
+          addAll(listOf("--workload", operation.get()))
+        }
+        if (duration.get().isNotEmpty()) {
+          addAll(listOf("--duration", duration.get()))
+        }
+      }
     }
-    super.exec()
   }
 }
-
-data class Scenario(val implementation: Implementation,
-                    val keys: KeyStrength, val values: ValueStrength,
-                    val stats: Stats, val compute: Compute, val slow: Slow) {
-  companion object {
-    fun all(): List<Scenario> {
-      return Sets.cartesianProduct(
-        Slow.values().toSet(),
-        Stats.values().toSet(),
-        Compute.values().toSet(),
-        KeyStrength.values().toSet(),
-        ValueStrength.values().toSet(),
-        Implementation.values().toSet(),
-      ).map { features ->
-        Scenario(
-          slow = features[0] as Slow,
-          stats = features[1] as Stats,
-          compute = features[2] as Compute,
-          keys = features[3] as KeyStrength,
-          values = features[4] as ValueStrength,
-          implementation = features[5] as Implementation)
-      }.filter { it.isValid() }
-    }
-  }
-
-  fun testName(): String = buildString {
-    append(keys.name.lowercase() + "Keys")
-    append("And").append(values).append("Values")
-    if (stats == Stats.Enabled) {
-      append("Stats")
-    }
-    append(compute)
-    append(implementation)
-    if (slow == Slow.Enabled) {
-      append("Slow")
-    }
-    append("Test")
-  }
-
-  fun isValid(): Boolean {
-    val guavaIncompatible = (implementation == Implementation.Guava) && (compute == Compute.Async)
-    val asyncIncompatible = (compute == Compute.Async) && (values != ValueStrength.Strong)
-    val noSlowTests = (slow == Slow.Enabled)
-      && (keys == KeyStrength.Strong) && (values == ValueStrength.Strong)
-    return !guavaIncompatible && !asyncIncompatible && !noSlowTests
-  }
-}
-
-enum class Implementation { Caffeine, Guava }
-enum class ValueStrength { Strong, Weak, Soft }
-enum class KeyStrength { Strong, Weak }
-enum class Stats { Enabled, Disabled }
-enum class Slow { Enabled, Disabled }
-enum class Compute { Async, Sync }

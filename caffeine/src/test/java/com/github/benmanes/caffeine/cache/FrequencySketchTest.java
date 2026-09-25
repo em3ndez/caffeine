@@ -16,23 +16,27 @@
 package com.github.benmanes.caffeine.cache;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.util.Arrays;
 import java.util.concurrent.ThreadLocalRandom;
 
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+
+import com.google.errorprone.annotations.Var;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @SuppressWarnings("ClassEscapesDefinedScope")
-public final class FrequencySketchTest {
-  final Integer item = ThreadLocalRandom.current().nextInt();
+final class FrequencySketchTest {
+  private final Integer item = ThreadLocalRandom.current().nextInt();
 
   @Test
-  public void construct() {
-    var sketch = new FrequencySketch<Integer>();
+  void construct() {
+    var sketch = new FrequencySketch();
     assertThat(sketch.table).isNull();
     assertThat(sketch.isNotInitialized()).isTrue();
 
@@ -40,54 +44,159 @@ public final class FrequencySketchTest {
     assertThat(sketch.frequency(item)).isEqualTo(0);
   }
 
-  @Test(dataProvider = "sketch")
-  public void ensureCapacity_negative(FrequencySketch<Integer> sketch) {
+  @Test
+  void ensureCapacity_negative() {
+    var sketch = makeSketch(512);
     assertThrows(IllegalArgumentException.class, () -> sketch.ensureCapacity(-1));
   }
 
-  @Test(dataProvider = "sketch")
-  public void ensureCapacity_smaller(FrequencySketch<Integer> sketch) {
+  @Test
+  void ensureCapacity_smaller() {
+    var sketch = makeSketch(512);
     int size = sketch.table.length;
     sketch.ensureCapacity(size / 2);
     assertThat(sketch.table).hasLength(size);
-    assertThat(sketch.sampleSize).isEqualTo(10 * size);
+    assertThat(sketch.sampleSize).isEqualTo(10 * size / 2);
     assertThat(sketch.blockMask).isEqualTo((size >> 3) - 1);
   }
 
-  @Test(dataProvider = "sketch")
-  public void ensureCapacity_larger(FrequencySketch<Integer> sketch) {
+  @Test
+  void ensureCapacity_shrink_resetReachable() {
+    var sketch = makeSketch(1_024);
+    sketch.size = 5_000;
+
+    // The table is retained but the aging period tracks the new maximum, with the observed
+    // count clamped so that the equality reset test remains reachable
+    sketch.ensureCapacity(256);
+    assertThat(sketch.table).hasLength(1_024);
+    assertThat(sketch.sampleSize).isEqualTo(2_560);
+    assertThat(sketch.size).isEqualTo(2_559);
+
+    // the next observed addition reaches the sample threshold and triggers the aging cycle
+    sketch.increment(item);
+    assertThat(sketch.size).isEqualTo(1_279);
+  }
+
+  @Test
+  void ensureCapacity_shrink_denseTable_agesOnSchedule() {
+    var sketch = makeSketch(1_024);
+    Arrays.fill(sketch.table, FrequencySketch.ONE_MASK);
+    sketch.size = 5_000;
+
+    sketch.ensureCapacity(256);
+    assertThat(sketch.size).isEqualTo(2_559);
+
+    // The retained table's counter mass is denominated in the old maximum and outweighs the
+    // observations the reset corrects against it. An underflow here stalls aging for as many
+    // additions as it went negative by, restoring the old size's cadence that the retrack removes.
+    sketch.increment(item);
+    assertThat(sketch.size).isEqualTo(0);
+    assertThat(sketch.frequency(item)).isEqualTo(1);
+  }
+
+  @Test
+  void ensureCapacity_repeatedRetrack_resetReachable() {
+    var sketch = makeSketch(1_024);
+    for (int i = 0; i < 15; i++) {
+      sketch.increment(item);
+    }
+    assertThat(sketch.frequency(item)).isEqualTo(15);
+
+    // A weighted cache retracks on every addition as its entry count wobbles, so a repeated
+    // clamp must not discard the aging progress and starve the periodic reset
+    for (int i = 0; i < 15_000; i++) {
+      sketch.increment(i);
+      sketch.ensureCapacity(1_024 - (i & 1));
+    }
+    assertThat(sketch.frequency(item)).isLessThan(15);
+  }
+
+  @Test
+  void ensureCapacity_retrack_keepsAgingProgress() {
+    var sketch = makeSketch(1_024);
+    for (int i = 0; i < 15; i++) {
+      sketch.increment(item);
+    }
+    int size = sketch.size;
+
+    // a retrack may only clamp the observed count to keep the reset reachable, never advance it
+    // towards the sample threshold, else a weighted cache's per-addition retracks age the sketch
+    // on nearly every increment and admission degrades towards random
+    sketch.ensureCapacity(512);
+    assertThat(sketch.sampleSize).isEqualTo(5_120);
+    assertThat(sketch.size).isEqualTo(size);
+    assertThat(sketch.frequency(item)).isEqualTo(15);
+  }
+
+  @Test
+  void ensureCapacity_larger() {
+    var sketch = makeSketch(512);
     int size = sketch.table.length;
-    sketch.ensureCapacity(2 * size);
+    sketch.ensureCapacity(2L * size);
     assertThat(sketch.table).hasLength(2 * size);
     assertThat(sketch.sampleSize).isEqualTo(10 * 2 * size);
     assertThat(sketch.blockMask).isEqualTo(((2 * size) >> 3) - 1);
   }
 
-  @Test(dataProvider = "sketch", groups = "isolated")
-  public void ensureCapacity_maximum(FrequencySketch<Integer> sketch) {
-    int size = Integer.MAX_VALUE / 10 + 1;
-    sketch.ensureCapacity(size);
-    assertThat(sketch.sampleSize).isEqualTo(Integer.MAX_VALUE);
-    assertThat(sketch.table).hasLength(Caffeine.ceilingPowerOfTwo(size));
-    assertThat(sketch.blockMask).isEqualTo((sketch.table.length >> 3) - 1);
+  @Nested @Isolated
+  final class IsolatedTest {
+
+    @Test
+    void ensureCapacity_maximum() {
+      var sketch = makeSketch(512);
+      int size = Integer.MAX_VALUE / 10 + 1;
+      sketch.ensureCapacity(size);
+      assertThat(sketch.sampleSize).isEqualTo(Integer.MAX_VALUE);
+      assertThat(sketch.table).hasLength(Caffeine.ceilingPowerOfTwo(size));
+      assertThat(sketch.blockMask).isEqualTo((sketch.table.length >> 3) - 1);
+    }
   }
 
-  @Test(dataProvider = "sketch")
-  public void increment_once(FrequencySketch<Integer> sketch) {
+  @Test
+  void ensureCapacity_exactMatch() {
+    var sketch = makeSketch(512);
+    int size = sketch.table.length;
+    long[] table = sketch.table;
+    sketch.ensureCapacity(size);
+    assertThat(sketch.table).isSameInstanceAs(table);
+  }
+
+  @Test
+  void spread_knownValues() {
+    assertThat(FrequencySketch.spread(0)).isEqualTo(0);
+    assertThat(FrequencySketch.spread(1)).isNotEqualTo(1);
+    assertThat(FrequencySketch.spread(Integer.MAX_VALUE))
+        .isNotEqualTo(FrequencySketch.spread(Integer.MAX_VALUE - 1));
+  }
+
+  @Test
+  void incrementAt_saturated_returnsFalse() {
+    var sketch = makeSketch(512);
+    for (int i = 0; i < 15; i++) {
+      assertThat(sketch.incrementAt(0, 0)).isTrue();
+    }
+    assertThat(sketch.incrementAt(0, 0)).isFalse();
+  }
+
+  @Test
+  void increment_once() {
+    var sketch = makeSketch(512);
     sketch.increment(item);
     assertThat(sketch.frequency(item)).isEqualTo(1);
   }
 
-  @Test(dataProvider = "sketch")
-  public void increment_max(FrequencySketch<Integer> sketch) {
+  @Test
+  void increment_max() {
+    var sketch = makeSketch(512);
     for (int i = 0; i < 20; i++) {
       sketch.increment(item);
     }
     assertThat(sketch.frequency(item)).isEqualTo(15);
   }
 
-  @Test(dataProvider = "sketch")
-  public void increment_distinct(FrequencySketch<Integer> sketch) {
+  @Test
+  void increment_distinct() {
+    var sketch = makeSketch(512);
     sketch.increment(item);
     sketch.increment(item + 1);
     assertThat(sketch.frequency(item)).isEqualTo(1);
@@ -95,16 +204,17 @@ public final class FrequencySketchTest {
     assertThat(sketch.frequency(item + 2)).isEqualTo(0);
   }
 
-  @Test(dataProvider = "sketch")
-  public void increment_zero(FrequencySketch<Integer> sketch) {
+  @Test
+  void increment_zero() {
+    var sketch = makeSketch(512);
     sketch.increment(0);
     assertThat(sketch.frequency(0)).isEqualTo(1);
   }
 
   @Test
-  public void reset() {
-    boolean reset = false;
-    var sketch = new FrequencySketch<Integer>();
+  void reset() {
+    @Var boolean reset = false;
+    var sketch = new FrequencySketch();
     sketch.ensureCapacity(64);
 
     for (int i = 1; i < 20 * sketch.table.length; i++) {
@@ -119,25 +229,25 @@ public final class FrequencySketchTest {
   }
 
   @Test
-  public void full() {
-    FrequencySketch<Integer> sketch = makeSketch(512);
+  void full() {
+    FrequencySketch sketch = makeSketch(512);
     sketch.sampleSize = Integer.MAX_VALUE;
     for (int i = 0; i < 100_000; i++) {
       sketch.increment(i);
     }
-    for (long item : sketch.table) {
-      assertThat(Long.bitCount(item)).isEqualTo(64);
+    for (long slot : sketch.table) {
+      assertThat(Long.bitCount(slot)).isEqualTo(64);
     }
 
     sketch.reset();
-    for (long item : sketch.table) {
-      assertThat(item).isEqualTo(FrequencySketch.RESET_MASK);
+    for (long slot : sketch.table) {
+      assertThat(slot).isEqualTo(FrequencySketch.RESET_MASK);
     }
   }
 
   @Test
-  public void heavyHitters() {
-    FrequencySketch<Double> sketch = makeSketch(512);
+  void heavyHitters() {
+    FrequencySketch sketch = makeSketch(512);
     for (int i = 100; i < 100_000; i++) {
       sketch.increment((double) i);
     }
@@ -165,13 +275,8 @@ public final class FrequencySketchTest {
     }
   }
 
-  @DataProvider(name = "sketch")
-  public Object[][] providesSketch() {
-    return new Object[][] {{ makeSketch(512) }};
-  }
-
-  private static <E> FrequencySketch<E> makeSketch(long maximumSize) {
-    var sketch = new FrequencySketch<E>();
+  private static FrequencySketch makeSketch(long maximumSize) {
+    var sketch = new FrequencySketch();
     sketch.ensureCapacity(maximumSize);
     return sketch;
   }

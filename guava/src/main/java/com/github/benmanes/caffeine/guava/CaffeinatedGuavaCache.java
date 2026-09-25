@@ -21,15 +21,19 @@ import java.io.Serializable;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Set;
+import java.util.Spliterator;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheLoader.InvalidCacheLoadException;
@@ -38,9 +42,9 @@ import com.google.common.collect.ForwardingCollection;
 import com.google.common.collect.ForwardingConcurrentMap;
 import com.google.common.collect.ForwardingSet;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.ExecutionError;
 import com.google.common.util.concurrent.UncheckedExecutionException;
-import com.google.errorprone.annotations.CanIgnoreReturnValue;
 
 /**
  * A Caffeine-backed cache through a Guava facade.
@@ -51,23 +55,23 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
 class CaffeinatedGuavaCache<K, V> implements Cache<K, V>, Serializable {
   private static final long serialVersionUID = 1L;
 
-  private final com.github.benmanes.caffeine.cache.Cache<K, V> cache;
   private transient @Nullable ConcurrentMap<K, V> mapView;
+  final com.github.benmanes.caffeine.cache.Cache<K, V> cache;
 
   CaffeinatedGuavaCache(com.github.benmanes.caffeine.cache.Cache<K, V> cache) {
     this.cache = requireNonNull(cache);
   }
 
-  @Override @Nullable
-  public V getIfPresent(Object key) {
+  @Override
+  public @Nullable V getIfPresent(Object key) {
     @SuppressWarnings("unchecked")
-    K castedKey = (K) key;
+    var castedKey = (K) key;
     return cache.getIfPresent(castedKey);
   }
 
   @Override
-  @SuppressWarnings({"NullAway", "PMD.ExceptionAsFlowControl", "PMD.PreserveStackTrace"})
-  public V get(K key, Callable<? extends V> valueLoader) throws ExecutionException {
+  @SuppressWarnings({"PMD.ExceptionAsFlowControl", "PMD.PreserveStackTrace"})
+  public V get(K key, Callable<? extends @Nullable V> valueLoader) throws ExecutionException {
     requireNonNull(valueLoader);
     try {
       return cache.get(key, k -> {
@@ -99,7 +103,7 @@ class CaffeinatedGuavaCache<K, V> implements Cache<K, V>, Serializable {
   public ImmutableMap<K, V> getAllPresent(Iterable<?> keys) {
     @SuppressWarnings("unchecked")
     var castedKeys = (Iterable<? extends K>) keys;
-    return ImmutableMap.copyOf(cache.getAllPresent(castedKeys));
+    return ImmutableMap.copyOf(cache.getAllPresent(Iterables.filter(castedKeys, Objects::nonNull)));
   }
 
   @Override
@@ -115,7 +119,7 @@ class CaffeinatedGuavaCache<K, V> implements Cache<K, V>, Serializable {
   @Override
   public void invalidate(Object key) {
     @SuppressWarnings("unchecked")
-    K castedKey = (K) key;
+    var castedKey = (K) key;
     cache.invalidate(castedKey);
   }
 
@@ -123,7 +127,7 @@ class CaffeinatedGuavaCache<K, V> implements Cache<K, V>, Serializable {
   public void invalidateAll(Iterable<?> keys) {
     @SuppressWarnings("unchecked")
     var castedKeys = (Iterable<? extends K>) keys;
-    cache.invalidateAll(castedKeys);
+    cache.invalidateAll(Iterables.filter(castedKeys, Objects::nonNull));
   }
 
   @Override
@@ -145,7 +149,8 @@ class CaffeinatedGuavaCache<K, V> implements Cache<K, V>, Serializable {
 
   @Override
   public ConcurrentMap<K, V> asMap() {
-    return (mapView == null) ? (mapView = new AsMapView()) : mapView;
+    var mv = mapView;
+    return (mv == null) ? (mapView = new AsMapView()) : mv;
   }
 
   @Override
@@ -164,32 +169,52 @@ class CaffeinatedGuavaCache<K, V> implements Cache<K, V>, Serializable {
     @Override public boolean containsValue(@Nullable Object value) {
       return (value != null) && delegate().containsValue(value);
     }
+    @Override public @Nullable V get(@Nullable Object key) {
+      return (key == null) ? null : delegate().get(key);
+    }
+    @Override public @Nullable V remove(@Nullable Object key) {
+      return (key == null) ? null : delegate().remove(key);
+    }
+    @Override public boolean remove(@Nullable Object key, @Nullable Object value) {
+      return (key != null) && (value != null) && delegate().remove(key, value);
+    }
+    @Override public boolean replace(K key, @Nullable V oldValue, V newValue) {
+      requireNonNull(key);
+      requireNonNull(newValue);
+      return (oldValue != null) && delegate().replace(key, oldValue, newValue);
+    }
     @Override public void replaceAll(BiFunction<? super K, ? super V, ? extends V> function) {
       delegate().replaceAll(function);
     }
     @Override public V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction) {
       return delegate().computeIfAbsent(key, mappingFunction);
     }
-    @Override public V computeIfPresent(K key,
-        BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+    @Override public @Nullable V computeIfPresent(K key,
+        BiFunction<? super K, ? super V, ? extends @Nullable V> remappingFunction) {
       return delegate().computeIfPresent(key, remappingFunction);
     }
-    @Override public V compute(K key,
-        BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+    @Override public @Nullable V compute(K key,
+        BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction) {
       return delegate().compute(key, remappingFunction);
     }
-    @Override public V merge(K key, V value,
-        BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+    @Override public @Nullable V merge(K key, V value,
+        BiFunction<? super V, ? super V, ? extends @Nullable V> remappingFunction) {
       return delegate().merge(key, value, remappingFunction);
     }
+    @Override public void forEach(BiConsumer<? super K, ? super V> action) {
+      delegate().forEach(action);
+    }
     @Override public Set<K> keySet() {
-      return (keySet == null) ? (keySet = new KeySetView()) : keySet;
+      var ks = keySet;
+      return (ks == null) ? (keySet = new KeySetView()) : ks;
     }
     @Override public Collection<V> values() {
-      return (values == null) ? (values = new ValuesView()) : values;
+      var vs = values;
+      return (vs == null) ? (values = new ValuesView()) : vs;
     }
     @Override public Set<Entry<K, V>> entrySet() {
-      return (entrySet == null) ? (entrySet = new EntrySetView()) : entrySet;
+      var es = entrySet;
+      return (es == null) ? (entrySet = new EntrySetView()) : es;
     }
     @Override protected ConcurrentMap<K, V> delegate() {
       return cache.asMap();
@@ -197,12 +222,20 @@ class CaffeinatedGuavaCache<K, V> implements Cache<K, V>, Serializable {
   }
 
   final class KeySetView extends ForwardingSet<K> {
+    @Override public boolean contains(@Nullable Object o) {
+      return (o != null) && delegate().contains(o);
+    }
+    @Override public boolean remove(@Nullable Object o) {
+      return (o != null) && delegate().remove(o);
+    }
     @Override public boolean removeIf(Predicate<? super K> filter) {
       return delegate().removeIf(filter);
     }
-    @SuppressWarnings("NullAway")
-    @Override public boolean remove(Object o) {
-      return (o != null) && delegate().remove(o);
+    @Override public void forEach(Consumer<? super K> action) {
+      delegate().forEach(action);
+    }
+    @Override public Spliterator<K> spliterator() {
+      return delegate().spliterator();
     }
     @Override protected Set<K> delegate() {
       return cache.asMap().keySet();
@@ -210,27 +243,45 @@ class CaffeinatedGuavaCache<K, V> implements Cache<K, V>, Serializable {
   }
 
   final class ValuesView extends ForwardingCollection<V> {
-    @Override public boolean removeIf(Predicate<? super V> filter) {
-      return delegate().removeIf(filter);
+    @Override public boolean contains(@Nullable Object o) {
+      return (o != null) && delegate().contains(o);
     }
     @Override public boolean remove(@Nullable Object o) {
       return (o != null) && delegate().remove(o);
+    }
+    @Override public boolean removeIf(Predicate<? super V> filter) {
+      return delegate().removeIf(filter);
+    }
+    @Override public void forEach(Consumer<? super V> action) {
+      delegate().forEach(action);
+    }
+    @Override public Spliterator<V> spliterator() {
+      return delegate().spliterator();
     }
     @Override protected Collection<V> delegate() {
       return cache.asMap().values();
     }
   }
 
+  @SuppressWarnings("NullableProblems")
   final class EntrySetView extends ForwardingSet<Entry<K, V>> {
-    @SuppressWarnings("NullAway")
     @Override public boolean add(Entry<K, V> entry) {
       throw new UnsupportedOperationException();
     }
-    @Override public boolean addAll(Collection<? extends Entry<K, V>> entry) {
+    @Override public boolean addAll(Collection<? extends Entry<K, V>> entries) {
+      if (entries.isEmpty()) {
+        return false;
+      }
       throw new UnsupportedOperationException();
     }
     @Override public boolean removeIf(Predicate<? super Entry<K, V>> filter) {
       return delegate().removeIf(filter);
+    }
+    @Override public void forEach(Consumer<? super Entry<K, V>> action) {
+      delegate().forEach(action);
+    }
+    @Override public Spliterator<Entry<K, V>> spliterator() {
+      return delegate().spliterator();
     }
     @Override protected Set<Entry<K, V>> delegate() {
       return cache.asMap().entrySet();
@@ -240,15 +291,8 @@ class CaffeinatedGuavaCache<K, V> implements Cache<K, V>, Serializable {
   static final class CacheLoaderException extends RuntimeException {
     private static final long serialVersionUID = 1L;
 
-    CacheLoaderException(Exception e) {
-      super(e);
-    }
-
-    @CanIgnoreReturnValue
-    @SuppressWarnings({"NonSynchronizedMethodOverridesSynchronizedMethod",
-        "UnsynchronizedOverridesSynchronized"})
-    @Override public Throwable fillInStackTrace() {
-      return this;
+    CacheLoaderException(Throwable cause) {
+      super(null, cause, /* enableSuppression= */ false, /* writableStackTrace= */ false);
     }
   }
 }

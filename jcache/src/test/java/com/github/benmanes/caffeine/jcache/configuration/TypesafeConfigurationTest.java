@@ -15,27 +15,41 @@
  */
 package com.github.benmanes.caffeine.jcache.configuration;
 
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.nullRef;
 import static com.github.benmanes.caffeine.jcache.configuration.TypesafeConfigurator.configSource;
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
+import static java.util.Objects.requireNonNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
-import javax.cache.Cache;
-import javax.cache.Caching;
+import javax.cache.CacheException;
+import javax.cache.configuration.CompleteConfiguration;
+import javax.cache.configuration.Factory;
+import javax.cache.configuration.FactoryBuilder;
 import javax.cache.expiry.Duration;
+import javax.cache.expiry.EternalExpiryPolicy;
 import javax.cache.expiry.ExpiryPolicy;
 
-import org.testng.SkipException;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
+import com.github.benmanes.caffeine.jcache.JCacheFixture;
+import com.github.benmanes.caffeine.jcache.configuration.TypesafeConfigurator.Configurator;
 import com.github.benmanes.caffeine.jcache.copy.JavaSerializationCopier;
 import com.google.common.collect.Iterables;
 import com.typesafe.config.Config;
@@ -45,42 +59,49 @@ import com.typesafe.config.ConfigFactory;
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class TypesafeConfigurationTest {
-  final ClassLoader classloader = Thread.currentThread().getContextClassLoader();
-  final ConfigSource defaultConfigSource = configSource();
+final class TypesafeConfigurationTest {
+  static final ConfigSource defaultConfigSource = configSource();
 
-  @BeforeMethod
-  public void before() {
+  @AfterEach
+  void afterEach() {
     TypesafeConfigurator.setConfigSource(defaultConfigSource);
+    TypesafeConfigurator.setFactoryCreator(FactoryBuilder::factoryOf);
   }
 
   @Test
-  public void setConfigSource_supplier() {
-    TypesafeConfigurator.setConfigSource(() -> null);
+  void setConfigSource_supplier() {
+    Config config = Mockito.mock();
+    TypesafeConfigurator.setConfigSource(() -> config);
+    assertThat(configSource()).isNotSameInstanceAs(defaultConfigSource);
+    assertThat(configSource().get(Mockito.mock(), Mockito.mock())).isSameInstanceAs(config);
+
+    Supplier<Config> supplier = nullRef();
+    assertThrows(NullPointerException.class, () -> TypesafeConfigurator.setConfigSource(supplier));
+  }
+
+  @Test
+  void setConfigSource_function() {
+    Config config = nullRef();
+    TypesafeConfigurator.setConfigSource((uri, loader) -> config);
     assertThat(configSource()).isNotSameInstanceAs(defaultConfigSource);
 
-    assertThrows(NullPointerException.class, () ->
-        TypesafeConfigurator.setConfigSource((Supplier<Config>) null));
+    ConfigSource source = nullRef();
+    assertThrows(NullPointerException.class, () -> TypesafeConfigurator.setConfigSource(source));
   }
 
   @Test
-  public void setConfigSource_function() {
-    TypesafeConfigurator.setConfigSource((uri, classloader) -> null);
-    assertThat(configSource()).isNotSameInstanceAs(defaultConfigSource);
-
-    assertThrows(NullPointerException.class, () ->
-        TypesafeConfigurator.setConfigSource((ConfigSource) null));
+  void configSource_null() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
+    assertThrows(NullPointerException.class, () -> configSource().get(nullRef(), nullRef()));
+    assertThrows(NullPointerException.class, () -> configSource().get(nullRef(), classloader));
+    assertThrows(NullPointerException.class, () -> configSource().get(URI.create(""), nullRef()));
   }
 
   @Test
-  public void configSource_null() {
-    assertThrows(NullPointerException.class, () -> configSource().get(null, null));
-    assertThrows(NullPointerException.class, () -> configSource().get(null, classloader));
-    assertThrows(NullPointerException.class, () -> configSource().get(URI.create(""), null));
-  }
-
-  @Test
-  public void configSource_load() {
+  void configSource_load() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
+    assertThat(configSource().get(URI.create(getClass().getSimpleName()), classloader))
+        .isSameInstanceAs(ConfigFactory.load());
     assertThat(configSource().get(URI.create(getClass().getName()), classloader))
         .isSameInstanceAs(ConfigFactory.load());
     assertThat(configSource().get(URI.create("rmi:/abc"), classloader))
@@ -90,7 +111,8 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void configSource_jar_present() {
+  void configSource_jar_present() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
     var inferred = configSource().get(URI.create("extra.properties"), classloader);
     assertThat(inferred.getInt("caffeine.jcache.jar.policy.maximum.size")).isEqualTo(500);
     assertThat(inferred.hasPath("caffeine.jcache.default.key-type")).isTrue();
@@ -103,7 +125,8 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void configSource_jar_absent() {
+  void configSource_jar_absent() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
     assertThrows(ConfigException.IO.class, () ->
         configSource().get(URI.create("extra-absent.conf"), classloader));
 
@@ -114,7 +137,8 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void configSource_jar_invalid() {
+  void configSource_jar_invalid() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
     assertThrows(ConfigException.Parse.class, () ->
         configSource().get(URI.create("extra-invalid.conf"), classloader));
 
@@ -126,7 +150,8 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void configSource_classpath_present() {
+  void configSource_classpath_present() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
     var inferred = configSource().get(URI.create("custom.properties"), classloader);
     assertThat(inferred.getInt("caffeine.jcache.classpath.policy.maximum.size")).isEqualTo(500);
     assertThat(inferred.hasPath("caffeine.jcache.default.key-type")).isTrue();
@@ -139,7 +164,8 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void configSource_classpath_absent() {
+  void configSource_classpath_absent() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
     assertThrows(ConfigException.IO.class, () ->
         configSource().get(URI.create("absent.conf"), classloader));
     assertThrows(ConfigException.IO.class, () ->
@@ -149,7 +175,8 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void configSource_classpath_invalid() {
+  void configSource_classpath_invalid() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
     assertThrows(ConfigException.Parse.class, () ->
         configSource().get(URI.create("invalid.conf"), classloader));
     assertThrows(ConfigException.Parse.class, () ->
@@ -157,28 +184,55 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void configSource_file() throws URISyntaxException {
-    var config = configSource().get(
-        getClass().getResource("/custom.properties").toURI(), classloader);
+  void configSource_file() throws URISyntaxException {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
+    var resource = requireNonNull(getClass().getResource("/custom.properties"));
+    var config = configSource().get(resource.toURI(), classloader);
     assertThat(config.getInt("caffeine.jcache.classpath.policy.maximum.size")).isEqualTo(500);
     assertThat(config.hasPath("caffeine.jcache.default.key-type")).isTrue();
     assertThat(config.hasPath("caffeine.jcache.test-cache")).isFalse();
   }
 
   @Test
-  public void configSource_file_absent() {
+  void configSource_substitution() throws URISyntaxException {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
+    var classpath = configSource().get(
+        URI.create("classpath:custom-substitution.conf"), classloader);
+    assertThat(classpath.getInt("caffeine.jcache.substitution.policy.maximum.size"))
+        .isEqualTo(1000);
+
+    var file = requireNonNull(getClass().getResource("/custom-substitution.conf")).toURI();
+    var config = configSource().get(file, classloader);
+    assertThat(config.getInt("caffeine.jcache.substitution.policy.maximum.size")).isEqualTo(1000);
+  }
+
+  @Test
+  void configSource_file_absent() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
     assertThrows(ConfigException.IO.class, () ->
         configSource().get(URI.create("file:/absent.conf"), classloader));
   }
 
   @Test
-  public void configSource_file_invalid() {
+  void configSource_file_invalid() {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
     assertThrows(ConfigException.IO.class, () ->
         configSource().get(URI.create("file:/invalid.conf"), classloader));
   }
 
   @Test
-  public void defaults() {
+  void configSource_file_notAbsolute_throwsConfigException() {
+    // a non-absolute file: URI makes `new File(uri)` throw IllegalArgumentException, which must
+    // surface as a ConfigException (like the jar: branch's MalformedURLException) rather than
+    // escaping uncaught from getCache/createCache far from its actual cause
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
+    var error = assertThrows(ConfigException.BadPath.class, () ->
+        configSource().get(URI.create("file:relative.conf"), classloader));
+    assertThat(error).hasCauseThat().isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void defaults() {
     CaffeineConfiguration<Integer, Integer> defaults =
         TypesafeConfigurator.defaults(ConfigFactory.load());
     assertThat(defaults.getKeyType()).isEqualTo(Object.class);
@@ -188,27 +242,137 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void cacheNames() {
-    assertThat(TypesafeConfigurator.cacheNames(ConfigFactory.empty())).isEmpty();;
+  void cacheNames() {
+    assertThat(TypesafeConfigurator.cacheNames(ConfigFactory.empty())).isEmpty();
 
     var names = TypesafeConfigurator.cacheNames(ConfigFactory.load());
-    assertThat(names).containsExactly("default", "listeners", "osgi-cache",
-        "invalid-cache", "test-cache", "test-cache-2", "guice");
+    assertThat(names).containsExactly("osgi-cache", "invalid-cache", "derived-cache",
+        "test-cache", "test-cache-2", "test-cache-3", "test-cache-4", "guice");
   }
 
   @Test
-  public void illegalPath() {
+  void from_dottedCacheName() {
+    // a cache name is an opaque identifier, so a dotted name is a single quoted key rather than a
+    // nested path; otherwise cacheNames() enumerates a cache that from() cannot resolve
+    var config = ConfigFactory.parseString(
+        "caffeine.jcache { \"com.example.Foo\" { policy.maximum.size = 123 } }")
+        .withFallback(ConfigFactory.load());
+
+    assertThat(TypesafeConfigurator.cacheNames(config)).contains("com.example.Foo");
+
+    var cacheConfig = TypesafeConfigurator.from(config, "com.example.Foo");
+    assertThat(cacheConfig).isPresent();
+    assertThat(cacheConfig.orElseThrow().getMaximumSize()).hasValue(123);
+  }
+
+  @Test
+  void from_malformedListenerPath_throwsCacheException() {
+    // a malformed setting fails the cache's configuration rather than hiding the cache
+    var config = ConfigFactory.parseString(
+        "caffeine.jcache { malformed { listeners = [\"a..b\"] } }")
+        .withFallback(ConfigFactory.load());
+
+    var error = assertThrows(CacheException.class,
+        () -> TypesafeConfigurator.from(config, "malformed"));
+    assertThat(error).hasCauseThat().isInstanceOf(ConfigException.BadPath.class);
+  }
+
+  @Test
+  void from_negativeDuration_throwsConfigException() {
+    // new Duration(...) throws IllegalArgumentException for a negative amount, which must
+    // surface as a ConfigException like other malformed settings rather than an unadapted IAE
+    var config = ConfigFactory.parseString(
+        "caffeine.jcache { negative-duration { policy.lazy-expiration.creation = -5s } }")
+        .withFallback(ConfigFactory.load());
+
+    var error = assertThrows(CacheException.class,
+        () -> TypesafeConfigurator.from(config, "negative-duration"));
+    assertThat(error).hasCauseThat().isInstanceOf(ConfigException.BadValue.class);
+  }
+
+  @Test
+  void from_maximumSizeAndWeight_throwsIllegalArgument() {
+    // maximum.size and maximum.weight are mutually exclusive; the prior behavior deferred this
+    // to Caffeine's builder at getCache time, surfacing an unhelpful ISE with no cache name.
+    // Consistent with the sibling maximumWeight-without-weigher case, this is not wrapped in
+    // CacheException.
+    var config = ConfigFactory.parseString(
+        "caffeine.jcache { conflicting { policy.maximum { size = 10, weight = 20 } } }")
+        .withFallback(ConfigFactory.load());
+
+    var error = assertThrows(IllegalArgumentException.class,
+        () -> TypesafeConfigurator.from(config, "conflicting"));
+    assertThat(error).hasMessageThat().contains("conflicting");
+  }
+
+  @Test
+  void isSet_customized_null() {
+    Config root = Mockito.mock();
+    Config merged = Mockito.mock();
+    Config customized = Mockito.mock();
+    when(merged.hasPath(anyString())).thenReturn(true);
+    when(customized.withFallback(any())).thenReturn(merged);
+    when(customized.getIsNull(anyString())).thenReturn(true);
+    when(customized.hasPathOrNull(anyString())).thenReturn(true);
+    when(root.getConfig(anyString())).thenReturn(customized);
+
+    var configurator = new Configurator<>(root, "cache");
+    configurator.addExecutor();
+    verify(customized).hasPathOrNull(anyString());
+  }
+
+  @Test
+  void illegalPath() {
     assertThat(TypesafeConfigurator.from(ConfigFactory.load(), "#")).isEmpty();
   }
 
   @Test
-  public void invalidCache() {
+  void invalidCache() {
     assertThrows(IllegalStateException.class, () ->
         TypesafeConfigurator.from(ConfigFactory.load(), "invalid-cache"));
   }
 
   @Test
-  public void testCache() {
+  void resolvesTypesViaContextClassLoader() {
+    Config config = ConfigFactory.load();
+    var original = requireNonNull(Thread.currentThread().getContextClassLoader());
+    var recording = new RecordingClassLoader(original);
+    Thread.currentThread().setContextClassLoader(recording);
+    try {
+      var configuration = TypesafeConfigurator.from(config, "test-cache").orElseThrow();
+      assertThat(recording.loaded).contains(configuration.getKeyType().getName());
+      assertThat(recording.loaded).contains(configuration.getValueType().getName());
+    } finally {
+      Thread.currentThread().setContextClassLoader(original);
+    }
+  }
+
+  @Test
+  void resolvesTypesWithNullContextClassLoader() {
+    // A null thread-context classloader (e.g. under the bootstrap loader) falls back to the loader
+    // that defined the configurator, so the key and value types still resolve.
+    Config config = ConfigFactory.load();
+    var original = requireNonNull(Thread.currentThread().getContextClassLoader());
+    Thread.currentThread().setContextClassLoader(null);
+    try {
+      var configuration = TypesafeConfigurator.from(config, "test-cache").orElseThrow();
+      assertThat(configuration.getKeyType()).isEqualTo(Object.class);
+      assertThat(configuration.getValueType()).isEqualTo(Object.class);
+    } finally {
+      Thread.currentThread().setContextClassLoader(original);
+    }
+  }
+
+  @Test
+  void from_userTemplate_composesViaSubstitution() {
+    CaffeineConfiguration<String, Integer> cache = TypesafeConfigurator
+        .<String, Integer>from(ConfigFactory.load(), "derived-cache").orElseThrow();
+    assertThat(cache.getMaximumSize()).hasValue(1234);
+    assertThat(cache.getKeyType()).isEqualTo(String.class);
+  }
+
+  @Test
+  void cache1() {
     Optional<CaffeineConfiguration<Integer, Integer>> config =
         TypesafeConfigurator.from(ConfigFactory.load(), "test-cache");
     assertThat(config).isEqualTo(
@@ -217,7 +381,7 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void testCache2() {
+  void cache2() {
     Optional<CaffeineConfiguration<Integer, Integer>> config1 =
         TypesafeConfigurator.from(ConfigFactory.load(), "test-cache");
     Optional<CaffeineConfiguration<Integer, Integer>> config2 =
@@ -235,30 +399,76 @@ public final class TypesafeConfigurationTest {
   }
 
   @Test
-  public void getCache() {
-    Cache<Integer, Integer> cache = Caching.getCachingProvider()
-        .getCacheManager().getCache("test-cache");
-    assertThat(cache).isNotNull();
+  void cache3() {
+    Optional<CaffeineConfiguration<Integer, Integer>> config3 =
+        TypesafeConfigurator.from(ConfigFactory.load(), "test-cache-3");
 
-    @SuppressWarnings("unchecked")
-    CaffeineConfiguration<Integer, Integer> config =
-        cache.getConfiguration(CaffeineConfiguration.class);
-    checkTestCache(config);
+    var config = config3.orElseThrow();
+    assertThat(config.getKeyType()).isAssignableTo(String.class);
+    assertThat(config.getValueType()).isAssignableTo(Integer.class);
+    assertThat(config.getCacheEntryListenerConfigurations()).hasSize(1);
+    assertThat(config.getExpiryPolicyFactory().create()).isInstanceOf(EternalExpiryPolicy.class);
   }
 
-  private URI getJarResource(String resourceName) {
+  @Test
+  void cache4() {
+    Optional<CaffeineConfiguration<Integer, Integer>> config4 =
+        TypesafeConfigurator.from(ConfigFactory.load(), "test-cache-4");
+
+    var config = config4.orElseThrow();
+    var expiry = config.getExpiryPolicyFactory().create();
+    assertThat(expiry.getExpiryForCreation()).isEqualTo(Duration.ETERNAL);
+    assertThat(expiry.getExpiryForUpdate()).isEqualTo(Duration.FIVE_MINUTES);
+    assertThat(expiry.getExpiryForAccess()).isEqualTo(Duration.TEN_MINUTES);
+  }
+
+  @Test
+  void variableExpiry_usesFactoryCreator() {
+    var calls = new ArrayList<String>();
+    TypesafeConfigurator.setFactoryCreator(new FactoryCreator() {
+      @Override public <T> Factory<T> factoryOf(String className) {
+        calls.add(className);
+        return FactoryBuilder.factoryOf(className);
+      }
+    });
+    var config = TypesafeConfigurator.from(ConfigFactory.load(), "test-cache-2").orElseThrow();
+    assertThat(config.getExpiryFactory().orElseThrow().create()).isInstanceOf(TestExpiry.class);
+    assertThat(calls).contains(TestExpiry.class.getName());
+  }
+
+  @Test
+  void weigher_usesFactoryCreator() {
+    var calls = new ArrayList<String>();
+    TypesafeConfigurator.setFactoryCreator(new FactoryCreator() {
+      @Override public <T> Factory<T> factoryOf(String className) {
+        calls.add(className);
+        return FactoryBuilder.factoryOf(className);
+      }
+    });
+    var config = TypesafeConfigurator.from(ConfigFactory.load(), "test-cache").orElseThrow();
+    assertThat(config.getWeigherFactory().orElseThrow().create()).isInstanceOf(TestWeigher.class);
+    assertThat(calls).contains(TestWeigher.class.getName());
+  }
+
+  @Test
+  void getCache() {
+    try (var fixture = JCacheFixture.builder().build();
+         var cache = requireNonNull(fixture.cacheManager().getCache("test-cache"))) {
+      @SuppressWarnings("unchecked")
+      var config = cache.getConfiguration(CaffeineConfiguration.class);
+      checkTestCache(config);
+    }
+  }
+
+  private static URI getJarResource(String resourceName) {
+    var classloader = requireNonNull(Thread.currentThread().getContextClassLoader());
     var url = classloader.getResource(resourceName);
     assertThat(url).isNotNull();
 
-    try {
-      var uri = url.toURI();
-      if (!Objects.equals(uri.getScheme(), "jar")) {
-        throw new SkipException("This test must be run through the build system");
-      }
-      return uri;
-    } catch (URISyntaxException e) {
-      throw new AssertionError(e);
-    }
+    var uri = URI.create(url.toString());
+    assumeTrue(Objects.equals(uri.getScheme(), "jar"),
+        "This test must be run through the build system");
+    return uri;
   }
 
   static void checkTestCache(CaffeineConfiguration<?, ?> config) {
@@ -269,8 +479,9 @@ public final class TypesafeConfigurationTest {
     assertThat(config.getValueType()).isEqualTo(Object.class);
     assertThat(config.getExecutorFactory().create()).isInstanceOf(TestExecutor.class);
     assertThat(config.getSchedulerFactory().create()).isInstanceOf(TestScheduler.class);
-    assertThat(config.getCacheLoaderFactory().create()).isInstanceOf(TestCacheLoader.class);
     assertThat(config.getCacheWriter()).isInstanceOf(TestCacheWriter.class);
+    assertThat(requireNonNull(config.getCacheLoaderFactory()).create())
+        .isInstanceOf(TestCacheLoader.class);
     assertThat(config.isNativeStatisticsEnabled()).isTrue();
     assertThat(config.isStatisticsEnabled()).isTrue();
     assertThat(config.isManagementEnabled()).isTrue();
@@ -286,8 +497,9 @@ public final class TypesafeConfigurationTest {
     assertThat(config.getCopierFactory().create()).isInstanceOf(JavaSerializationCopier.class);
   }
 
-  static void checkListener(CaffeineConfiguration<?, ?> config) {
-    var listener = Iterables.getOnlyElement(config.getCacheEntryListenerConfigurations());
+  static void checkListener(CompleteConfiguration<?, ?> config) {
+    var listener = requireNonNull(Iterables.getOnlyElement(
+        config.getCacheEntryListenerConfigurations()));
     assertThat(listener.getCacheEntryListenerFactory().create())
         .isInstanceOf(TestCacheEntryListener.class);
     assertThat(listener.getCacheEntryEventFilterFactory().create())
@@ -296,7 +508,7 @@ public final class TypesafeConfigurationTest {
     assertThat(listener.isOldValueRequired()).isTrue();
   }
 
-  static void checkLazyExpiration(CaffeineConfiguration<?, ?> config) {
+  static void checkLazyExpiration(CompleteConfiguration<?, ?> config) {
     ExpiryPolicy expiry = config.getExpiryPolicyFactory().create();
     assertThat(expiry.getExpiryForCreation()).isEqualTo(Duration.ONE_MINUTE);
     assertThat(expiry.getExpiryForUpdate()).isEqualTo(Duration.FIVE_MINUTES);
@@ -316,5 +528,50 @@ public final class TypesafeConfigurationTest {
     assertThat(config.getMaximumSize()).isEmpty();
     assertThat(config.getMaximumWeight()).hasValue(1_000L);
     assertThat(config.getWeigherFactory().orElseThrow().create()).isInstanceOf(TestWeigher.class);
+  }
+
+  /** A classloader that records the names it is asked to load, delegating resolution to its parent. */
+  private static final class RecordingClassLoader extends ClassLoader {
+    final List<String> loaded = new ArrayList<>();
+
+    RecordingClassLoader(ClassLoader parent) {
+      super(parent);
+    }
+    @Override protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+      loaded.add(name);
+      return super.loadClass(name, resolve);
+    }
+  }
+
+  @Test
+  void from_malformedSetting() {
+    // A parser-typed failure would escape createCache/getCache uncaught, so it is reported as the
+    // specification's configuration failure type instead
+    var config = ConfigFactory
+        .parseString("caffeine.jcache.malformed.policy.maximum.size = abc")
+        .withFallback(ConfigFactory.load());
+
+    var error = assertThrows(CacheException.class,
+        () -> TypesafeConfigurator.from(config, "malformed"));
+    assertThat(error).hasCauseThat().isInstanceOf(ConfigException.class);
+    assertThat(error).hasMessageThat().contains("malformed");
+  }
+
+  @Test
+  void defaults_malformedSetting() {
+    var config = ConfigFactory
+        .parseString("caffeine.jcache.default.policy.maximum.size = abc")
+        .withFallback(ConfigFactory.load());
+
+    var error = assertThrows(CacheException.class, () -> TypesafeConfigurator.defaults(config));
+    assertThat(error).hasCauseThat().isInstanceOf(ConfigException.class);
+  }
+
+  @Test
+  void cacheNames_malformed() {
+    var config = ConfigFactory.parseString("caffeine.jcache = 1");
+
+    var error = assertThrows(CacheException.class, () -> TypesafeConfigurator.cacheNames(config));
+    assertThat(error).hasCauseThat().isInstanceOf(ConfigException.class);
   }
 }

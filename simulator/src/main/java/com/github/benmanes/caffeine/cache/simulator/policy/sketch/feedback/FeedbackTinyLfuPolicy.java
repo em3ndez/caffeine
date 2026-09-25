@@ -16,11 +16,16 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.sketch.feedback;
 
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
 
 import java.util.Map;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
-import com.github.benmanes.caffeine.cache.simulator.admission.TinyLfu;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admission;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admitter;
+import com.github.benmanes.caffeine.cache.simulator.admission.clairvoyant.Clairvoyant;
 import com.github.benmanes.caffeine.cache.simulator.membership.Membership;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
@@ -46,7 +51,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
   private final Long2ObjectMap<Node> data;
   private final PolicyStats policyStats;
-  private final TinyLfu admittor;
+  private final Admitter admitter;
   private final int maximumSize;
   private final Node head;
 
@@ -63,15 +68,18 @@ public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
 
   public FeedbackTinyLfuPolicy(Config config) {
     this.policyStats = new PolicyStats(name());
-    FeedbackTinyLfuSettings settings = new FeedbackTinyLfuSettings(config);
+    var settings = new FeedbackTinyLfuSettings(config);
     this.maximumSize = Math.toIntExact(settings.maximumSize());
-    this.admittor = new TinyLfu(settings.config(), policyStats);
+    this.admitter = Admission.TINYLFU.from(settings.config(), policyStats);
     this.data = new Long2ObjectOpenHashMap<>();
     this.head = new Node();
 
     maxGain = Math.min(15, settings.maximumInsertionGain());
     sampleSize = Math.min(settings.maximumSampleSize(), maximumSize);
     feedback = settings.membership().filter().create(settings.filterConfig(sampleSize));
+    checkState(sampleSize >= 2, "maximum size %s is too small for a feedback sample", maximumSize);
+    checkState(!(admitter instanceof Clairvoyant), "%s raises the frequency of an arrival by "
+        + "recording it repeatedly, so it cannot use the clairvoyant sketch", name());
   }
 
   @Override
@@ -89,9 +97,9 @@ public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
     }
     sample++;
 
-    admittor.record(key);
+    admitter.record(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
+    var node = data.get(key);
     if (node == null) {
       onMiss(key);
       policyStats.recordMiss();
@@ -104,10 +112,10 @@ public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
   /** Adds the entry, evicting if necessary. */
   private void onMiss(long key) {
     for (int i = 0; i < gain; i++) {
-      admittor.record(key);
+      admitter.record(key);
     }
 
-    Node node = new Node(key);
+    var node = new Node(key);
     node.appendToTail(head);
     data.put(key, node);
     evict(node);
@@ -125,8 +133,8 @@ public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
   private void evict(Node candidate) {
     if (data.size() > maximumSize) {
       Node evict;
-      Node victim = head.next;
-      if (admittor.admit(candidate.key, victim.key)) {
+      Node victim = requireNonNull(head.next);
+      if (admitter.admit(candidate.key, victim.key)) {
         evict = victim;
       } else if (adapt(candidate)) {
         evict = victim;
@@ -148,22 +156,16 @@ public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
     }
 
     if (feedback.mightContain(candidate.key)) {
-      if (sampled >= (adjusted + gain)) {
-        adjusted = sampled;
-
+      if ((sampled >= (adjusted + gain)) && (gain < maxGain)) {
         // Increase arrival emphasis
-        if (gain < maxGain) {
-          gain++;
-        }
+        adjusted = sampled;
+        gain++;
       }
       return true;
-    } else if (sampled > (adjusted + gain + 1)) {
-      adjusted = sampled;
-
+    } else if ((sampled > (adjusted + gain + 1)) && (gain > 0)) {
       // Decrease arrival emphasis
-      if (gain > 0) {
-        gain--;
-      }
+      adjusted = sampled;
+      gain--;
     }
     return false;
   }
@@ -180,8 +182,8 @@ public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
   static final class Node {
     final long key;
 
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
 
     /** Creates a new sentinel node. */
     public Node() {
@@ -202,6 +204,7 @@ public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void appendToTail(Node head) {
+      requireNonNull(head.prev);
       Node tail = head.prev;
       head.prev = this;
       tail.next = this;
@@ -211,6 +214,9 @@ public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       prev.next = next;
       next.prev = prev;
       next = prev = null;
@@ -238,10 +244,11 @@ public final class FeedbackTinyLfuPolicy implements KeyOnlyPolicy {
       return config().getDouble("feedback-tiny-lfu.adaptive-fpp");
     }
     public Config filterConfig(int sampleSize) {
-      Map<String, Object> properties = Map.of(
-          "membership.fpp", adaptiveFpp(),
-          "maximum-size", sampleSize);
-      return ConfigFactory.parseMap(properties).withFallback(config());
+      return ConfigFactory
+          .parseMap(Map.of(
+              "membership.fpp", adaptiveFpp(),
+              "maximum-size", sampleSize))
+          .withFallback(config());
     }
   }
 }

@@ -1,4 +1,5 @@
 import com.github.benmanes.gradle.versions.updates.DependencyUpdatesTask
+import com.github.benmanes.gradle.versions.updates.resolutionstrategy.ComponentSelectionWithCurrent
 
 buildscript {
   dependencies {
@@ -13,36 +14,42 @@ buildscript {
 
 plugins {
   `kotlin-dsl`
-  alias(libs.plugins.versions)
+  alias(libs.plugins.dependency.analysis)
 }
 
-java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
 
 dependencies {
-  implementation(libs.bnd)
-  implementation(libs.idea)
-  implementation(libs.guava)
-  implementation(libs.sonarqube)
-  implementation(libs.bundles.jmh)
+  implementation(libs.jmh)
   implementation(libs.bundles.pmd)
-  implementation(libs.nexus.publish)
-  implementation(libs.forbidden.apis)
-  implementation(libs.nullaway.plugin)
-  implementation(libs.spotbugs.plugin)
-  implementation(libs.dependency.check)
-  implementation(libs.errorprone.plugin)
-  implementation(libs.dependency.versions)
-  implementation(libs.jvm.dependency.conflict.resolution)
-  implementation(libs.coveralls) {
-    exclude(group = "net.sourceforge.nekohtml", module = "nekohtml")
-  }
+
+  implementation(plugin(libs.plugins.bnd))
+  implementation(plugin(libs.plugins.fray))
+  implementation(plugin(libs.plugins.idea))
+  implementation(plugin(libs.plugins.pitest))
+  implementation(plugin(libs.plugins.nullaway))
+  implementation(plugin(libs.plugins.sigstore))
+  implementation(plugin(libs.plugins.spotbugs))
+  implementation(plugin(libs.plugins.versions))
+  implementation(plugin(libs.plugins.coveralls))
+  implementation(plugin(libs.plugins.sonarqube))
+  implementation(plugin(libs.plugins.jmh.report))
+  implementation(plugin(libs.plugins.errorprone))
+  implementation(plugin(libs.plugins.forbidden.apis))
+  implementation(plugin(libs.plugins.dependency.check))
+  implementation(plugin(libs.plugins.jmh.asProvider()))
+  implementation(plugin(libs.plugins.nmcp.asProvider()))
+  implementation(plugin(libs.plugins.dependency.analysis))
+  implementation(plugin(libs.plugins.jvm.dependency.conflict.resolution))
 
   implementation(platform(libs.asm.bom))
+  implementation(platform(libs.grpc.bom))
   implementation(platform(libs.okio.bom))
-  implementation(platform(libs.junit5.bom))
+  implementation(platform(libs.slf4j.bom))
   implementation(platform(libs.kotlin.bom))
   implementation(platform(libs.okhttp.bom))
   implementation(platform(libs.jackson.bom))
+  implementation(platform(libs.junit.jupiter.bom))
   implementation(files(libs.javaClass.superclass.protectionDomain.codeSource.location))
 
   libs.bundles.constraints.get().forEach { library ->
@@ -51,26 +58,38 @@ dependencies {
   }
 }
 
-tasks.withType<DependencyUpdatesTask> {
+tasks.named<Jar>("jar").configure {
+  outputs.cacheIf { true }
+}
+
+tasks.named<DependencyUpdatesTask>("dependencyUpdates").configure {
   checkBuildEnvironmentConstraints = true
+  checkEmbeddedKotlin = true
   checkConstraints = true
   resolutionStrategy {
     componentSelection {
-      val ignoredGroups = listOf("org.jetbrains.kotlin", "org.gradle.kotlin.kotlin-dsl")
-      val stable = setOf("com.fasterxml.jackson", "com.squareup.okhttp3")
-      val isNonStable = "^[0-9,.v-]+(-r)?$".toRegex()
-      all {
+      val ignoredGroups = listOf("com.beust", "org.apache.logging.log4j",
+        "org.jetbrains", "org.jetbrains.kotlin", "org.gradle.kotlin.kotlin-dsl")
+      val stable = setOf("com.fasterxml.jackson", "com.google.protobuf",
+        "com.squareup.okhttp3", "org.apache.httpcomponents.client5", "org.slf4j")
+      val isStable = "^[0-9,.v-]+(-r)?$".toRegex()
+      all(Action<ComponentSelectionWithCurrent> {
         if ((candidate.group in ignoredGroups) && (candidate.version != currentVersion)) {
-          reject("kotlin dsl")
-        } else if ((candidate.group in stable) && !isNonStable.matches(candidate.version)) {
+          reject("Internal dependency")
+        } else if ((candidate.group in stable) && !isStable.matches(candidate.version)) {
           reject("Release candidate")
         }
-      }
+      })
     }
   }
 }
 
-fun setProjectEncoding() {
+private fun plugin(plugin: Provider<PluginDependency>): Provider<String> {
+  // https://docs.gradle.org/current/userguide/plugins.html#sec:plugin_markers
+  return plugin.map { "${it.pluginId}:${it.pluginId}.gradle.plugin:${it.version}" }
+}
+
+private fun setProjectEncoding() {
   val prefs = file(".settings/org.eclipse.core.resources.prefs")
   if (!prefs.exists()) {
     prefs.parentFile.mkdirs()
@@ -81,4 +100,6 @@ fun setProjectEncoding() {
   }
 }
 
-setProjectEncoding()
+if (!providers.environmentVariable("CI").isPresent) {
+  setProjectEncoding()
+}

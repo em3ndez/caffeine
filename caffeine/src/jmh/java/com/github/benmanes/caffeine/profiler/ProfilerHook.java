@@ -46,9 +46,9 @@ public abstract class ProfilerHook {
 
   protected abstract void profile();
 
-  @SuppressWarnings("FutureReturnValueIgnored")
+  @SuppressWarnings({"FutureReturnValueIgnored", "resource", "SystemOut"})
   private void scheduleStatusTask() {
-    Stopwatch stopwatch = Stopwatch.createStarted();
+    var stopwatch = Stopwatch.createStarted();
     Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(() -> {
       long count = calls.longValue();
       long rate = count / stopwatch.elapsed(TimeUnit.SECONDS);

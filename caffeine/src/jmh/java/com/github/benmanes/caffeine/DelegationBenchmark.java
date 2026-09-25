@@ -19,6 +19,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
+import org.jspecify.annotations.NullUnmarked;
+import org.jspecify.annotations.Nullable;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
@@ -32,7 +34,7 @@ import com.google.common.collect.ForwardingMap;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @State(Scope.Benchmark)
-@SuppressWarnings("PMD.MethodNamingConventions")
+@SuppressWarnings({"IdentifierName", "PMD.MethodNamingConventions", "unused"})
 public class DelegationBenchmark {
   private static final int SIZE = (2 << 14);
   private static final int MASK = SIZE - 1;
@@ -54,20 +56,19 @@ public class DelegationBenchmark {
   }
 
   @Benchmark
-  public Integer inherit_get(ThreadState threadState) {
+  public @Nullable Integer inherit_get(ThreadState threadState) {
     return inherit.get(threadState.index++ & MASK);
   }
 
   @Benchmark
-  public Integer delegate_get(ThreadState threadState) {
+  public @Nullable Integer delegate_get(ThreadState threadState) {
     return delegate.get(threadState.index++ & MASK);
   }
 
   static final class InheritMap extends ConcurrentHashMap<Integer, Integer> {
     private static final long serialVersionUID = 1L;
 
-    @Override
-    public Integer get(Object key) {
+    @Override public @Nullable Integer get(Object key) {
       Integer value = super.get(key);
       return (value == null) ? null : (value - 1);
     }
@@ -76,14 +77,12 @@ public class DelegationBenchmark {
   static final class DelegateMap extends ForwardingMap<Integer, Integer> {
     final Map<Integer, Integer> delegate = new ConcurrentHashMap<>();
 
-    @Override
-    public Integer get(Object key) {
+    @NullUnmarked
+    @Override public @Nullable Integer get(Object key) {
       Integer value = delegate.get(key);
       return (value == null) ? null : (value - 1);
     }
-
-    @Override
-    protected Map<Integer, Integer> delegate() {
+    @Override protected Map<Integer, Integer> delegate() {
       return delegate;
     }
   }

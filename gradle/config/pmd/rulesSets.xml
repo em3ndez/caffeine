@@ -2,9 +2,8 @@
 <ruleset name="caffeine"
     xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 http://pmd.sourceforge.net/ruleset_2_0_0.xsd">
+    xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.net/ruleset_2_0_0.xsd">
   <description>PMD rules for Caffeine</description>
-  <exclude-pattern>.*/simulator/.*/generated/.*</exclude-pattern>
 
   <rule ref="category/java/bestpractices.xml">
     <exclude name="UseVarargs"/>
@@ -12,8 +11,6 @@
     <exclude name="SystemPrintln"/>
     <exclude name="MissingOverride"/>
     <exclude name="GuardLogStatement"/>
-    <exclude name="OneDeclarationPerLine"/>
-    <exclude name="ReplaceHashtableWithMap"/>
     <exclude name="AvoidReassigningParameters"/>
     <exclude name="LiteralsFirstInComparisons"/>
   </rule>
@@ -44,7 +41,6 @@
     <exclude name="UnnecessaryReturn"/>
     <exclude name="UseDiamondOperator"/>
     <exclude name="UselessParentheses"/>
-    <exclude name="PrematureDeclaration"/>
     <exclude name="TooManyStaticImports"/>
     <exclude name="AtLeastOneConstructor"/>
     <exclude name="CallSuperInConstructor"/>
@@ -54,6 +50,7 @@
     <exclude name="MethodArgumentCouldBeFinal"/>
     <exclude name="CommentDefaultAccessModifier"/>
     <exclude name="UnnecessaryFullyQualifiedName"/>
+    <exclude name="VariableDeclarationUsageDistance"/>
     <exclude name="FieldDeclarationsShouldBeAtStartOfClass"/>
     <exclude name="EmptyMethodInAbstractClassShouldBeAbstract"/>
   </rule>
@@ -83,10 +80,11 @@
     <exclude name="ExcessivePublicCount"/>
     <exclude name="LoosePackageCoupling"/>
     <exclude name="CouplingBetweenObjects"/>
+    <exclude name="AvoidDeeplyNestedIfStmts"/>
     <exclude name="AvoidRethrowingException"/>
+    <exclude name="ProtectedMemberInFinalClass"/>
+    <exclude name="PublicMemberInNonPublicType"/>
     <exclude name="AbstractClassWithoutAnyMethod"/>
-    <exclude name="AvoidCatchingGenericException"/>
-    <exclude name="AvoidThrowingRawExceptionTypes"/>
   </rule>
 
   <rule ref="category/java/documentation.xml">
@@ -97,32 +95,30 @@
   </rule>
 
   <rule ref="category/java/errorprone.xml">
-    <exclude name="DontImportSun"/>
     <exclude name="NullAssignment"/>
+    <exclude name="UnusedReturnValue"/>
     <exclude name="AssignmentInOperand"/>
     <exclude name="UseProperClassLoader"/>
     <exclude name="AvoidCatchingThrowable"/>
     <exclude name="AvoidDuplicateLiterals"/>
     <exclude name="CompareObjectsWithEquals"/>
     <exclude name="AvoidLiteralsInIfCondition"/>
+    <exclude name="AvoidCatchingGenericException"/>
     <exclude name="AvoidFieldNameMatchingMethodName"/>
     <exclude name="ConstructorCallsOverridableMethod"/>
     <exclude name="AvoidBranchingStatementAsLastInLoop"/>
-  </rule>
-  <rule ref="category/java/errorprone.xml/AvoidDuplicateLiterals">
-    <properties>
-      <property name="skipAnnotations" value="true"/>
-      <property name="maxDuplicateLiterals" value="10"/>
-    </properties>
   </rule>
 
   <rule ref="category/java/multithreading.xml">
     <exclude name="DoNotUseThreads"/>
     <exclude name="AvoidUsingVolatile"/>
     <exclude name="UseConcurrentHashMap"/>
+    <exclude name="AvoidSynchronizedStatement"/>
   </rule>
 
   <rule ref="category/java/performance.xml">
     <exclude name="AvoidInstantiatingObjectsInLoops"/>
   </rule>
+
+  <rule ref="category/java/security.xml"/>
 </ruleset>

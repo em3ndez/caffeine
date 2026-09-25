@@ -15,8 +15,6 @@
  */
 package com.github.benmanes.caffeine.cache.simulator.policy.sketch.climbing.gradient;
 
-import java.util.List;
-
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.sketch.climbing.AbstractClimber;
 import com.typesafe.config.Config;
@@ -39,34 +37,35 @@ public final class Adam extends AbstractClimber {
   private double velocity;
 
   public Adam(Config config) {
-    AdamSettings settings = new AdamSettings(config);
+    var settings = new AdamSettings(config);
     int maximumSize = Math.toIntExact(settings.maximumSize());
     sampleSize = (int) (settings.percentSample() * maximumSize);
     stepSize = (int) (settings.percentPivot() * maximumSize);
     epsilon = settings.epsilon();
     beta1 = settings.beta1();
     beta2 = settings.beta2();
-    t = 1;
-  }
-
-  @Override
-  protected void resetSample(double hitRate) {
-    super.resetSample(hitRate);
-    t++;
+    t = 0;
   }
 
   @Override
   protected double adjust(double hitRate) {
-    double currentMissRate = (1 - hitRate);
-    double previousMissRate = (1 - previousHitRate);
-    double gradient = currentMissRate - previousMissRate;
+    if (firstSample) {
+      // No movement history yet, so no gradient can be estimated. Probe in the positive
+      // direction so subsequent samples have a Δw to differentiate against.
+      return stepSize;
+    }
 
+    // The timestep counts moment updates (1 on the first), not probe periods, so the bias
+    // correction divisors match Adam's Algorithm 1.
+    t++;
+
+    double gradient = missRateGradient(hitRate);
     moment = (beta1 * moment) + ((1 - beta1) * gradient);
     velocity = (beta2 * velocity) + ((1 - beta2) * (gradient * gradient));
 
     double momentBias = moment / (1 - Math.pow(beta1, t));
     double velocityBias = velocity / (1 - Math.pow(beta2, t));
-    return (stepSize * momentBias) / (Math.sqrt(velocityBias) + epsilon);
+    return -(stepSize * momentBias) / (Math.sqrt(velocityBias) + epsilon);
   }
 
   static final class AdamSettings extends BasicSettings {
@@ -74,9 +73,6 @@ public final class Adam extends AbstractClimber {
 
     public AdamSettings(Config config) {
       super(config);
-    }
-    public List<Double> percentMain() {
-      return config().getDoubleList("hill-climber-window-tiny-lfu.percent-main");
     }
     public double percentPivot() {
       return config().getDouble(BASE_PATH + "percent-pivot");

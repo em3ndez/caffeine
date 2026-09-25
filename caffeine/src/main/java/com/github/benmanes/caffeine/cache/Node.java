@@ -19,8 +19,7 @@ import static java.util.Locale.US;
 
 import java.lang.ref.ReferenceQueue;
 
-import org.checkerframework.checker.index.qual.NonNegative;
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.AccessOrderDeque.AccessOrder;
 import com.github.benmanes.caffeine.cache.WriteOrderDeque.WriteOrder;
@@ -32,11 +31,14 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@SuppressWarnings({"EmptyMethod", "unused"})
 abstract class Node<K, V> implements AccessOrder<Node<K, V>>, WriteOrder<Node<K, V>> {
 
-  /** Return the key or {@code null} if it has been reclaimed by the garbage collector. */
-  @Nullable
-  public abstract K getKey();
+  /**
+   * Return the key or {@code null} if it has been reclaimed by the garbage collector. A retired or
+   * dead node returns a sentinel for a strong key and {@code null} for a weak key.
+   */
+  public abstract @Nullable K getKey();
 
   /**
    * Returns the reference that the cache is holding the entry by. This is either the key if
@@ -44,9 +46,14 @@ abstract class Node<K, V> implements AccessOrder<Node<K, V>>, WriteOrder<Node<K,
    */
   public abstract Object getKeyReference();
 
+  /**
+   * Returns the reference that the cache is holding the entry by or {@code null} if the underlying
+   * key has been reclaimed by the garbage collector.
+   */
+  public abstract @Nullable Object getKeyReferenceOrNull();
+
   /** Return the value or {@code null} if it has been reclaimed by the garbage collector. */
-  @Nullable
-  public abstract V getValue();
+  public abstract @Nullable V getValue();
 
   /**
    * Returns the reference to the value. This is either the value if strongly held or a
@@ -65,7 +72,6 @@ abstract class Node<K, V> implements AccessOrder<Node<K, V>>, WriteOrder<Node<K,
   public abstract boolean containsValue(Object value);
 
   /** Returns the weight of this entry from the entry's perspective. */
-  @NonNegative
   @GuardedBy("this")
   public int getWeight() {
     return 1;
@@ -73,18 +79,17 @@ abstract class Node<K, V> implements AccessOrder<Node<K, V>>, WriteOrder<Node<K,
 
   /** Sets the weight from the entry's perspective. */
   @GuardedBy("this")
-  public void setWeight(@NonNegative int weight) {}
+  public void setWeight(int weight) {}
 
   /** Returns the weight of this entry from the policy's perspective. */
-  @NonNegative
   // @GuardedBy("evictionLock")
-  public int getPolicyWeight() {
-    return 1;
+  public long getPolicyWeight() {
+    return 1L;
   }
 
   /** Sets the weight from the policy's perspective. */
   // @GuardedBy("evictionLock")
-  public void setPolicyWeight(@NonNegative int weight) {}
+  public void setPolicyWeight(long weight) {}
 
   /* --------------- Health --------------- */
 
@@ -102,11 +107,11 @@ abstract class Node<K, V> implements AccessOrder<Node<K, V>>, WriteOrder<Node<K,
   @GuardedBy("this")
   public abstract boolean isDead();
 
-  /** Sets the node to the <tt>retired</tt> state. */
+  /** Sets the node to the <code>retired</code> state. */
   @GuardedBy("this")
   public abstract void retire();
 
-  /** Sets the node to the <tt>dead</tt> state. */
+  /** Sets the node to the <code>dead</code> state. */
   @GuardedBy("this")
   public abstract void die();
 
@@ -127,6 +132,7 @@ abstract class Node<K, V> implements AccessOrder<Node<K, V>>, WriteOrder<Node<K,
    * Atomically sets the variable time to the given updated value if the current value equals the
    * expected value and returns if the update was successful.
    */
+  @SuppressWarnings("UnusedReturnValue")
   public boolean casVariableTime(long expect, long update) {
     throw new UnsupportedOperationException();
   }
@@ -156,6 +162,8 @@ abstract class Node<K, V> implements AccessOrder<Node<K, V>>, WriteOrder<Node<K,
   public static final int WINDOW = 0;
   public static final int PROBATION = 1;
   public static final int PROTECTED = 2;
+  public static final int QUEUE_BITS = 2;
+  public static final int QUEUE_MASK = (1 << QUEUE_BITS) - 1;
 
   /** Returns if the entry is in the Window or Main space. */
   public boolean inWindow() {

@@ -23,42 +23,42 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.cache.configuration.MutableCacheEntryListenerConfiguration;
 import javax.cache.event.CacheEntryRemovedListener;
 
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import com.github.benmanes.caffeine.jcache.AbstractJCacheTest;
-import com.github.benmanes.caffeine.jcache.configuration.CaffeineConfiguration;
+import com.github.benmanes.caffeine.jcache.JCacheFixture;
 import com.google.common.util.concurrent.MoreExecutors;
 
 /**
- * The test cases that ensure the <tt>maximum size</tt> setting is honored by the cache and removal
+ * The test cases that ensure the maximum size< setting is honored by the cache and removal
  * notifications are published.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@Test(singleThreaded = true)
-public final class JCacheMaximumSizeTest extends AbstractJCacheTest {
+final class JCacheMaximumSizeTest {
   private static final int MAXIMUM = 10;
 
-  private final AtomicInteger removed = new AtomicInteger();
-
-  @Override
-  protected CaffeineConfiguration<Integer, Integer> getConfiguration() {
-    CacheEntryRemovedListener<Integer, Integer> listener = events -> removed.incrementAndGet();
-    var configuration = new CaffeineConfiguration<Integer, Integer>();
-    configuration.setMaximumSize(OptionalLong.of(MAXIMUM));
-    var listenerConfiguration = new MutableCacheEntryListenerConfiguration<Integer, Integer>(
-        () -> listener, /* filterFactory */ null,
-        /* isOldValueRequired */ false, /* isSynchronous */ true);
-    configuration.addCacheEntryListenerConfiguration(listenerConfiguration);
-    configuration.setExecutorFactory(MoreExecutors::directExecutor);
-    return configuration;
+  private static JCacheFixture jcacheFixture(AtomicInteger removed) {
+    return JCacheFixture.builder()
+        .configure(config -> {
+          config.setMaximumSize(OptionalLong.of(MAXIMUM));
+          CacheEntryRemovedListener<Integer, Integer> listener =
+              events -> removed.incrementAndGet();
+          var listenerConfiguration = new MutableCacheEntryListenerConfiguration<>(
+              () -> listener, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true);
+          config.addCacheEntryListenerConfiguration(listenerConfiguration);
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+        }).build();
   }
 
   @Test
-  public void evict() {
-    for (int i = 0; i < 2 * MAXIMUM; i++) {
-      jcache.put(i, i);
+  void evict() {
+    var removed = new AtomicInteger();
+    try (var fixture = jcacheFixture(removed)) {
+      for (int i = 0; i < 2 * MAXIMUM; i++) {
+        fixture.jcache().put(i, i);
+      }
+      assertThat(removed.get()).isEqualTo(MAXIMUM);
     }
-    assertThat(removed.get()).isEqualTo(MAXIMUM);
   }
 }

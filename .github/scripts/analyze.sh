@@ -1,7 +1,15 @@
 #!/bin/bash
 set -eux
 
+CI=true \
 ./gradlew \
-    forbiddenApis -DforbiddenApis \
-    pmdJavaPoet pmdMain pmdCodeGen pmdJmh -Dpmd \
-    spotbugsJavaPoet spotbugsMain spotbugsCodeGen spotbugsJmh -Dspotbugs
+    ecj \
+    roseau \
+    assemble \
+    pmd -Ppmd \
+    spotbugs -Pspotbugs \
+    forbiddenApis -PforbiddenApis \
+    --warning-mode all --continue \
+    --console colored --no-configuration-cache \
+    -PjavaVersion=26 \
+    "$@"

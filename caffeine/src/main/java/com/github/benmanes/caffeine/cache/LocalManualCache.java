@@ -26,9 +26,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
+import com.google.errorprone.annotations.Var;
 
 /**
  * This class provides a skeletal implementation of the {@link Cache} interface to minimize the
@@ -53,7 +54,7 @@ interface LocalManualCache<K, V> extends Cache<K, V> {
 
   @Override
   default @Nullable V getIfPresent(K key) {
-    return cache().getIfPresent(key, /* recordStats */ true);
+    return cache().getIfPresent(key, /* recordStats= */ true);
   }
 
   @Override
@@ -72,42 +73,49 @@ interface LocalManualCache<K, V> extends Cache<K, V> {
       Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> mappingFunction) {
     requireNonNull(mappingFunction);
 
-    var found = cache().getAllPresent(keys);
     int initialCapacity = calculateHashMapCapacity(keys);
-    var result = new LinkedHashMap<K, V>(initialCapacity);
-    var keysToLoad = new LinkedHashSet<K>(initialCapacity);
+    var result = new LinkedHashMap<K, @Nullable V>(initialCapacity);
     for (K key : keys) {
-      V value = found.get(key);
+      result.put(key, null);
+    }
+    var keysToLoad = new LinkedHashSet<K>(initialCapacity);
+    var found = cache().getAllPresent(result.keySet());
+    for (var entry : result.entrySet()) {
+      V value = found.get(entry.getKey());
       if (value == null) {
-        keysToLoad.add(key);
+        keysToLoad.add(entry.getKey());
       }
-      result.put(key, value);
+      entry.setValue(value);
     }
     if (keysToLoad.isEmpty()) {
       return found;
     }
-
     bulkLoad(keysToLoad, result, mappingFunction);
-    return Collections.unmodifiableMap(result);
+
+    @SuppressWarnings({"NullableProblems", "NullAway"})
+    Map<K, V> unmodifiable = Collections.unmodifiableMap(result);
+    return unmodifiable;
   }
 
   /**
    * Performs a non-blocking bulk load of the missing keys. Any missing entry that materializes
    * during the load are replaced when the loaded entries are inserted into the cache.
    */
-  default void bulkLoad(Set<K> keysToLoad, Map<K, V> result,
+  default void bulkLoad(Set<K> keysToLoad, Map<K, @Nullable V> result,
       Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends V>> mappingFunction) {
-    boolean success = false;
     long startTime = cache().statsTicker().read();
+    @Var boolean success = false;
     try {
       var loaded = mappingFunction.apply(Collections.unmodifiableSet(keysToLoad));
-      loaded.forEach(cache()::put);
-      for (K key : keysToLoad) {
-        V value = loaded.get(key);
-        if (value == null) {
-          result.remove(key);
-        } else {
+      loaded.forEach((key, value) -> {
+        cache().put(key, value);
+        if (keysToLoad.contains(key)) {
           result.put(key, value);
+        }
+      });
+      for (K key : keysToLoad) {
+        if (result.get(key) == null) {
+          result.remove(key);
         }
       }
       success = !loaded.isEmpty();

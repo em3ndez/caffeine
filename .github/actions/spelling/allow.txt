@@ -1,0 +1,6 @@
+github
+https
+MPMC
+ssh
+ubuntu
+workarounds

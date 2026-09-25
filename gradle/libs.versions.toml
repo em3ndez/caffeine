@@ -1,190 +1,194 @@
 [versions]
-asm = "9.7"
-auto-value = "1.10.4"
-awaitility = "4.2.1"
-bcel = "6.9.0"
-bnd = "7.0.0"
-bouncycastle-jdk18on = "1.78.1"
+ap-loader = "4.5-13"
+ascii-table = "1.13.0"
+asm = "9.10.1"
+awaitility = "4.3.0"
+bcel = "6.13.0"
+bnd = "7.4.0"
+bouncycastle-jdk18on = "1.86"
 cache2k = "2.6.1.Final"
-caffeine = "3.1.8"
-checker-framework = "3.43.0"
-checkstyle = "10.16.0"
-coherence = "22.06.2"
-commons-collections4 = "4.4"
-commons-compress = "1.26.1"
-commons-io = "2.16.1"
-commons-lang3 = "3.14.0"
+caffeine = "3.3.0"
+coherence = "26.07"
+commons-collections4 = "4.6.0"
+commons-compress = "1.28.0"
+commons-lang3 = "3.20.0"
 commons-math3 = "3.6.1"
-commons-text = "1.12.0"
 concurrentlinkedhashmap = "1.4.2"
-config = "1.4.3"
-coveralls = "2.12.2"
-dependency-check = "9.2.0"
-eclipse-collections = "12.0.0.M3"
-ehcache3 = "3.10.8"
-errorprone-core = "2.27.1"
-errorprone-plugin = "3.1.0"
-errorprone-support = "0.16.1"
+config = "1.4.9"
+coveralls = "1.2.20"
+dependency-analysis = "3.19.2"
+dependency-check = "13.0.0"
+ecj = "3.46.100"
+eclipse-collections = "13.0.0"
+ehcache3 = "3.12.0"
+errorprone = "2.50.0"
+errorprone-plugin = "5.1.1"
+errorprone-support = "0.30.0"
 expiring-map = "0.5.11"
+fastcsv = "4.4.0"
 fast-filter = "1.0.2"
-fastutil = "8.5.13"
+fastutil = "8.5.19"
 felix-framework = "7.0.5"
-felix-scr = "2.2.10"
-findsecbugs = "1.13.0"
-flip-tables = "1.1.1"
-forbidden-apis = "3.7"
-google-java-format = "1.22.0"
-guava = "33.2.0-jre"
-guice = "6.0.0"
-h2 = "2.2.224"
-hamcrest = "2.2"
-hazelcast = "5.3.7"
-httpclient = "4.5.14"
-idea = "1.1.8"
-jackrabbit = "1.62.0"
-jackson = "2.17.1"
-jacoco = "0.8.12"
+felix-scr = "2.2.18"
+findsecbugs = "1.14.0"
+forbidden-apis = "3.11"
+fray = "0.9.0"
+google-java-format = "1.36.1"
+grpc = "1.84.0"
+guava = "33.7.1-jre"
+guice = "7.0.0"
+h2 = "2.5.250"
+hamcrest = "3.0"
+hazelcast = "5.7.0"
+httpclient4 = "4.5.14"
+httpclient5 = "5.6.4"
+idea = "1.4.1"
+infer-annotations = "0.18.0"
+jackrabbit = "2.6.0"
+jackson = "2.22.2"
+jacoco = "0.8.15"
 jakarta-inject = "2.0.1"
 jamm = "0.4.0"
 java-object-layout = "0.17"
-javapoet = "1.13.0"
-jazzer = "0.22.1"
+javax-inject = "1"
+javapoet = "0.20.0"
+jazzer = "0.30.0"
 jcache = "1.1.1"
 jcommander = "1.82"
-jctools = "4.0.3"
-jfreechart = "1.5.4"
-jgit = "6.9.0.202403050737-r"
-jmh-core = "1.37"
-jmh-plugin = "0.7.2"
+jcstress = "0.16"
+jctools = "4.0.7"
+jfreechart = "1.5.6"
+jgit = "7.8.0.202609011348-r"
+jmh = "1.37"
+jmh-plugin = "0.7.3"
 jmh-report = "0.9.6"
-joor = "0.9.15"
+jspecify = "1.0.1"
 json-bind = "1.0"
-jsoup = "1.17.2"
-junit-testng = "1.0.5"
-junit4 = "4.13.2"
-junit5 = "5.11.0-M2"
-jvm-dependency-conflict-resolution = "2.0"
-kotlin = "1.9.24"
-lincheck = "2.32"
-mockito = "5.12.0"
-nexus-publish = "2.0.0"
-nullaway-core = "0.10.26"
-nullaway-plugin = "2.0.0"
-okhttp-bom = "4.12.0"
-okio-bom = "3.9.0"
+jsoup = "1.23.2"
+junit = "4.13.2"
+junit-jupiter = "6.1.3"
+junit-testng = "1.1.0"
+jvm-dependency-conflict-resolution = "2.5"
+kotlin = "2.4.20"
+lincheck = "3.7"
+log4j = "2.26.1"
+mockito = "5.23.0"
+nmcp = "1.6.2"
+nullaway = "0.14.2"
+nullaway-plugin = "3.2.0"
+okhttp = "5.5.0"
+okio = "3.18.2"
 osgi-annotations = "1.5.1"
 osgi-function = "1.2.0"
 osgi-promise = "1.3.0"
-pax-exam = "4.13.5"
-pax-url = "2.6.14"
-picocli = "4.7.6"
-pmd = "7.1.0"
-protobuf = "4.26.1"
-slf4j = "2.0.13"
-slf4j-test = "3.0.1"
-snakeyaml = "2.2"
-sonarqube = "5.0.0.4638"
-spotbugs-contrib = "7.6.4"
-spotbugs-core = "4.8.5"
-spotbugs-plugin = "6.0.14"
+pax-exam = "4.14.0"
+pax-url = "3.0.3"
+picocli = "4.7.7"
+pitest = "1.30.0"
+pitest-junit5 = "1.2.3"
+pitest-plugin = "1.19.0"
+pmd = "7.27.0"
+protobuf = "4.36.2"
+roseau = "0.7.0"
+slf4j = "2.0.19"
+slf4j-test = "3.0.3"
+sigstore = "2.3.0"
+sonarqube = "7.5.0.8588"
+spotbugs = "4.10.4"
+spotbugs-contrib = "7.7.4"
+spotbugs-plugin = "6.5.11"
 stream = "2.9.8"
 tcache = "2.0.1"
-testng = "7.10.2"
-truth = "1.4.2"
-univocity-parsers = "2.9.1"
-versions = "0.51.0"
-xz = "1.9"
+testng = "7.12.0"
+truth = "1.4.5"
+versions = "0.64.0"
+xz = "1.12"
 ycsb = "0.17.0"
-zero-allocation-hashing = "0.16"
-zstd = "1.5.6-3"
+zero-allocation-hashing = "2026.0"
+zstd = "1.5.7-18"
 
 [libraries]
+ap-loader = { module = "me.bechberger:ap-loader-all", version.ref = "ap-loader" }
+ascii-table = { module = "com.github.freva:ascii-table", version.ref = "ascii-table" }
 asm-bom = { module = "org.ow2.asm:asm-bom", version.ref = "asm" }
-auto-value-annotations = { module = "com.google.auto.value:auto-value-annotations", version.ref = "auto-value" }
-auto-value-processor = { module = "com.google.auto.value:auto-value", version.ref = "auto-value" }
 awaitility = { module = "org.awaitility:awaitility", version.ref = "awaitility" }
 bcel = { module = "org.apache.bcel:bcel", version.ref = "bcel" }
-bnd = { module = "biz.aQute.bnd:biz.aQute.bnd.gradle", version.ref = "bnd" }
 bouncycastle-jdk18on = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle-jdk18on" }
+bouncycastle-pkix-jdk18on = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bouncycastle-jdk18on" }
+bouncycastle-util-jdk18on = { module = "org.bouncycastle:bcutil-jdk18on", version.ref = "bouncycastle-jdk18on" }
 cache2k = { module = "org.cache2k:cache2k-core", version.ref = "cache2k" }
 caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "caffeine" }
-checker-annotations = { module = "org.checkerframework:checker-qual", version.ref = "checker-framework" }
-checkstyle = { module = "com.puppycrawl.tools:checkstyle", version.ref = "checkstyle" }
-coherence-core = { module = "com.oracle.coherence.ce:coherence", version.ref = "coherence" }
+coherence = { module = "com.oracle.coherence.ce:coherence", version.ref = "coherence" }
 commons-collections4 = { module = "org.apache.commons:commons-collections4", version.ref = "commons-collections4" }
 commons-compress = { module = "org.apache.commons:commons-compress", version.ref = "commons-compress" }
-commons-io = { module = "commons-io:commons-io", version.ref = "commons-io" }
 commons-lang3 = { module = "org.apache.commons:commons-lang3", version.ref = "commons-lang3" }
 commons-math3 = { module = "org.apache.commons:commons-math3", version.ref = "commons-math3" }
-commons-text = { module = "org.apache.commons:commons-text", version.ref = "commons-text" }
 concurrentlinkedhashmap = { module = "com.googlecode.concurrentlinkedhashmap:concurrentlinkedhashmap-lru", version.ref = "concurrentlinkedhashmap" }
 config = { module = "com.typesafe:config", version.ref = "config" }
-coveralls = { module = "gradle.plugin.org.kt3k.gradle.plugin:coveralls-gradle-plugin", version.ref = "coveralls" }
-dependency-check = { module = "org.owasp:dependency-check-gradle", version.ref = "dependency-check" }
-dependency-versions = { module = "com.github.ben-manes:gradle-versions-plugin", version.ref = "versions" }
+ecj = { module = "org.eclipse.jdt:ecj", version.ref = "ecj" }
 eclipse-collections-testutils = { module = "org.eclipse.collections:eclipse-collections-testutils", version.ref = "eclipse-collections" }
 ehcache3 = { module = "org.ehcache:ehcache", version.ref = "ehcache3" }
-errorprone-annotations = { module = "com.google.errorprone:error_prone_annotations", version.ref = "errorprone-core" }
-errorprone-core = { module = "com.google.errorprone:error_prone_core", version.ref = "errorprone-core" }
+errorprone = { module = "com.google.errorprone:error_prone_core", version.ref = "errorprone" }
+errorprone-annotations = { module = "com.google.errorprone:error_prone_annotations", version.ref = "errorprone" }
 errorprone-mockito = { module = "org.mockito:mockito-errorprone", version.ref = "mockito" }
-errorprone-plugin = { module = "net.ltgt.gradle:gradle-errorprone-plugin", version.ref = "errorprone-plugin" }
 errorprone-support = { module = "tech.picnic.error-prone-support:error-prone-contrib", version.ref = "errorprone-support" }
 errorprone-support-refaster = { module = "tech.picnic.error-prone-support:refaster-runner", version.ref = "errorprone-support" }
 expiring-map = { module = "net.jodah:expiringmap", version.ref = "expiring-map" }
+fastcsv = { module = "de.siegmar:fastcsv", version.ref = "fastcsv" }
 fast-filter = { module = "io.github.fastfilter:fastfilter", version.ref = "fast-filter" }
 fastutil = { module = "it.unimi.dsi:fastutil-core", version.ref = "fastutil" }
 felix-framework = { module = "org.apache.felix:org.apache.felix.framework", version.ref = "felix-framework" }
 felix-scr = { module = "org.apache.felix:org.apache.felix.scr", version.ref = "felix-scr" }
 findsecbugs = { module = "com.h3xstream.findsecbugs:findsecbugs-plugin", version.ref = "findsecbugs" }
-flip-tables = { module = "com.jakewharton.fliptables:fliptables", version.ref = "flip-tables" }
-forbidden-apis = { module = "de.thetaphi:forbiddenapis", version.ref = "forbidden-apis" }
+fray-junit = { module = "org.pastalab.fray:fray-junit", version.ref = "fray" }
 google-java-format = { module = "com.google.googlejavaformat:google-java-format", version.ref = "google-java-format" }
+grpc-bom = { module = "io.grpc:grpc-bom", version.ref = "grpc" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
 guava-testlib = { module = "com.google.guava:guava-testlib", version.ref = "guava" }
 guice = { module = "com.google.inject:guice", version.ref = "guice" }
 h2 = { module = "com.h2database:h2", version.ref = "h2" }
 hamcrest = { module = "org.hamcrest:hamcrest", version.ref = "hamcrest" }
 hazelcast = { module = "com.hazelcast:hazelcast", version.ref = "hazelcast" }
-httpclient = { module = "org.apache.httpcomponents:httpclient", version.ref = "httpclient" }
-idea = { module = "gradle.plugin.org.jetbrains.gradle.plugin.idea-ext:gradle-idea-ext", version.ref = "idea" }
+httpclient4 = { module = "org.apache.httpcomponents:httpclient", version.ref = "httpclient4" }
+httpclient5 = { module = "org.apache.httpcomponents.client5:httpclient5", version.ref = "httpclient5" }
+infer-annotations = { module = "com.facebook.infer.annotation:infer-annotation", version.ref = "infer-annotations" }
 jackrabbit = { module = "org.apache.jackrabbit:oak-core", version.ref = "jackrabbit" }
 jackson-bom = { module = "com.fasterxml.jackson:jackson-bom", version.ref = "jackson" }
-jacoco = { module = "org.jacoco:jacoco", version.ref = "jacoco" }
+jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
 jacoco-agent = { module = "org.jacoco:org.jacoco.agent", version.ref = "jacoco" }
 jacoco-ant = { module = "org.jacoco:org.jacoco.ant", version.ref = "jacoco" }
 jakarta-inject = { module = "jakarta.inject:jakarta.inject-api", version.ref = "jakarta-inject" }
 jamm = { module = "com.github.jbellis:jamm", version.ref = "jamm" }
 java-object-layout = { module = "org.openjdk.jol:jol-cli", version.ref = "java-object-layout" }
-javapoet = { module = "com.squareup:javapoet", version.ref = "javapoet" }
+javapoet = { module = "com.palantir.javapoet:javapoet", version.ref = "javapoet" }
+javax-inject = { module = "javax.inject:javax.inject", version.ref = "javax-inject" }
 jazzer = { module = "com.code-intelligence:jazzer-junit", version.ref = "jazzer" }
 jcache = { module = "javax.cache:cache-api", version.ref = "jcache" }
 jcache-guice = { module = "org.jsr107.ri:cache-annotations-ri-guice", version.ref = "jcache" }
 jcache-tck = { module = "javax.cache:cache-tests", version.ref = "jcache" }
 jcommander = { module = "com.beust:jcommander", version.ref = "jcommander" }
-jctools = { module = "org.jctools:jctools-core", version.ref = "jctools" }
+jcstress = { module = "org.openjdk.jcstress:jcstress-core", version.ref = "jcstress" }
+jctools = { module = "org.jctools:jctools-core-jdk11", version.ref = "jctools" }
 jfreechart = { module = "org.jfree:jfreechart", version.ref = "jfreechart" }
 jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version.ref = "jgit" }
-jmh-core = { module = "org.openjdk.jmh:jmh-core", version.ref = "jmh-core" }
-jmh-plugin = { module = "me.champeau.jmh:jmh-gradle-plugin", version.ref = "jmh-plugin" }
-jmh-report = { module = "gradle.plugin.io.morethan.jmhreport:gradle-jmh-report", version.ref = "jmh-report" }
-joor = { module = "org.jooq:joor", version.ref = "joor" }
+jmh = { module = "org.openjdk.jmh:jmh-core", version.ref = "jmh" }
+jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
 json-bind = { module = "javax.json.bind:javax.json.bind-api", version.ref = "json-bind" }
 jsoup = { module = "org.jsoup:jsoup", version.ref = "jsoup" }
-junit4 = { module = "junit:junit", version.ref = "junit4" }
-junit5 = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit5" }
-junit5-bom = { module = "org.junit:junit-bom", version.ref = "junit5" }
-junit5-launcher = { module = "org.junit.platform:junit-platform-launcher" }
-junit5-testng = { module = "org.junit.support:testng-engine", version.ref = "junit-testng" }
-junit5-vintage = { module = "org.junit.vintage:junit-vintage-engine", version.ref = "junit5" }
-jvm-dependency-conflict-resolution = { module = "org.gradlex:jvm-dependency-conflict-resolution", version.ref = "jvm-dependency-conflict-resolution" }
+junit = { module = "junit:junit", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit-jupiter" }
+junit-jupiter-bom = { module = "org.junit:junit-bom", version.ref = "junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junit-jupiter" }
+junit-jupiter-testng = { module = "org.junit.support:testng-engine", version.ref = "junit-testng" }
+junit-jupiter-vintage = { module = "org.junit.vintage:junit-vintage-engine", version.ref = "junit-jupiter" }
 kotlin-bom = { module = "org.jetbrains.kotlin:kotlin-bom", version.ref = "kotlin" }
-lincheck = { module = "org.jetbrains.kotlinx:lincheck-jvm", version.ref = "lincheck" }
+lincheck = { module = "org.jetbrains.lincheck:lincheck", version.ref = "lincheck" }
+log4j = { module = "org.apache.logging.log4j:log4j-core", version.ref = "log4j" }
 mockito = { module = "org.mockito:mockito-core", version.ref = "mockito" }
-nexus-publish = { module = "io.github.gradle-nexus:publish-plugin", version.ref = "nexus-publish" }
-nullaway-core = { module = "com.uber.nullaway:nullaway", version.ref = "nullaway-core" }
-nullaway-plugin = { module = "net.ltgt.gradle:gradle-nullaway-plugin", version.ref = "nullaway-plugin" }
-okhttp-bom = { module = "com.squareup.okhttp3:okhttp-bom", version.ref = "okhttp-bom" }
-okio-bom = { module = "com.squareup.okio:okio-bom", version.ref = "okio-bom" }
+nullaway = { module = "com.uber.nullaway:nullaway", version.ref = "nullaway" }
+nullaway-annotations = { module = "com.uber.nullaway:nullaway-annotations", version.ref = "nullaway" }
+okhttp-bom = { module = "com.squareup.okhttp3:okhttp-bom", version.ref = "okhttp" }
+okio-bom = { module = "com.squareup.okio:okio-bom", version.ref = "okio" }
 osgi-annotations = { module = "org.osgi:org.osgi.service.component.annotations", version.ref = "osgi-annotations" }
 osgi-function = { module = "org.osgi:org.osgi.util.function", version.ref = "osgi-function" }
 osgi-promise = { module = "org.osgi:org.osgi.util.promise", version.ref = "osgi-promise" }
@@ -193,45 +197,63 @@ pax-exam-junit4 = { module = "org.ops4j.pax.exam:pax-exam-junit4", version.ref =
 pax-exam-link-mvn = { module = "org.ops4j.pax.exam:pax-exam-link-mvn", version.ref = "pax-exam" }
 pax-url-aether = { module = "org.ops4j.pax.url:pax-url-aether", version.ref = "pax-url" }
 picocli = { module = "info.picocli:picocli", version.ref = "picocli" }
+pitest = { module = "org.pitest:pitest", version.ref = "pitest" }
+pitest-junit5 = { module = "org.pitest:pitest-junit5-plugin", version.ref = "pitest-junit5" }
 pmd = { module = "net.sourceforge.pmd:pmd", version.ref = "pmd" }
 pmd-ant = { module = "net.sourceforge.pmd:pmd-ant", version.ref = "pmd" }
 pmd-java = { module = "net.sourceforge.pmd:pmd-java", version.ref = "pmd" }
 protobuf = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
+roseau =  { module = "io.github.alien-tools:roseau-cli", version.ref = "roseau" }
+slf4j-bom = { module = "org.slf4j:slf4j-bom", version.ref = "slf4j" }
 slf4j-jdk-platform-logging = { module = "org.slf4j:slf4j-jdk-platform-logging", version.ref = "slf4j" }
 slf4j-jdk14 = { module = "org.slf4j:slf4j-jdk14", version.ref = "slf4j" }
+slf4j-jcl-bridge = { module = "org.slf4j:jcl-over-slf4j", version.ref = "slf4j" }
 slf4j-jul-bridge = { module = "org.slf4j:jul-to-slf4j", version.ref = "slf4j" }
 slf4j-nop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }
 slf4j-test = { module = "com.github.valfirst:slf4j-test", version.ref = "slf4j-test" }
-snakeyaml = { module = "org.yaml:snakeyaml", version.ref = "snakeyaml" }
-sonarqube = { module = "org.sonarsource.scanner.gradle:sonarqube-gradle-plugin", version.ref = "sonarqube" }
+spotbugs = { module = "com.github.spotbugs:spotbugs", version.ref = "spotbugs" }
+spotbugs-annotations = { module = "com.github.spotbugs:spotbugs-annotations", version.ref = "spotbugs" }
 spotbugs-contrib = { module = "com.mebigfatguy.sb-contrib:sb-contrib", version.ref = "spotbugs-contrib" }
-spotbugs-core = { module = "com.github.spotbugs:spotbugs", version.ref = "spotbugs-core" }
-spotbugs-plugin = { module = "com.github.spotbugs.snom:spotbugs-gradle-plugin", version.ref = "spotbugs-plugin" }
 stream = { module = "com.clearspring.analytics:stream", version.ref = "stream" }
 tcache = { module = "com.trivago:triava", version.ref = "tcache" }
 testng = { module = "org.testng:testng", version.ref = "testng" }
 truth = { module = "com.google.truth:truth", version.ref = "truth" }
-univocity-parsers = { module = "com.univocity:univocity-parsers", version.ref = "univocity-parsers" }
 xz = { module = "org.tukaani:xz", version.ref = "xz" }
 ycsb = { module = "site.ycsb:core", version.ref = "ycsb" }
 zero-allocation-hashing = { module = "net.openhft:zero-allocation-hashing", version.ref = "zero-allocation-hashing" }
 zstd = { module = "com.github.luben:zstd-jni", version.ref = "zstd" }
 
 [bundles]
-coherence = ["coherence-core", "json-bind"]
-constraints = ["bcel", "bouncycastle-jdk18on", "commons-compress", "commons-text", "h2",
-  "httpclient", "guava", "jcommander", "jgit", "jsoup", "protobuf", "snakeyaml" ]
-errorprone-support = [ "errorprone-support", "errorprone-support-refaster" ]
-jmh = ["jmh-core", "jmh-plugin", "jmh-report"]
-junit = ["junit4", "junit5"]
-junit-engines = ["junit5-vintage", "junit5-testng"]
-osgi-test-compile = ["pax-exam-junit4"]
-osgi-test-runtime = ["felix-framework", "felix-scr", "osgi-function",
-  "osgi-promise", "pax-exam-container-native", "pax-exam-link-mvn", "pax-url-aether"]
+coherence = ["coherence", "json-bind"]
+constraints = ["bcel", "bouncycastle-jdk18on", "bouncycastle-pkix-jdk18on",
+  "bouncycastle-util-jdk18on", "commons-compress", "commons-lang3", "h2", "httpclient4",
+  "httpclient5", "jcommander", "jgit", "junit", "jsoup", "log4j", "protobuf", "testng"]
+errorprone-support = ["errorprone-support", "errorprone-support-refaster"]
+osgi-test-compile = ["javax-inject", "pax-exam-junit4"]
+osgi-test-runtime = ["felix-framework", "felix-scr", "osgi-function", "osgi-promise",
+  "pax-exam-container-native", "pax-exam-link-mvn", "pax-url-aether", "slf4j-jcl-bridge"]
 pmd = ["pmd", "pmd-ant", "pmd-java"]
 slf4j-jdk = ["slf4j-jdk-platform-logging", "slf4j-jdk14"]
 slf4j-nop = ["slf4j-jdk-platform-logging", "slf4j-nop"]
 slf4j-test = ["slf4j-jdk-platform-logging", "slf4j-jul-bridge", "slf4j-test"]
 
 [plugins]
-versions = { id = "com.github.ben-manes.versions", version.ref = "versions" }
+bnd = { id = "biz.aQute.bnd", version.ref = "bnd" }
+coveralls = { id = "com.github.nbaztec.coveralls-jacoco", version.ref = "coveralls" }
+dependency-analysis = { id = "com.autonomousapps.dependency-analysis", version.ref = "dependency-analysis" }
+dependency-check = { id = "org.owasp.dependencycheck", version.ref = "dependency-check" }
+errorprone = { id = "net.ltgt.errorprone", version.ref = "errorprone-plugin" }
+forbidden-apis = { id = "de.thetaphi.forbiddenapis", version.ref = "forbidden-apis" }
+fray = { id = "org.pastalab.fray.gradle", version.ref = "fray" }
+idea = { id = "org.jetbrains.gradle.plugin.idea-ext", version.ref = "idea" }
+jmh = { id = "me.champeau.jmh", version.ref = "jmh-plugin" }
+jmh-report = { id = "io.morethan.jmhreport", version.ref = "jmh-report" }
+jvm-dependency-conflict-resolution = { id = "org.gradlex.jvm-dependency-conflict-resolution", version.ref = "jvm-dependency-conflict-resolution" }
+nmcp = { id = "com.gradleup.nmcp", version.ref = "nmcp" }
+nmcp-aggregation = { id = "com.gradleup.nmcp.aggregation", version.ref = "nmcp" }
+nullaway = { id = "net.ltgt.nullaway", version.ref = "nullaway-plugin" }
+pitest = { id = "info.solidsoft.pitest", version.ref = "pitest-plugin" }
+sigstore = { id = "dev.sigstore.sign", version.ref = "sigstore" }
+sonarqube = { id = "org.sonarqube", version.ref = "sonarqube" }
+spotbugs = { id = "com.github.spotbugs", version.ref = "spotbugs-plugin" }
+versions = { id = "io.github.ben-manes.versions.contributor", version.ref = "versions" }

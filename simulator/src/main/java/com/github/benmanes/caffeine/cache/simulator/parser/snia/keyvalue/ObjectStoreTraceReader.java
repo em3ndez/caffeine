@@ -16,9 +16,8 @@
 package com.github.benmanes.caffeine.cache.simulator.parser.snia.keyvalue;
 
 import static com.github.benmanes.caffeine.cache.simulator.policy.Policy.Characteristic.WEIGHTED;
+import static com.google.common.base.Preconditions.checkArgument;
 
-import java.math.BigInteger;
-import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -29,7 +28,7 @@ import com.google.common.primitives.Ints;
 
 /**
  * A reader for the IBM ObjectStore trace files provided by
- * <a href="http://iotta.snia.org/traces/36305">SNIA</a>.
+ * <a href="https://iotta.snia.org/traces/36305">SNIA</a>.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
@@ -49,15 +48,13 @@ public final class ObjectStoreTraceReader extends TextTraceReader {
     return lines()
         .map(line -> line.split(" "))
         .filter(array -> array[1].equals("REST.GET.OBJECT"))
+        .filter(array -> array.length > 3)
         .map(array -> {
-          long start = Long.parseLong(array[4]);
-          long end = Long.parseLong(array[5]);
-          int weight = Ints.saturatedCast(end - start);
-          if (weight <= 0) {
-            return null;
-          }
-          long key = new BigInteger(array[2], 16).longValue();
+          long key = Long.parseUnsignedLong(array[2], 16);
+          long size = Long.parseLong(array[3]);
+          checkArgument(size >= 0, "negative object size: %s", size);
+          int weight = Math.max(Ints.saturatedCast(size), 1);
           return AccessEvent.forKeyAndWeight(key, weight);
-        }).filter(Objects::nonNull);
+        });
   }
 }

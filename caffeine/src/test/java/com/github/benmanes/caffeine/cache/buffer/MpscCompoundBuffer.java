@@ -15,14 +15,16 @@
  */
 package com.github.benmanes.caffeine.cache.buffer;
 
+import org.jctools.queues.MessagePassingQueue;
 import org.jctools.queues.MpscCompoundQueue;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
 final class MpscCompoundBuffer<E> extends ReadBuffer<E> {
-  final MpscCompoundQueue<E> queue;
-  long reads;
+  private final MessagePassingQueue<E> queue;
+
+  private long reads;
 
   MpscCompoundBuffer() {
     queue = new MpscCompoundQueue<>(BUFFER_SIZE);
@@ -34,7 +36,7 @@ final class MpscCompoundBuffer<E> extends ReadBuffer<E> {
   }
 
   @Override
-  public void drainTo(Consumer<E> consumer) {
+  protected void drainTo(Consumer<E> consumer) {
     reads += queue.drain(consumer);
   }
 

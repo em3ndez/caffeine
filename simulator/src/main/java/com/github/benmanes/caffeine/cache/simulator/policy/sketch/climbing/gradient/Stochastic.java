@@ -17,8 +17,6 @@ package com.github.benmanes.caffeine.cache.simulator.policy.sketch.climbing.grad
 
 import static java.util.Locale.US;
 
-import java.util.List;
-
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.sketch.climbing.AbstractClimber;
 import com.typesafe.config.Config;
@@ -26,7 +24,7 @@ import com.typesafe.config.Config;
 /**
  * Stochastic gradient descent (SGD) optimizer.
  * <p>
- * <tt>w(t+1) = w(t) - alpha * dL/dw(t)</tt> where,
+ * <code>w(t+1) = w(t) - alpha * dL/dw(t)</code> where,
  * <ul>
  *   <li><b>w(t)</b> is the current window size
  *   <li><b>alpha</b> is the learning rate (step size)
@@ -37,12 +35,13 @@ import com.typesafe.config.Config;
  * SGC may be enhanced using momentum, either classical or Nesterov's. For details see
  * <ul>
  *   <li>https://towardsdatascience.com/10-gradient-descent-optimisation-algorithms-86989510b5e9
- *   <li>http://ruder.io/optimizing-gradient-descent/index.html#momentum
- *   <li>http://cs231n.github.io/neural-networks-3/#sgd
+ *   <li>https://www.ruder.io/optimizing-gradient-descent/#momentum
+ *   <li>https://cs231n.github.io/neural-networks-3/#sgd
  * </ul>
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@SuppressWarnings("JavadocLinkAsPlainText")
 public final class Stochastic extends AbstractClimber {
   private final Acceleration acceleration;
   private final int stepSize;
@@ -51,7 +50,7 @@ public final class Stochastic extends AbstractClimber {
   private double velocity;
 
   public Stochastic(Config config) {
-    StochasticSettings settings = new StochasticSettings(config);
+    var settings = new StochasticSettings(config);
     int maximumSize = Math.toIntExact(settings.maximumSize());
     sampleSize = (int) (settings.percentSample() * maximumSize);
     stepSize = (int) (settings.percentPivot() * maximumSize);
@@ -61,23 +60,26 @@ public final class Stochastic extends AbstractClimber {
 
   @Override
   protected double adjust(double hitRate) {
-    double currentMissRate = (1 - hitRate);
-    double previousMissRate = (1 - previousHitRate);
-    double gradient = currentMissRate - previousMissRate;
+    if (firstSample) {
+      // No movement history yet, so no gradient can be estimated. Probe in the positive
+      // direction so subsequent samples have a Δw to differentiate against.
+      return stepSize;
+    }
+    double gradient = missRateGradient(hitRate);
 
-    switch (acceleration) {
-      case NONE:
-        return stepSize * gradient;
-      case MOMENTUM:
+    return switch (acceleration) {
+      case NONE -> -stepSize * gradient;
+      case MOMENTUM -> {
         velocity = (beta * velocity) + (1 - beta) * gradient;
-        return stepSize * velocity;
-      case NESTEROV:
+        yield -stepSize * velocity;
+      }
+      case NESTEROV -> {
         // http://cs231n.github.io/neural-networks-3/#sgd
         double previousVelocity = velocity;
-        velocity = (beta * velocity) + stepSize * gradient;
-        return -(beta * previousVelocity) + ((1 + beta) * velocity);
-    }
-    throw new IllegalStateException("Unknown acceleration type: " + acceleration);
+        velocity = (beta * velocity) - stepSize * gradient;
+        yield -(beta * previousVelocity) + ((1 + beta) * velocity);
+      }
+    };
   }
 
   enum Acceleration { NONE, MOMENTUM, NESTEROV }
@@ -87,9 +89,6 @@ public final class Stochastic extends AbstractClimber {
 
     public StochasticSettings(Config config) {
       super(config);
-    }
-    public List<Double> percentMain() {
-      return config().getDoubleList("hill-climber-window-tiny-lfu.percent-main");
     }
     public double percentPivot() {
       return config().getDouble(BASE_PATH + "percent-pivot");

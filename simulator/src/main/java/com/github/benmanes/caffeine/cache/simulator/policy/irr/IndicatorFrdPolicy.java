@@ -16,6 +16,9 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.irr;
 
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
+
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
@@ -23,6 +26,7 @@ import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.github.benmanes.caffeine.cache.simulator.policy.sketch.Indicator;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -51,16 +55,18 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
   int residentMain;
 
   public IndicatorFrdPolicy(Config config) {
-    FrdSettings settings = new FrdSettings(config);
+    var settings = new FrdSettings(config);
     this.period = settings.period();
     this.maximumSize = Math.toIntExact(settings.maximumSize());
     this.maximumMainResidentSize = (int) (maximumSize * settings.percentMain());
     this.maximumFilterSize = maximumSize - maximumMainResidentSize;
     this.policyStats = new PolicyStats(name());
     this.data = new Long2ObjectOpenHashMap<>();
+    this.indicator = new Indicator(config);
     this.headFilter = new Node();
     this.headMain = new Node();
-    this.indicator = new Indicator(config);
+    checkState(maximumMainResidentSize >= 1,
+        "maximum size %s is too small for the configured percent-main", maximumSize);
   }
 
   @Override
@@ -68,7 +74,7 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
     policyStats.recordOperation();
     adapt(key);
 
-    Node node = data.get(key);
+    @Var var node = data.get(key);
     if (node == null) {
       node = new Node(key);
       data.put(key, node);
@@ -134,7 +140,7 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
     policyStats.recordEviction();
 
     pruneStack();
-    Node victim = headMain.prevMain;
+    Node victim = requireNonNull(headMain.prevMain);
     victim.removeFrom(StackType.MAIN);
     data.remove(victim.key);
     pruneStack();
@@ -154,7 +160,7 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
     policyStats.recordEviction();
     policyStats.recordMiss();
 
-    Node victim = headFilter.prevFilter;
+    Node victim = requireNonNull(headFilter.prevFilter);
     victim.removeFrom(StackType.FILTER);
     if (victim.isInMain) {
       victim.status = Status.NON_RESIDENT;
@@ -169,12 +175,12 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
     residentMain++;
   }
 
-  private void onMainWarmupMiss(Node node) {
+  private static void onMainWarmupMiss(Node node) {
     node.moveToTop(StackType.MAIN);
     node.status = Status.MAIN;
   }
 
-  private void onFilterWarmupMiss(Node node) {
+  private static void onFilterWarmupMiss(Node node) {
     node.moveToTop(StackType.FILTER);
     node.status = Status.FILTER;
   }
@@ -188,7 +194,7 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
      */
     policyStats.recordEviction();
 
-    Node victim = headFilter.prevFilter;
+    Node victim = requireNonNull(headFilter.prevFilter);
     victim.removeFrom(StackType.FILTER);
     if (victim.isInMain) {
       victim.status = Status.NON_RESIDENT;
@@ -232,7 +238,7 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
 
   private void pruneStack() {
     for (;;) {
-      Node bottom = headMain.prevMain;
+      Node bottom = requireNonNull(headMain.prevMain);
       if ((bottom == headMain) || (bottom.status == Status.MAIN)) {
         break;
       } else if (bottom.status == Status.FILTER) {
@@ -257,7 +263,7 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
     policyStats.recordMiss();
 
     pruneStack();
-    Node victim = headMain.prevMain;
+    Node victim = requireNonNull(headMain.prevMain);
     victim.removeFrom(StackType.MAIN);
     data.remove(victim.key);
     pruneStack();
@@ -294,12 +300,11 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
   final class Node {
     final long key;
 
-    Status status;
-
-    Node prevFilter;
-    Node nextFilter;
-    Node prevMain;
-    Node nextMain;
+    @Nullable Node prevFilter;
+    @Nullable Node nextFilter;
+    @Nullable Node prevMain;
+    @Nullable Node nextMain;
+    @Nullable Status status;
 
     boolean isInFilter;
     boolean isInMain;
@@ -328,40 +333,48 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
         removeFrom(stackType);
       }
 
-      if (stackType == StackType.FILTER) {
-        Node next = headFilter.nextFilter;
-        headFilter.nextFilter = this;
-        next.prevFilter = this;
-        this.nextFilter = next;
-        this.prevFilter = headFilter;
-        isInFilter = true;
-      } else if (stackType == StackType.MAIN) {
-        Node next = headMain.nextMain;
-        headMain.nextMain = this;
-        next.prevMain = this;
-        this.nextMain = next;
-        this.prevMain = headMain;
-        isInMain = true;
-      } else {
-        throw new IllegalArgumentException();
+      switch (stackType) {
+        case FILTER -> {
+          Node next = requireNonNull(headFilter.nextFilter);
+          headFilter.nextFilter = this;
+          next.prevFilter = this;
+          this.nextFilter = next;
+          this.prevFilter = headFilter;
+          isInFilter = true;
+        }
+        case MAIN -> {
+          Node next = requireNonNull(headMain.nextMain);
+          headMain.nextMain = this;
+          next.prevMain = this;
+          this.nextMain = next;
+          this.prevMain = headMain;
+          isInMain = true;
+        }
       }
     }
 
     public void removeFrom(StackType stackType) {
       checkState(isInStack(stackType));
 
-      if (stackType == StackType.FILTER) {
-        prevFilter.nextFilter = nextFilter;
-        nextFilter.prevFilter = prevFilter;
-        prevFilter = nextFilter = null;
-        isInFilter = false;
-      } else if (stackType == StackType.MAIN) {
-        prevMain.nextMain = nextMain;
-        nextMain.prevMain = prevMain;
-        prevMain = nextMain = null;
-        isInMain = false;
-      } else {
-        throw new IllegalArgumentException();
+      switch (stackType) {
+        case FILTER -> {
+          requireNonNull(prevFilter);
+          requireNonNull(nextFilter);
+
+          prevFilter.nextFilter = nextFilter;
+          nextFilter.prevFilter = prevFilter;
+          prevFilter = nextFilter = null;
+          isInFilter = false;
+        }
+        case MAIN -> {
+          requireNonNull(prevMain);
+          requireNonNull(nextMain);
+
+          prevMain.nextMain = nextMain;
+          nextMain.prevMain = prevMain;
+          prevMain = nextMain = null;
+          isInMain = false;
+        }
       }
     }
 
@@ -378,11 +391,9 @@ public final class IndicatorFrdPolicy implements KeyOnlyPolicy {
     public FrdSettings(Config config) {
       super(config);
     }
-
     public double percentMain() {
       return config().getDouble("frd.percent-main");
     }
-
     public int period() {
       return config().getInt("frd.period");
     }

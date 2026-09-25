@@ -17,6 +17,7 @@ package com.github.benmanes.caffeine.cache.simulator.admission.countmin4;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.membership.Membership;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 /**
@@ -40,25 +41,29 @@ public final class ClimberResetCountMin4 extends CountMin4 {
 
   public ClimberResetCountMin4(Config config) {
     super(config);
-    BasicSettings settings = new BasicSettings(config);
+    var settings = new BasicSettings(config);
     doorkeeper = settings.tinyLfu().countMin4().periodic().doorkeeper().enabled()
         ? settings.membership().filter().create(config)
         : Membership.disabled();
   }
 
   @Override
-  protected void ensureCapacity(long maximumSize) {
+  public void ensureCapacity(long maximumSize) {
+    long[] previous = table;
     super.ensureCapacity(maximumSize);
     period = (maximumSize == 0) ? 10 : (10 * table.length);
     if (period <= 0) {
       period = Integer.MAX_VALUE;
     }
-    eventsToCount = period;
+    if (table != previous) {
+      eventsToCount = period;
+      additions = 0;
+    }
   }
 
   @Override
   public int frequency(long e) {
-    int count = super.frequency(e);
+    @Var int count = super.frequency(e);
     if (doorkeeper.mightContain(e)) {
       count++;
     }
@@ -89,12 +94,12 @@ public final class ClimberResetCountMin4 extends CountMin4 {
       return;
     }
 
-    int count = 0;
+    @Var int count = 0;
     for (int i = 0; i < table.length; i++) {
       count += Long.bitCount(table[i] & ONE_MASK);
       table[i] = (table[i] >>> 1) & RESET_MASK;
     }
-    additions = (additions >>> 1) - (count >>> 2);
+    additions = (additions - (count >>> 2)) >>> 1;
     doorkeeper.clear();
   }
 
@@ -123,12 +128,13 @@ public final class ClimberResetCountMin4 extends CountMin4 {
     }
   }
 
+  @SuppressWarnings("unused")
   public int getStep() {
     return step;
   }
 
   public void setStep(int x) {
-    this.step = Math.max(1, Math.min(15, step));
+    this.step = Math.clamp(x, 1, 15);
   }
 
   public int getEventsToCount() {
@@ -142,5 +148,4 @@ public final class ClimberResetCountMin4 extends CountMin4 {
   public int getPeriod() {
     return period;
   }
-
 }

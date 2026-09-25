@@ -38,6 +38,8 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
+import org.jspecify.annotations.NullMarked;
+
 /**
  * A skeleton implementation where subclasses provide the serialization strategy. Serialization is
  * not performed if the type is a known immutable, an array of known immutable types, or specially
@@ -45,7 +47,8 @@ import java.util.regex.Pattern;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@SuppressWarnings({"JavaUtilDate", "JdkObsolete"})
+@NullMarked
+@SuppressWarnings({"ImmutableMemberCollection", "JavaUtilDate"})
 public abstract class AbstractCopier<A> implements Copier {
   private static final Map<Class<?>, Function<Object, Object>> JAVA_DEEP_COPY = Map.of(Date.class,
       o -> ((Date) o).clone(), GregorianCalendar.class, o -> ((GregorianCalendar) o).clone());
@@ -92,7 +95,7 @@ public abstract class AbstractCopier<A> implements Copier {
     var deeplyCopyStrategy = deepCopyStrategies.get(object.getClass());
     if (deeplyCopyStrategy != null) {
       @SuppressWarnings("unchecked")
-      T copy = (T) deeplyCopyStrategy.apply(object);
+      var copy = (T) deeplyCopyStrategy.apply(object);
       return copy;
     }
 
@@ -133,7 +136,8 @@ public abstract class AbstractCopier<A> implements Copier {
   private static <T> T arrayCopy(T object) {
     int length = Array.getLength(object);
     @SuppressWarnings("unchecked")
-    T copy = (T) Array.newInstance(object.getClass().getComponentType(), length);
+    var copy = (T) Array.newInstance(
+        requireNonNull(object.getClass().getComponentType()), length);
     System.arraycopy(object, 0, copy, 0, length);
     return copy;
   }
@@ -149,7 +153,7 @@ public abstract class AbstractCopier<A> implements Copier {
   protected <T> T roundtrip(T object, ClassLoader classLoader) {
     A data = serialize(object);
     @SuppressWarnings("unchecked")
-    T copy = (T) deserialize(data, classLoader);
+    var copy = (T) deserialize(data, classLoader);
     return copy;
   }
 

@@ -18,7 +18,6 @@ package com.github.benmanes.caffeine.cache;
 import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
 
 import org.openjdk.jmh.annotations.Benchmark;
@@ -38,20 +37,21 @@ import site.ycsb.generator.ScrambledZipfianGenerator;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @State(Scope.Benchmark)
-@SuppressWarnings({"LexicographicalAnnotationAttributeListing", "PMD.MethodNamingConventions"})
+@SuppressWarnings({"IdentifierName", "LexicographicalAnnotationAttributeListing",
+    "NotNullFieldNotInitialized", "PMD.MethodNamingConventions", "unused"})
 public class ComputeBenchmark {
   static final int SIZE = (2 << 14);
   static final int MASK = SIZE - 1;
   static final int ITEMS = SIZE / 3;
   static final Integer COMPUTE_KEY = SIZE / 2;
-  static final Function<Integer, Boolean> mappingFunction = any -> Boolean.TRUE;
-  static final CacheLoader<Integer, Boolean> cacheLoader = CacheLoader.from(key -> Boolean.TRUE);
+  static final Function<Integer, Boolean> mappingFunction = any -> true;
+  static final CacheLoader<Integer, Boolean> cacheLoader = CacheLoader.from(key -> true);
 
   @Param({"ConcurrentHashMap", "Caffeine", "Guava"})
   String computeType;
 
   Function<Integer, Boolean> benchmarkFunction;
-  Integer[] ints;
+  final Integer[] ints;
 
   @State(Scope.Thread)
   public static class ThreadState {
@@ -68,7 +68,7 @@ public class ComputeBenchmark {
   }
 
   @Setup
-  @SuppressWarnings("ReturnValueIgnored")
+  @SuppressWarnings({"IfCanBeSwitch", "ReturnValueIgnored"})
   public void setup() {
     if (computeType.equals("ConcurrentHashMap")) {
       setupConcurrentHashMap();
@@ -93,7 +93,7 @@ public class ComputeBenchmark {
   }
 
   private void setupConcurrentHashMap() {
-    ConcurrentMap<Integer, Boolean> map = new ConcurrentHashMap<>();
+    var map = new ConcurrentHashMap<Integer, Boolean>();
     benchmarkFunction = key -> map.computeIfAbsent(key, mappingFunction);
   }
 

@@ -24,11 +24,10 @@ import com.github.benmanes.caffeine.cache.RemovalCause;
 
 /**
  * A {@link StatsCounter} implementation that suppresses and logs any exception thrown by the
- * delegate <tt>statsCounter</tt>.
+ * delegate <code>statsCounter</code>.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@SuppressWarnings("PMD.AvoidDuplicateLiterals")
 final class GuardedStatsCounter implements StatsCounter {
   static final Logger logger = System.getLogger(GuardedStatsCounter.class.getName());
 

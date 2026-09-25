@@ -22,12 +22,11 @@ import com.github.benmanes.caffeine.cache.simulator.parser.TraceReader.KeyOnlyTr
 
 /**
  * A reader for the Tencent Block Storage trace files provided by
- * <a href="http://iotta.snia.org/tracetypes/4">SNIA</a>.
+ * <a href="https://iotta.snia.org/tracetypes/4">SNIA</a>.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
 public final class TencentBlockTraceReader extends TextTraceReader implements KeyOnlyTraceReader {
-  static final int BLOCK_SIZE = 512;
   static final char READ = '0';
 
   public TencentBlockTraceReader(String filePath) {
@@ -41,11 +40,10 @@ public final class TencentBlockTraceReader extends TextTraceReader implements Ke
         .filter(array -> array[3].charAt(0) == READ)
         .flatMapToLong(array -> {
           long offset = Long.parseLong(array[1]);
-          long startBlock = (offset / BLOCK_SIZE);
           int sequence = Integer.parseInt(array[2]);
           int volumeId = Integer.parseInt(array[4]);
-          long key = (((long) volumeId) << 31) | Long.hashCode(startBlock);
-          return LongStream.range(key, key + sequence);
+          return LongStream.range(0, sequence)
+              .map(i -> (((long) volumeId) << 40) | ((offset + i) & 0xFFFFFFFFFFL));
         });
   }
 }

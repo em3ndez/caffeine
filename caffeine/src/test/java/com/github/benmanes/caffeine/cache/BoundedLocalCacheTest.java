@@ -15,41 +15,74 @@
  */
 package com.github.benmanes.caffeine.cache;
 
+import static com.github.benmanes.caffeine.cache.Async.ASYNC_EXPIRY;
+import static com.github.benmanes.caffeine.cache.AsyncCacheSubject.assertThat;
 import static com.github.benmanes.caffeine.cache.BLCHeader.DrainStatusRef.IDLE;
 import static com.github.benmanes.caffeine.cache.BLCHeader.DrainStatusRef.PROCESSING_TO_IDLE;
 import static com.github.benmanes.caffeine.cache.BLCHeader.DrainStatusRef.PROCESSING_TO_REQUIRED;
 import static com.github.benmanes.caffeine.cache.BLCHeader.DrainStatusRef.REQUIRED;
+import static com.github.benmanes.caffeine.cache.BaseMpscLinkedArrayQueue.lvProducerIndex;
+import static com.github.benmanes.caffeine.cache.BaseMpscLinkedArrayQueue.modifiedCalcElementOffset;
+import static com.github.benmanes.caffeine.cache.BaseMpscLinkedArrayQueue.soElement;
+import static com.github.benmanes.caffeine.cache.BaseMpscLinkedArrayQueue.soProducerIndex;
 import static com.github.benmanes.caffeine.cache.BoundedLocalCache.ADMIT_HASHDOS_THRESHOLD;
-import static com.github.benmanes.caffeine.cache.BoundedLocalCache.EXPIRE_WRITE_TOLERANCE;
+import static com.github.benmanes.caffeine.cache.BoundedLocalCache.EXPIRATION_THRESHOLD;
+import static com.github.benmanes.caffeine.cache.BoundedLocalCache.EXPIRE_TOLERANCE;
+import static com.github.benmanes.caffeine.cache.BoundedLocalCache.MAXIMUM_EXPIRY;
 import static com.github.benmanes.caffeine.cache.BoundedLocalCache.PERCENT_MAIN_PROTECTED;
+import static com.github.benmanes.caffeine.cache.BoundedLocalCache.QUEUE_TRANSFER_THRESHOLD;
+import static com.github.benmanes.caffeine.cache.BoundedLocalCache.REFERENCE_THRESHOLD;
 import static com.github.benmanes.caffeine.cache.BoundedLocalCache.WARN_AFTER_LOCK_WAIT_NANOS;
 import static com.github.benmanes.caffeine.cache.BoundedLocalCache.WRITE_BUFFER_MAX;
+import static com.github.benmanes.caffeine.cache.BoundedLocalCache.isRefreshing;
+import static com.github.benmanes.caffeine.cache.BoundedLocalCache.markRefreshing;
+import static com.github.benmanes.caffeine.cache.BoundedLocalCache.toWriteTime;
+import static com.github.benmanes.caffeine.cache.BoundedLocalCache.writeTimeOf;
+import static com.github.benmanes.caffeine.cache.CacheContext.intern;
+import static com.github.benmanes.caffeine.cache.CacheContextSubject.assertThat;
+import static com.github.benmanes.caffeine.cache.CacheSpec.Expiration.AFTER_ACCESS;
+import static com.github.benmanes.caffeine.cache.CacheSpec.Expiration.AFTER_WRITE;
+import static com.github.benmanes.caffeine.cache.CacheSpec.Expiration.VARIABLE;
+import static com.github.benmanes.caffeine.cache.CacheSubject.assertThat;
+import static com.github.benmanes.caffeine.cache.Node.PROBATION;
+import static com.github.benmanes.caffeine.cache.Node.PROTECTED;
 import static com.github.benmanes.caffeine.cache.Node.WINDOW;
 import static com.github.benmanes.caffeine.cache.RemovalCause.COLLECTED;
 import static com.github.benmanes.caffeine.cache.RemovalCause.EXPIRED;
 import static com.github.benmanes.caffeine.cache.RemovalCause.EXPLICIT;
 import static com.github.benmanes.caffeine.cache.RemovalCause.REPLACED;
 import static com.github.benmanes.caffeine.cache.RemovalCause.SIZE;
-import static com.github.benmanes.caffeine.cache.testing.CacheContext.intern;
-import static com.github.benmanes.caffeine.cache.testing.CacheContextSubject.assertThat;
-import static com.github.benmanes.caffeine.cache.testing.CacheSpec.Expiration.AFTER_ACCESS;
-import static com.github.benmanes.caffeine.cache.testing.CacheSpec.Expiration.AFTER_WRITE;
-import static com.github.benmanes.caffeine.cache.testing.CacheSpec.Expiration.VARIABLE;
-import static com.github.benmanes.caffeine.cache.testing.CacheSubject.assertThat;
+import static com.github.benmanes.caffeine.cache.WindowClimber.DensityClimber.DENSITY_THRESHOLD;
+import static com.github.benmanes.caffeine.cache.WindowClimber.Ladder.PROBE_BACKOFF_INITIAL;
+import static com.github.benmanes.caffeine.cache.WindowClimber.Ladder.PROBE_BACKOFF_MAX;
+import static com.github.benmanes.caffeine.cache.WindowClimber.Ladder.PROBE_COMMITMENT_MID;
+import static com.github.benmanes.caffeine.cache.WindowClimber.ReactiveClimber.SLOW_ADAPT_RATIO_CAP;
+import static com.github.benmanes.caffeine.cache.WindowClimber.ReactiveClimber.SLOW_ADAPT_THRESHOLD;
+import static com.github.benmanes.caffeine.cache.WindowClimber.Reading.WINDOW_FLOOR_FRACTION;
+import static com.github.benmanes.caffeine.cache.WindowClimber.Step.STEP_PERCENT;
+import static com.github.benmanes.caffeine.cache.WindowClimber.Walk.PROBE_WALK_BUDGET;
 import static com.github.benmanes.caffeine.testing.Awaits.await;
+import static com.github.benmanes.caffeine.testing.Awaits.awaitFullGc;
+import static com.github.benmanes.caffeine.testing.ConcurrentTestHarness.executor;
 import static com.github.benmanes.caffeine.testing.FutureSubject.assertThat;
 import static com.github.benmanes.caffeine.testing.IntSubject.assertThat;
+import static com.github.benmanes.caffeine.testing.LoggingEvents.logEvents;
 import static com.github.benmanes.caffeine.testing.MapSubject.assertThat;
+import static com.github.benmanes.caffeine.testing.Nullness.nullKey;
+import static com.github.benmanes.caffeine.testing.Nullness.nullRef;
+import static com.github.benmanes.caffeine.testing.Nullness.nullReferenceQueue;
+import static com.github.benmanes.caffeine.testing.Nullness.nullString;
+import static com.github.benmanes.caffeine.testing.Nullness.nullValue;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth.assertWithMessage;
 import static java.lang.Thread.State.BLOCKED;
 import static java.lang.Thread.State.WAITING;
 import static java.util.Locale.US;
+import static java.util.Objects.requireNonNull;
 import static java.util.function.Function.identity;
-import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.not;
-import static org.hamcrest.Matchers.nullValue;
-import static org.junit.Assert.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -58,104 +91,133 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 import static org.slf4j.event.Level.ERROR;
+import static org.slf4j.event.Level.TRACE;
 import static org.slf4j.event.Level.WARN;
 
 import java.io.IOException;
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
+import java.lang.reflect.InaccessibleObjectException;
 import java.time.Duration;
 import java.util.AbstractMap.SimpleEntry;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.UnaryOperator;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import org.apache.commons.lang3.mutable.MutableInt;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.NullUnmarked;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
+import org.junit.jupiter.params.ParameterizedTest;
 import org.mockito.Mockito;
 import org.mockito.stubbing.Answer;
-import org.testng.annotations.Listeners;
-import org.testng.annotations.Test;
 
+import com.github.benmanes.caffeine.cache.BoundedLocalCache.Access;
 import com.github.benmanes.caffeine.cache.BoundedLocalCache.BoundedPolicy.FixedExpireAfterWrite;
+import com.github.benmanes.caffeine.cache.BoundedLocalCache.ComputeContext;
 import com.github.benmanes.caffeine.cache.BoundedLocalCache.PerformCleanupTask;
+import com.github.benmanes.caffeine.cache.CacheSpec.CacheExecutor;
+import com.github.benmanes.caffeine.cache.CacheSpec.CacheExpiry;
+import com.github.benmanes.caffeine.cache.CacheSpec.CacheScheduler;
+import com.github.benmanes.caffeine.cache.CacheSpec.CacheWeigher;
+import com.github.benmanes.caffeine.cache.CacheSpec.Compute;
+import com.github.benmanes.caffeine.cache.CacheSpec.ExecutorFailure;
+import com.github.benmanes.caffeine.cache.CacheSpec.Expire;
+import com.github.benmanes.caffeine.cache.CacheSpec.Implementation;
+import com.github.benmanes.caffeine.cache.CacheSpec.InitialCapacity;
+import com.github.benmanes.caffeine.cache.CacheSpec.Listener;
+import com.github.benmanes.caffeine.cache.CacheSpec.Loader;
+import com.github.benmanes.caffeine.cache.CacheSpec.Maximum;
+import com.github.benmanes.caffeine.cache.CacheSpec.Population;
+import com.github.benmanes.caffeine.cache.CacheSpec.ReferenceType;
+import com.github.benmanes.caffeine.cache.CacheSpec.Stats;
 import com.github.benmanes.caffeine.cache.LocalCacheFactory.MethodHandleBasedFactory;
 import com.github.benmanes.caffeine.cache.Policy.Eviction;
 import com.github.benmanes.caffeine.cache.Policy.FixedExpiration;
+import com.github.benmanes.caffeine.cache.Policy.FixedRefresh;
 import com.github.benmanes.caffeine.cache.Policy.VarExpiration;
+import com.github.benmanes.caffeine.cache.References.InternalReference;
 import com.github.benmanes.caffeine.cache.References.WeakKeyReference;
+import com.github.benmanes.caffeine.cache.RemovalListeners.ConsumingRemovalListener;
 import com.github.benmanes.caffeine.cache.SnapshotEntry.CompleteEntry;
 import com.github.benmanes.caffeine.cache.SnapshotEntry.ExpirableEntry;
 import com.github.benmanes.caffeine.cache.SnapshotEntry.ExpirableWeightedEntry;
 import com.github.benmanes.caffeine.cache.SnapshotEntry.RefreshableExpirableEntry;
 import com.github.benmanes.caffeine.cache.SnapshotEntry.WeightedEntry;
+import com.github.benmanes.caffeine.cache.WindowClimber.DensityClimber;
+import com.github.benmanes.caffeine.cache.WindowClimber.Walk;
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
-import com.github.benmanes.caffeine.cache.testing.CacheContext;
-import com.github.benmanes.caffeine.cache.testing.CacheProvider;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.CacheExecutor;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.CacheExpiry;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.CacheScheduler;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.CacheWeigher;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Compute;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.ExecutorFailure;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Expire;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Implementation;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.InitialCapacity;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Listener;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Loader;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Maximum;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Population;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.ReferenceType;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Stats;
-import com.github.benmanes.caffeine.cache.testing.CacheValidationListener;
-import com.github.benmanes.caffeine.cache.testing.CheckMaxLogLevel;
-import com.github.benmanes.caffeine.cache.testing.CheckNoEvictions;
-import com.github.benmanes.caffeine.cache.testing.RemovalListeners.ConsumingRemovalListener;
 import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
 import com.github.benmanes.caffeine.testing.Int;
 import com.github.valfirst.slf4jtest.TestLogger;
 import com.github.valfirst.slf4jtest.TestLoggerFactory;
 import com.google.common.collect.FluentIterable;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
+import com.google.common.collect.Streams;
+import com.google.common.testing.FakeTicker;
 import com.google.common.testing.GcFinalization;
+import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.Uninterruptibles;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import com.google.errorprone.annotations.Var;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * The test cases for the implementation details of {@link BoundedLocalCache}.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@CheckMaxLogLevel(WARN)
-@Listeners(CacheValidationListener.class)
-@Test(dataProviderClass = CacheProvider.class)
+@CheckMaxLogLevel(TRACE)
 @SuppressWarnings({"ClassEscapesDefinedScope", "GuardedBy"})
-public final class BoundedLocalCacheTest {
+final class BoundedLocalCacheTest {
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @SuppressWarnings("StatementWithEmptyBody")
   @CacheSpec(population = Population.FULL, removalListener = Listener.MOCKITO)
-  public void clear_pendingWrites(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void clear_pendingWrites(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var populated = new boolean[1];
     Answer<?> fillWriteBuffer = invocation -> {
       while (!populated[0] && cache.writeBuffer.offer(() -> {})) {
@@ -174,10 +236,11 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.writeBuffer).isEmpty();
   }
 
-  @Test(dataProvider = "caches")
-  @CacheSpec(implementation = Implementation.Caffeine, loader = Loader.IDENTITY,
+  @ParameterizedTest
+  @SuppressWarnings("StatementWithEmptyBody")
+  @CacheSpec(loader = Loader.IDENTITY,
       population = Population.FULL, removalListener = Listener.MOCKITO)
-  public void clear_pendingWrites_reload(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void clear_pendingWrites_reload(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var populated = new boolean[1];
     Answer<?> fillWriteBuffer = invocation -> {
       while (!populated[0] && cache.writeBuffer.offer(() -> {})) {
@@ -198,10 +261,11 @@ public final class BoundedLocalCacheTest {
     assertThat(cache).hasSize(context.initialSize());
   }
 
-  @Test(dataProvider = "caches", groups = "slow")
-  @CacheSpec(implementation = Implementation.Caffeine, loader = Loader.IDENTITY,
-      population = Population.FULL, keys = ReferenceType.WEAK, removalListener = Listener.MOCKITO)
-  public void clear_pendingWrites_weakKeys(
+  @ParameterizedTest
+  @SuppressWarnings("StatementWithEmptyBody")
+  @CacheSpec(loader = Loader.IDENTITY, population = Population.FULL,
+      keys = ReferenceType.WEAK, removalListener = Listener.MOCKITO)
+  void clear_pendingWrites_weakKeys(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var collected = new boolean[1];
     var populated = new boolean[1];
@@ -217,7 +281,7 @@ public final class BoundedLocalCacheTest {
           var ref = (WeakReference<?>) keyRef;
           ref.enqueue();
         }
-        GcFinalization.awaitFullGc();
+        awaitFullGc();
         collected[0] = (invocation.<RemovalCause>getArgument(2) == COLLECTED);
       }
       return null;
@@ -232,13 +296,83 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.writeBuffer).isEmpty();
   }
 
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, scheduler = CacheScheduler.MOCKITO)
+  void clear_incomplete_reschedules(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    reset(context.scheduler());
+    when(context.scheduler().schedule(any(), any(), anyLong(), any()))
+        .thenReturn(new CompletableFuture<>());
+
+    // A write that raced the clear can leave the drain status required with no scheduled follow-up.
+    cache.drainStatus = REQUIRED;
+    cache.clear();
+
+    assertThat(requireNonNull(cache.pacer()).isScheduled()).isTrue();
+    verify(context.scheduler()).schedule(any(), any(), anyLong(), any());
+  }
+
+  @ParameterizedTest
+  @SuppressWarnings("StatementWithEmptyBody")
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.STRONG,
+      scheduler = CacheScheduler.MOCKITO, removalListener = Listener.MOCKITO)
+  void clear_incompleteStragglers_reschedules(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    reset(context.scheduler());
+    when(context.scheduler().schedule(any(), any(), anyLong(), any()))
+        .thenReturn(new CompletableFuture<>());
+
+    // A write racing clear() can leave the drain status required with no scheduled follow-up when
+    // the under-lock loop bails early with stragglers remaining and every straggler remove(key)
+    // no-ops because a concurrent thread already removed those keys. Force the early bail by
+    // filling the write buffer during the first removal, then remove the rest (an internal removal
+    // does not reschedule) so each straggler lookup misses.
+    var stranded = new boolean[1];
+    Answer<?> strandStragglers = invocation -> {
+      if (!stranded[0]) {
+        stranded[0] = true;
+        while (cache.writeBuffer.offer(() -> {})) {
+          // ignored
+        }
+        long now = cache.expirationTicker().read();
+        for (var node : List.copyOf(cache.data.values())) {
+          cache.removeNode(node, now);
+        }
+        cache.drainStatus = REQUIRED;
+      }
+      return null;
+    };
+    doAnswer(strandStragglers)
+        .when(context.removalListener())
+        .onRemoval(any(), any(), any());
+
+    cache.clear();
+
+    assertThat(stranded[0]).isTrue();
+    assertThat(requireNonNull(cache.pacer()).isScheduled()).isTrue();
+    verify(context.scheduler()).schedule(any(), any(), anyLong(), any());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, scheduler = CacheScheduler.MOCKITO)
+  void clear_complete_doesNotReschedule(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    reset(context.scheduler());
+
+    cache.drainStatus = IDLE;
+    cache.clear();
+
+    verifyNoInteractions(context.scheduler());
+  }
+
   /* --------------- Maintenance --------------- */
 
   @Test
-  @SuppressWarnings("UnusedVariable")
-  public void cleanupTask_allowGc() {
-    var cache = new BoundedLocalCache<Object, Object>(
-        Caffeine.newBuilder(), /* loader */ null, /* async */ false) {};
+  @SuppressFBWarnings("DLS_DEAD_LOCAL_STORE_OF_NULL")
+  @SuppressWarnings({"PMD.UnusedAssignment", "UnusedAssignment"})
+  void cleanupTask_allowGc() {
+    @Var var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {};
     var task = cache.drainBuffersTask;
     cache = null;
 
@@ -247,41 +381,429 @@ public final class BoundedLocalCacheTest {
   }
 
   @Test
+  void maintenance_recursive() {
+    // A listener that runs on the caller's thread observes the timer wheel mid-rebuild, where the
+    // bucket being expired is detached and walked by a stack reference. Descheduling the successor
+    // that the walk is holding would strand the remainder of the chain, so the reentry is rejected
+    var ticker = new FakeTicker();
+    var removed = new ArrayList<@Nullable Integer>();
+    var reentrant = new AtomicBoolean();
+    var self = new AtomicReference<Cache<Integer, Integer>>();
+
+    Cache<Integer, Integer> cache = Caffeine.newBuilder()
+        .expireAfter(Expiry.creating((Integer key, Integer value) -> Duration.ofMinutes(1)))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .<Integer, Integer>removalListener((key, value, cause) -> {
+          removed.add(key);
+          if (reentrant.compareAndSet(false, true)) {
+            var victim = requireNonNull(self.get());
+            victim.invalidate(2);
+            victim.cleanUp();
+          }
+        })
+        .build();
+    self.set(cache);
+
+    for (int i = 1; i <= 6; i++) {
+      cache.put(i, i);
+    }
+    ticker.advance(Duration.ofMinutes(2));
+    cache.cleanUp();
+
+    assertThat(removed).containsExactly(1, 2, 3, 4, 5, 6);
+    assertThat(cache.estimatedSize()).isEqualTo(0);
+  }
+
+  @Test
+  void maintenance_recursive_accessOrder() {
+    var cache = scanWithReentrantRemoval(/* victim= */ 2, builder ->
+        builder.expireAfterAccess(Duration.ofMinutes(1)));
+    assertNoOrphans(cache, cache.accessOrderWindowDeque());
+  }
+
+  @Test
+  void maintenance_recursive_writeOrder() {
+    var cache = scanWithReentrantRemoval(/* victim= */ 2, builder ->
+        builder.expireAfterWrite(Duration.ofMinutes(1)));
+    assertNoOrphans(cache, cache.writeOrderDeque());
+  }
+
+  @Test
+  void maintenance_recursive_accessOrder_removedTail() {
+    var cache = scanWithReentrantRemoval(/* victim= */ 6, builder ->
+        builder.expireAfterAccess(Duration.ofMinutes(1)));
+    assertNoOrphans(cache, cache.accessOrderWindowDeque());
+  }
+
+  @Test
+  void maintenance_recursive_writeOrder_removedTail() {
+    var cache = scanWithReentrantRemoval(/* victim= */ 6, builder ->
+        builder.expireAfterWrite(Duration.ofMinutes(1)));
+    assertNoOrphans(cache, cache.writeOrderDeque());
+  }
+
+  /**
+   * Runs an async cache's expiration scan while a reentrant removal listener unlinks the next
+   * node or captured tail. Cleanup runs on another thread so a nonterminating scan fails the
+   * bounded await instead of hanging the build.
+   */
+  private static BoundedLocalCache<Integer, CompletableFuture<Integer>> scanWithReentrantRemoval(
+      int victim, UnaryOperator<Caffeine<Object, Object>> expiry) {
+    var ticker = new FakeTicker();
+    var reentrant = new AtomicBoolean();
+    var self = new AtomicReference<AsyncCache<Integer, Integer>>();
+
+    AsyncCache<Integer, Integer> cache = expiry
+        .apply(Caffeine.newBuilder().executor(Runnable::run).ticker(ticker::read))
+        .removalListener((key, value, cause) -> {
+          if (reentrant.compareAndSet(false, true)) {
+            var nested = requireNonNull(self.get()).synchronous();
+            nested.invalidate(victim);
+            nested.cleanUp();
+          }
+        }).buildAsync();
+    self.set(cache);
+
+    // An in-flight future is stamped with the async sentinel, so it never expires and the scan
+    // reaches it through the reorder branch instead of evicting it.
+    cache.put(1, CompletableFuture.completedFuture(1));
+    for (int i = 2; i <= 6; i++) {
+      cache.put(i, new CompletableFuture<>());
+    }
+
+    ticker.advance(Duration.ofMinutes(2));
+    var completed = new AtomicBoolean();
+    ConcurrentTestHarness.execute(() -> {
+      cache.synchronous().cleanUp();
+      completed.set(true);
+    });
+    await().untilTrue(completed);
+    return asBoundedLocalCache(cache);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
+      expireAfterAccess = Expire.ONE_MINUTE, removalListener = Listener.MOCKITO)
+  void expireAfterAccess_transferredDuringScan(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.setWindowMaximum(context.maximumSize());
+    for (int i = 0; i < 6; i++) {
+      var value = cache.put(Int.valueOf(i), Int.valueOf(i));
+      assertThat(value).isNull();
+    }
+    cache.cleanUp();
+
+    // Stage a non-empty probation space so that a node transferred into it during the scan has
+    // live links, which is what makes contains() report it as still being in the window queue.
+    var window = cache.accessOrderWindowDeque();
+    var probation = cache.accessOrderProbationDeque();
+    for (int i = 0; i < 2; i++) {
+      var node = requireNonNull(window.peekLast());
+      assertThat(window.remove(node)).isTrue();
+      assertThat(probation.offerLast(node)).isTrue();
+      cache.setWindowWeightedSize(cache.windowWeightedSize() - node.getPolicyWeight());
+      node.makeMainProbation();
+    }
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    long now = cache.expirationTicker().read();
+    for (var node : probation) {
+      node.setAccessTime(now);
+    }
+    // A read whose buffer record was dropped leaves a fresh timestamp at a stale position, which
+    // is the condition the scan's reorder branch exists to repair.
+    var head = requireNonNull(window.peekFirst());
+    requireNonNull(head.getNextInAccessOrder()).setAccessTime(now);
+
+    // Evicting the head delivers the notification inline, and the re-entrant maintenance transfers
+    // the successor that the scan is holding out of the window queue and into probation.
+    doAnswer(invocation -> {
+      cache.setWindowMaximum(0);
+      cache.cleanUp();
+      return null;
+    }).when(context.removalListener()).onRemoval(any(), any(), any());
+
+    cache.cleanUp();
+    assertQueuesConsistent(cache);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
+      expireAfterAccess = Expire.ONE_MINUTE, removalListener = Listener.MOCKITO)
+  void expireAfterAccess_promotedDuringScan(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.setWindowMaximum(context.maximumSize());
+    for (int i = 0; i < 4; i++) {
+      var value = cache.put(Int.valueOf(i), Int.valueOf(i));
+      assertThat(value).isNull();
+    }
+    cache.cleanUp();
+
+    // Stage one protected entry, so that an entry promoted during the scan has live links, and
+    // three probation entries in insertion order
+    var window = cache.accessOrderWindowDeque();
+    var probation = cache.accessOrderProbationDeque();
+    var protectedDeque = cache.accessOrderProtectedDeque();
+    for (int i = 0; i < 4; i++) {
+      var node = requireNonNull(window.peekFirst());
+      assertThat(window.remove(node)).isTrue();
+      cache.setWindowWeightedSize(cache.windowWeightedSize() - node.getPolicyWeight());
+      if (i == 0) {
+        assertThat(protectedDeque.offerLast(node)).isTrue();
+        cache.setMainProtectedWeightedSize(
+            cache.mainProtectedWeightedSize() + node.getPolicyWeight());
+        node.makeMainProtected();
+      } else {
+        assertThat(probation.offerLast(node)).isTrue();
+        node.makeMainProbation();
+      }
+    }
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    long now = cache.expirationTicker().read();
+    requireNonNull(protectedDeque.peekFirst()).setAccessTime(now);
+    var head = requireNonNull(probation.peekFirst());
+    var promoted = requireNonNull(head.getNextInAccessOrder());
+    var last = requireNonNull(probation.peekLast());
+    promoted.setAccessTime(now - TimeUnit.SECONDS.toNanos(40));
+    last.setAccessTime(now - TimeUnit.SECONDS.toNanos(30));
+
+    // Evicting the expired head delivers the notification inline. The listener reads the successor
+    // that the scan is holding, and the re-entrant maintenance promotes it to the protected queue
+    // while the tail stays in probation, so the scan resumes on an entry that another queue owns.
+    var promotedKey = requireNonNull(promoted.getKey());
+    doAnswer(invocation -> {
+      assertThat(cache.get(promotedKey)).isNotNull();
+      cache.cleanUp();
+      return null;
+    }).doNothing().when(context.removalListener()).onRemoval(any(), any(), any());
+
+    cache.cleanUp();
+    assertThat(promoted.getQueueType()).isEqualTo(PROTECTED);
+    assertQueuesConsistent(cache);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.VALUE,
+      executor = CacheExecutor.DISCARDING, removalListener = Listener.CONSUMING)
+  void addTask_declinedEviction_leavesEntryLinked(BoundedLocalCache<Int, Int> cache) {
+    cache.setMaximumSize(10);
+
+    // The insert's weight exceeds the maximum, so AddTask evicts instead of linking the entry.
+    var key = Int.valueOf(1);
+    assertThat(cache.put(key, Int.valueOf(100))).isNull();
+
+    // Before the write buffer drains, the entry is rewritten to a zero weight, which evictEntry
+    // treats as ineligible for size eviction and resurrects.
+    assertThat(cache.put(key, Int.valueOf(0))).isEqualTo(Int.valueOf(100));
+
+    cache.cleanUp();
+
+    var node = cache.data.get(cache.nodeFactory.newLookupKey(key));
+    assertThat(node).isNotNull();
+    assertThat(node.isAlive()).isTrue();
+    assertWithMessage("a resurrected entry is linked into no eviction queue")
+        .that(cache.accessOrderWindowDeque().contains(node)).isTrue();
+
+    // An orphan accrues: once a real weight returns, weightedSize counts capacity that no queue
+    // holds, so eviction can never reclaim it.
+    assertThat(cache.put(key, Int.valueOf(5))).isEqualTo(Int.valueOf(0));
+    cache.cleanUp();
+    @Var long linkedWeight = 0;
+    for (var deque : List.of(cache.accessOrderWindowDeque(),
+        cache.accessOrderProbationDeque(), cache.accessOrderProtectedDeque())) {
+      for (var n : deque) {
+        linkedWeight += n.getPolicyWeight();
+      }
+    }
+    assertWithMessage("weightedSize counts weight that no queue holds")
+        .that(cache.weightedSize()).isEqualTo(linkedWeight);
+  }
+
+  /**
+   * The size eviction walk captures the successor before {@code evictEntry} delivers the
+   * notification, so an inline listener can unlink the node that the walk is still holding. The
+   * containment argument for {@code evictAndAdvance} was reasoned from the source when
+   * {@code AddTask} was fixed; this pins it.
+   */
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
+      removalListener = Listener.MOCKITO)
+  void evictAndAdvance_reentrantRemovalOfSuccessor(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.setWindowMaximum(context.maximumSize());
+    for (int i = 0; i < 10; i++) {
+      var value = cache.put(Int.valueOf(i), Int.valueOf(i));
+      assertThat(value).isNull();
+    }
+    cache.cleanUp();
+
+    // Stage the probation space so that evictFromMain performs a multi-victim walk.
+    var window = cache.accessOrderWindowDeque();
+    var probation = cache.accessOrderProbationDeque();
+    for (int i = 0; i < 9; i++) {
+      var node = requireNonNull(window.peekLast());
+      assertThat(window.remove(node)).isTrue();
+      assertThat(probation.offerLast(node)).isTrue();
+      cache.setWindowWeightedSize(cache.windowWeightedSize() - node.getPolicyWeight());
+      node.makeMainProbation();
+    }
+
+    // The order the walk follows, so the listener can remove the successor it is holding.
+    var order = new ArrayList<Int>();
+    for (var node = probation.peekFirst(); node != null; node = node.getNextInAccessOrder()) {
+      order.add(requireNonNull(node.getKey()));
+    }
+    var reentrant = new AtomicBoolean();
+    doAnswer(invocation -> {
+      Int key = invocation.getArgument(0);
+      int index = order.indexOf(key);
+      if ((index >= 0) && ((index + 1) < order.size()) && reentrant.compareAndSet(false, true)) {
+        var evicted = cache.remove(order.get(index + 1));
+        assertThat(evicted).isNotNull();
+      }
+      return null;
+    }).when(context.removalListener()).onRemoval(any(), any(), any());
+
+    cache.setMaximumSize(2);
+    cache.cleanUp();
+
+    assertThat(reentrant.get()).isTrue();
+    assertQueuesConsistent(cache);
+
+    @Var long linked = 0;
+    for (var deque : List.of(cache.accessOrderWindowDeque(),
+        cache.accessOrderProbationDeque(), cache.accessOrderProtectedDeque())) {
+      for (var node : deque) {
+        if (node.isAlive()) {
+          linked++;
+        }
+      }
+    }
+    long alive = cache.data.values().stream().filter(Node::isAlive).count();
+    assertWithMessage("a re-entrant removal orphaned an entry from the eviction queues")
+        .that(linked).isEqualTo(alive);
+  }
+
+  @Test
+  void evictEntry_expiredBacklog_isNotReportedAsSize() {
+    // The expiration pass is capped, so a larger backlog is handed to evictEntries in the same
+    // cycle. Those entries are evicted for capacity but expired long before, and every other
+    // removal path derives the cause from hasExpired.
+    int population = (2 * EXPIRATION_THRESHOLD) + 500;
+    var causes = new EnumMap<RemovalCause, Integer>(RemovalCause.class);
+    var ticker = new FakeTicker();
+    Cache<Integer, Integer> cache = Caffeine.newBuilder()
+        .removalListener((key, value, cause) -> causes.merge(cause, 1, Integer::sum))
+        .expireAfterWrite(Duration.ofMinutes(1))
+        .maximumSize(population)
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .build();
+    for (int i = 0; i < population; i++) {
+      cache.put(i, i);
+    }
+    causes.clear();
+
+    ticker.advance(Duration.ofMinutes(2));
+    cache.policy().eviction().orElseThrow().setMaximum(500);
+    cache.cleanUp();
+
+    assertThat(cache).isEmpty();
+    assertThat(causes).containsExactly(RemovalCause.EXPIRED, population);
+  }
+
+  /** Asserts that each access-order queue's endpoints bound its own chain of matching entries. */
+  private static <K, V> void assertQueuesConsistent(BoundedLocalCache<K, V> cache) {
+    assertQueueConsistent("window", cache.accessOrderWindowDeque(), WINDOW);
+    assertQueueConsistent("probation", cache.accessOrderProbationDeque(), PROBATION);
+    assertQueueConsistent("protected", cache.accessOrderProtectedDeque(), PROTECTED);
+  }
+
+  private static <K, V> void assertQueueConsistent(
+      String name, LinkedDeque<Node<K, V>> deque, int queueType) {
+    @Var Node<K, V> tail = null;
+    for (var node = deque.peekFirst(); node != null; node = node.getNextInAccessOrder()) {
+      assertWithMessage("%s holds an entry belonging to another queue", name)
+          .that(node.getQueueType()).isEqualTo(queueType);
+      tail = node;
+    }
+    assertWithMessage("%s: peekLast() is not the end of the chain from peekFirst()", name)
+        .that(tail).isSameInstanceAs(deque.peekLast());
+  }
+
+  /** Asserts that every live entry is still linked in the queue that the expiration scan walks. */
+  private static <K, V> void assertNoOrphans(
+      BoundedLocalCache<K, V> cache, LinkedDeque<Node<K, V>> deque) {
+    @Var long linked = 0;
+    for (var node : deque) {
+      if (node.isAlive()) {
+        linked++;
+      }
+    }
+    long alive = cache.data.values().stream().filter(Node::isAlive).count();
+    assertWithMessage("live entries orphaned from the expiration queue")
+        .that(linked).isEqualTo(alive);
+  }
+
+  @Test
   @CheckMaxLogLevel(ERROR)
-  public void cleanupTask_exception() {
+  void cleanupTask_exception() {
     var expected = new RuntimeException();
     BoundedLocalCache<?, ?> cache = Mockito.mock();
     doThrow(expected).when(cache).performCleanUp(any());
     var task = new PerformCleanupTask(cache);
     assertThat(task.exec()).isFalse();
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getThrowable().orElseThrow()).isSameInstanceAs(expected);
-    assertThat(event.getFormattedMessage()).isEqualTo(
-        "Exception thrown when performing the maintenance task");
-    assertThat(event.getLevel()).isEqualTo(ERROR);
+    assertThat(logEvents()
+        .withMessage("Exception thrown when performing the maintenance task")
+        .withThrowable(expected)
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
   }
 
   @Test
   @CheckMaxLogLevel(ERROR)
-  public void cleanup_exception() {
+  void cleanupTask_run_exception() {
+    var expected = new RuntimeException();
+    BoundedLocalCache<?, ?> cache = Mockito.mock();
+    doThrow(expected).when(cache).performCleanUp(any());
+    var task = new PerformCleanupTask(cache);
+    task.run();
+    assertThat(logEvents()
+        .withMessage("Exception thrown when performing the maintenance task")
+        .withThrowable(expected)
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @Test
+  @CheckMaxLogLevel(ERROR)
+  void cleanup_exception() {
     var expected = new RuntimeException();
     BoundedLocalCache<?, ?> cache = Mockito.mock();
     doThrow(expected).when(cache).performCleanUp(any());
     doCallRealMethod().when(cache).cleanUp();
     cache.cleanUp();
 
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getThrowable().orElseThrow()).isSameInstanceAs(expected);
-    assertThat(event.getFormattedMessage()).isEqualTo(
-        "Exception thrown when performing the maintenance task");
-    assertThat(event.getLevel()).isEqualTo(ERROR);
+    assertThat(logEvents()
+        .withMessage("Exception thrown when performing the maintenance task")
+        .withThrowable(expected)
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
   }
 
   @Test
-  public void scheduleAfterWrite() {
-    var cache = new BoundedLocalCache<Object, Object>(
-        Caffeine.newBuilder(), /* loader */ null, /* async */ false) {
+  void scheduleAfterWrite() {
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {
       @Override void scheduleDrainBuffers() {}
     };
     var transitions = Map.of(
@@ -297,10 +819,33 @@ public final class BoundedLocalCacheTest {
   }
 
   @Test
-  public void scheduleAfterWrite_invalidDrainStatus() {
-    var cache = new BoundedLocalCache<Object, Object>(
-        Caffeine.newBuilder(), /* loader */ null, /* async */ false) {};
+  void scheduleAfterWrite_staleIdle_retriesAgainstTheObservedStatus() {
+    // The status may advance between the read and the compare-and-swap. Dropping the failed swap
+    // leaves the write with no driver when the drain in flight has already passed its task, so the
+    // arm retries against what it observed rather than acting on what it read, as processing does
+    var drained = new AtomicBoolean();
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {
+      @Override void scheduleDrainBuffers() {
+        drained.set(true);
+      }
+      @Override int drainStatusOpaque() {
+        return IDLE;
+      }
+    };
+
+    cache.drainStatus = PROCESSING_TO_IDLE;
+    cache.scheduleAfterWrite();
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_REQUIRED);
+    assertThat(drained.get()).isFalse();
+  }
+
+  @Test
+  void scheduleAfterWrite_invalidDrainStatus() {
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {};
     var valid = Set.of(IDLE, REQUIRED, PROCESSING_TO_IDLE, PROCESSING_TO_REQUIRED);
+    @SuppressWarnings("UnnecessaryLocalVariable")
     var invalid = IntStream.generate(ThreadLocalRandom.current()::nextInt).boxed()
         .filter(Predicate.not(valid::contains))
         .findFirst().orElseThrow();
@@ -310,10 +855,10 @@ public final class BoundedLocalCacheTest {
   }
 
   @Test
-  public void scheduleDrainBuffers() {
+  void scheduleDrainBuffers() {
     Executor executor = Mockito.mock();
-    var cache = new BoundedLocalCache<Object, Object>(
-        Caffeine.newBuilder().executor(executor), /* loader */ null, /* async */ false) {};
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder().executor(executor), /* cacheLoader= */ null, /* isAsync= */ false) {};
     var transitions = Map.of(
         IDLE, PROCESSING_TO_IDLE,
         REQUIRED, PROCESSING_TO_IDLE,
@@ -332,18 +877,16 @@ public final class BoundedLocalCacheTest {
   }
 
   @Test
-  public void rescheduleDrainBuffers() {
-    var evicting = new AtomicBoolean();
+  void rescheduleDrainBuffers() {
     var done = new AtomicBoolean();
-    var evictionListener = new RemovalListener<Int, Int>() {
-      @Override public void onRemoval(Int key, Int value, RemovalCause cause) {
-        evicting.set(true);
-        await().untilTrue(done);
-      }
+    var evicting = new AtomicBoolean();
+    RemovalListener<Int, Int> evictionListener = (key, value, cause) -> {
+      evicting.set(true);
+      await().untilTrue(done);
     };
     var cache = asBoundedLocalCache(Caffeine.newBuilder()
-        .executor(CacheExecutor.THREADED.create())
         .evictionListener(evictionListener)
+        .executor(executor)
         .maximumSize(0)
         .build());
     var oldValue1 = cache.put(Int.valueOf(1), Int.valueOf(1));
@@ -358,12 +901,249 @@ public final class BoundedLocalCacheTest {
     await().untilAsserted(() -> assertThat(cache.drainStatus).isAnyOf(REQUIRED, IDLE));
   }
 
+  @Test
+  void evictFromWindow_capped() {
+    var cache = asBoundedLocalCache(Caffeine.newBuilder()
+        .executor(Runnable::run)
+        .maximumSize(100_000)
+        .build());
+    cache.evictionLock.lock();
+    try {
+      cache.setWindowMaximum(cache.maximum());
+    } finally {
+      cache.evictionLock.unlock();
+    }
+    for (int i = 0; i < 2_500; i++) {
+      var prior = cache.put(Int.valueOf(i), Int.valueOf(i));
+      assertThat(prior).isNull();
+    }
+
+    cache.evictionLock.lock();
+    try {
+      assertThat(cache.accessOrderWindowDeque()).hasSize(2_500);
+
+      // A resize can leave the window arbitrarily oversized; the transfer is bounded per
+      // maintenance cycle and re-arms itself to drain the backlog
+      cache.setWindowMaximum(0);
+      var first = cache.evictFromWindow();
+      assertThat(first).isNotNull();
+      assertThat(cache.accessOrderWindowDeque()).hasSize(1_500);
+      assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_REQUIRED);
+    } finally {
+      cache.evictionLock.unlock();
+    }
+
+    cache.cleanUp();
+    cache.cleanUp();
+    assertThat(cache.accessOrderWindowDeque()).isEmpty();
+  }
+
+  @Test
+  void put_reorderedUpdates_leaveNoRegionResidue() {
+    // A node accumulates its update deltas into an int policyWeight while the region totals take
+    // the same deltas as longs. The value is written under the node's monitor but the update task
+    // is queued after it is released, so a second writer can queue its task first and the
+    // intermediate sum then leaves the int range. A removal listener on a direct executor runs in
+    // exactly that gap, which is what orders the two writers here.
+    int big = Integer.MAX_VALUE - 1;
+    var arrived = new AtomicBoolean();
+    var release = new AtomicBoolean();
+    var park = new AtomicBoolean();
+
+    var cache = asBoundedLocalCache(Caffeine.newBuilder()
+        .weigher((Int key, Int value) -> value.intValue())
+        .removalListener((@Nullable Int key, @Nullable Int value, RemovalCause cause) -> {
+          if (park.compareAndSet(true, false)) {
+            arrived.set(true);
+            await().untilTrue(release);
+          }
+        })
+        .maximumWeight(10_000_000_000L)
+        .executor(Runnable::run)
+        .build());
+    var key = Int.valueOf(1);
+    assertThat(cache.put(key, Int.valueOf(big))).isNull();
+
+    park.set(true);
+    var writer = new Thread(() -> assertThat(cache.put(key, Int.valueOf(1))).isNotNull());
+    writer.start();
+    await().untilTrue(arrived);
+
+    // the second write's task is queued and applied while the first writer is still parked
+    assertThat(cache.put(key, Int.valueOf(big))).isNotNull();
+
+    release.set(true);
+    Uninterruptibles.joinUninterruptibly(writer);
+    cache.cleanUp();
+
+    cache.evictionLock.lock();
+    try {
+      var node = cache.data.values().iterator().next();
+
+      // the node itself settles once both tasks have been applied
+      assertThat(node.getPolicyWeight()).isEqualTo(big);
+      assertThat(cache.weightedSize()).isEqualTo(big);
+
+      // the regions it moved through must settle with it
+      assertThat(cache.windowWeightedSize()).isEqualTo(
+          cache.accessOrderWindowDeque().stream().mapToLong(Node::getPolicyWeight).sum());
+      assertThat(cache.mainProtectedWeightedSize()).isEqualTo(
+          cache.accessOrderProtectedDeque().stream().mapToLong(Node::getPolicyWeight).sum());
+    } finally {
+      cache.evictionLock.unlock();
+    }
+  }
+
+  @Test
+  void evictFromWindow_cappedByTransfers() {
+    var cache = asBoundedLocalCache(Caffeine.newBuilder()
+        .weigher((Int key, Int value) -> value.intValue())
+        .executor(Runnable::run)
+        .maximumWeight(100_000)
+        .build());
+    cache.evictionLock.lock();
+    try {
+      cache.setWindowMaximum(cache.maximum());
+    } finally {
+      cache.evictionLock.unlock();
+    }
+    for (int i = 0; i < 1_100; i++) {
+      var prior = cache.put(Int.valueOf(i), Int.valueOf(0));
+      assertThat(prior).isNull();
+    }
+    for (int i = 1_100; i < 1_110; i++) {
+      var prior = cache.put(Int.valueOf(i), Int.valueOf(1));
+      assertThat(prior).isNull();
+    }
+
+    cache.evictionLock.lock();
+    try {
+      assertThat(cache.accessOrderWindowDeque()).hasSize(1_110);
+      assertThat(cache.windowWeightedSize()).isEqualTo(10);
+
+      // A pinned entry is skipped rather than transferred, so it must not spend the budget; else a
+      // prefix longer than the threshold consumes every cycle and the backlog never drains
+      cache.setWindowMaximum(0);
+      var first = cache.evictFromWindow();
+      assertThat(first).isNotNull();
+      assertThat(cache.windowWeightedSize()).isEqualTo(0);
+      assertThat(cache.accessOrderWindowDeque()).hasSize(1_100);
+      assertThat(cache.drainStatus).isNotEqualTo(PROCESSING_TO_REQUIRED);
+    } finally {
+      cache.evictionLock.unlock();
+    }
+  }
+
+  @Test
+  void evictFromWindow_cappedBacklog_underCapacityPressure() {
+    var cache = asBoundedLocalCache(Caffeine.newBuilder()
+        .weigher((Int key, Int value) -> value.intValue())
+        .executor(Runnable::run)
+        .maximumWeight(100_000)
+        .build());
+    cache.evictionLock.lock();
+    try {
+      cache.setWindowMaximum(cache.maximum());
+    } finally {
+      cache.evictionLock.unlock();
+    }
+    for (int i = 0; i < 1_500; i++) {
+      var prior = cache.put(Int.valueOf(i), Int.valueOf(1));
+      assertThat(prior).isNull();
+    }
+
+    cache.evictionLock.lock();
+    try {
+      assertThat(cache.accessOrderWindowDeque()).hasSize(1_500);
+
+      // both pressures in one cycle: the budgeted transfer re-arms for its remaining backlog
+      cache.setWindowMaximum(0);
+      cache.setMaximum(1_200);
+      var candidate = cache.evictFromWindow();
+      assertThat(candidate).isNotNull();
+      assertThat(cache.accessOrderWindowDeque()).hasSize(500);
+      assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_REQUIRED);
+
+      // and the capacity eviction still restores the bound, drawing further candidates from the
+      // window when admission rejects the transferred ones
+      cache.evictFromMain(candidate, 0L);
+      assertThat(cache.weightedSize()).isEqualTo(1_200);
+    } finally {
+      cache.evictionLock.unlock();
+    }
+  }
+
+  @Test
+  void drainKeyReferences_capped() {
+    var cache = asBoundedLocalCache(Caffeine.newBuilder()
+        .executor(Runnable::run)
+        .maximumSize(10_000)
+        .weakKeys()
+        .build());
+    var entries = new ArrayList<Int>();
+    for (int i = 0; i < 2_500; i++) {
+      var key = Int.valueOf(i);
+      var prior = cache.put(key, key);
+      assertThat(prior).isNull();
+      entries.add(key);
+    }
+
+    // a garbage collection cleared the cache's keys all at once; the list holds them until then
+    for (var node : cache.data.values()) {
+      var keyReference = (Reference<?>) node.getKeyReference();
+      keyReference.clear();
+      assertThat(keyReference.enqueue()).isTrue();
+    }
+    assertThat(cache.data).hasSize(entries.size());
+
+    cache.cleanUp();
+    assertThat(cache.data).hasSize(2_500 - (REFERENCE_THRESHOLD + 1));
+    assertThat(cache.drainStatus).isEqualTo(REQUIRED);
+
+    cache.cleanUp();
+    cache.cleanUp();
+    assertThat(cache.data).isEmpty();
+  }
+
+  @Test
+  void drainValueReferences_capped() {
+    var cache = asBoundedLocalCache(Caffeine.newBuilder()
+        .executor(Runnable::run)
+        .maximumSize(10_000)
+        .weakValues()
+        .build());
+    var entries = new ArrayList<Int>();
+    for (int i = 0; i < 2_500; i++) {
+      var value = Int.valueOf(-i);
+      var prior = cache.put(Int.valueOf(i), value);
+      assertThat(prior).isNull();
+      entries.add(value);
+    }
+
+    // a garbage collection cleared the cache's values all at once; the list holds them until then
+    for (var node : cache.data.values()) {
+      var valueReference = (Reference<?>) node.getValueReference();
+      valueReference.clear();
+      assertThat(valueReference.enqueue()).isTrue();
+    }
+    assertThat(cache.data).hasSize(entries.size());
+
+    cache.cleanUp();
+    assertThat(cache.data).hasSize(2_500 - (REFERENCE_THRESHOLD + 1));
+    assertThat(cache.drainStatus).isEqualTo(REQUIRED);
+
+    cache.cleanUp();
+    cache.cleanUp();
+    assertThat(cache.data).isEmpty();
+  }
+
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
+  @SuppressFBWarnings("MDM_LOCK_ISLOCKED")
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL,
       executor = CacheExecutor.REJECTING, executorFailure = ExecutorFailure.EXPECTED,
       removalListener = Listener.CONSUMING)
-  public void scheduleDrainBuffers_rejected(
+  void scheduleDrainBuffers_rejected(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var oldValue = cache.put(context.absentKey(), context.absentValue());
     assertThat(oldValue).isNull();
@@ -373,11 +1153,68 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.evictionLock.isLocked()).isFalse();
   }
 
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @SuppressFBWarnings("MDM_LOCK_ISLOCKED")
+  @CacheSpec(population = Population.EMPTY, executor = CacheExecutor.DISCARDING)
+  void scheduleDrainBuffers_discarded_quiescent(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var oldValue = cache.put(context.absentKey(), context.absentValue());
+    assertThat(oldValue).isNull();
+
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_IDLE);
+    assertThat(cache.writeBuffer.isEmpty()).isFalse();
+    assertThat(cache.evictionLock.isLocked()).isFalse();
+    assertThat(context.executor().submitted()).isGreaterThan(0);
+    assertThat(context.executor().completed()).isEqualTo(0);
+
+    // No follow-up writes are issued, so there is no writer-assist fallback path.
+    Uninterruptibles.sleepUninterruptibly(Duration.ofMillis(10));
+
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_IDLE);
+    assertThat(cache.writeBuffer.isEmpty()).isFalse();
+    assertThat(context.executor().completed()).isEqualTo(0);
+  }
+
+  /**
+   * A read-only workload has no writer-assist fallback, so a discarded maintenance task leaves the
+   * read buffer to fill and the drain status parked. The sibling above covers the quiescent case
+   * after a single write; this covers the reads that follow it.
+   */
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @SuppressFBWarnings("MDM_LOCK_ISLOCKED")
+  @CacheSpec(population = Population.EMPTY, executor = CacheExecutor.DISCARDING,
+      maximumSize = Maximum.FULL)
+  void scheduleDrainBuffers_discarded_readOnly(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var oldValue = cache.put(context.absentKey(), context.absentValue());
+    assertThat(oldValue).isNull();
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_IDLE);
+
+    // Reads alone: the buffer fills and nothing drains it, because only a write assists.
+    for (int i = 0; i < (4 * BoundedBuffer.BUFFER_SIZE); i++) {
+      var value = cache.getIfPresent(context.absentKey(), /* recordStats= */ true);
+      assertThat(value).isEqualTo(context.absentValue());
+    }
+
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_IDLE);
+    assertThat(cache.evictionLock.isLocked()).isFalse();
+    assertThat(context.executor().completed()).isEqualTo(0);
+    assertWithMessage("a read-only workload never drains the write buffer")
+        .that(cache.writeBuffer.isEmpty()).isFalse();
+
+    // A write is the assist that a read cannot perform.
+    var previous = cache.put(context.absentKey(), context.absentValue());
+    assertThat(previous).isEqualTo(context.absentValue());
+  }
+
   @Test
-  public void shouldDrainBuffers_invalidDrainStatus() {
-    var cache = new BoundedLocalCache<Object, Object>(
-        Caffeine.newBuilder(), /* loader */ null, /* async */ false) {};
+  void shouldDrainBuffers_invalidDrainStatus() {
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {};
     var valid = Set.of(IDLE, REQUIRED, PROCESSING_TO_IDLE, PROCESSING_TO_REQUIRED);
+    @SuppressWarnings("UnnecessaryLocalVariable")
     var invalid = IntStream.generate(ThreadLocalRandom.current()::nextInt).boxed()
         .filter(Predicate.not(valid::contains))
         .findFirst().orElseThrow();
@@ -386,9 +1223,10 @@ public final class BoundedLocalCacheTest {
     assertThrows(IllegalStateException.class, () -> cache.shouldDrainBuffers(true));
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @SuppressWarnings("resource")
   @CacheSpec(population = Population.EMPTY, scheduler = CacheScheduler.MOCKITO)
-  public void rescheduleCleanUpIfIncomplete_complete(
+  void rescheduleCleanUpIfIncomplete_complete(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     reset(context.scheduler());
     for (int status : new int[] { IDLE, PROCESSING_TO_IDLE, PROCESSING_TO_REQUIRED}) {
@@ -400,9 +1238,10 @@ public final class BoundedLocalCacheTest {
     }
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @SuppressWarnings("resource")
   @CacheSpec(population = Population.EMPTY)
-  public void rescheduleCleanUpIfIncomplete_incompatible(
+  void rescheduleCleanUpIfIncomplete_incompatible(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.drainStatus = REQUIRED;
     cache.rescheduleCleanUpIfIncomplete();
@@ -410,87 +1249,132 @@ public final class BoundedLocalCacheTest {
     assertThat(context.executor().completed()).isEqualTo(context.population().size());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, executor = CacheExecutor.DEFAULT)
-  public void rescheduleCleanUpIfIncomplete_immediate(
-      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void rescheduleCleanUpIfIncomplete_immediate(BoundedLocalCache<Int, Int> cache) {
     cache.drainStatus = REQUIRED;
     cache.rescheduleCleanUpIfIncomplete();
-    await().until(() -> cache.drainStatus, is(IDLE));
+    await().untilAsserted(() -> assertThat(cache.drainStatus).isEqualTo(IDLE));
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, scheduler = CacheScheduler.MOCKITO)
-  public void rescheduleCleanUpIfIncomplete_notScheduled_future(
+  void rescheduleCleanUpIfIncomplete_notScheduled_future(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     reset(context.scheduler());
     cache.drainStatus = REQUIRED;
-    cache.pacer().future = new CompletableFuture<>();
+    var pacer = requireNonNull(cache.pacer());
+    pacer.future = new CompletableFuture<>();
 
     cache.rescheduleCleanUpIfIncomplete();
     verifyNoInteractions(context.scheduler());
-    await().until(() -> cache.drainStatus, is(REQUIRED));
+    await().untilAsserted(() -> assertThat(cache.drainStatus).isEqualTo(REQUIRED));
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, scheduler = CacheScheduler.MOCKITO)
-  public void rescheduleCleanUpIfIncomplete_notScheduled_locked(
+  void rescheduleCleanUpIfIncomplete_notScheduled_locked(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     reset(context.scheduler());
     cache.drainStatus = REQUIRED;
-    cache.pacer().cancel();
+    var pacer = requireNonNull(cache.pacer());
+    pacer.cancel();
 
-    var done = new AtomicBoolean();
     cache.evictionLock.lock();
     try {
-      ConcurrentTestHarness.execute(() -> {
-        cache.rescheduleCleanUpIfIncomplete();
-        done.set(true);
-      });
-      await().untilTrue(done);
+      var future = CompletableFuture.runAsync(cache::rescheduleCleanUpIfIncomplete, executor);
+      assertThat(future).succeedsWithNull();
       verifyNoInteractions(context.scheduler());
-      await().until(() -> cache.drainStatus, is(REQUIRED));
+      await().untilAsserted(() -> assertThat(cache.drainStatus).isEqualTo(REQUIRED));
     } finally {
       cache.evictionLock.unlock();
     }
   }
 
-  @Test(dataProvider = "caches")
+  @Test
+  void rescheduleCleanUpIfIncomplete_notScheduled_notRequired() {
+    Pacer pacer = Mockito.mock();
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder().executor(Runnable::run),
+        /* cacheLoader= */ null, /* isAsync= */ false) {
+      @Override protected Pacer pacer() {
+        drainStatus = IDLE;
+        return pacer;
+      }
+    };
+    cache.drainStatus = REQUIRED;
+    cache.rescheduleCleanUpIfIncomplete();
+
+    verify(pacer).isScheduled();
+    verifyNoMoreInteractions(pacer);
+  }
+
+  @Test
+  void rescheduleCleanUpIfIncomplete_notScheduled_isScheduled() {
+    Pacer pacer = Mockito.mock();
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder().executor(Runnable::run),
+        /* cacheLoader= */ null, /* isAsync= */ false) {
+      @Override protected Pacer pacer() {
+        return pacer;
+      }
+    };
+    cache.drainStatus = REQUIRED;
+    when(pacer.isScheduled()).thenReturn(false, true);
+    cache.rescheduleCleanUpIfIncomplete();
+
+    verify(pacer, times(2)).isScheduled();
+    verifyNoMoreInteractions(pacer);
+  }
+
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, scheduler = CacheScheduler.MOCKITO)
-  public void rescheduleCleanUpIfIncomplete_scheduled_noFuture(
+  void rescheduleCleanUpIfIncomplete_scheduled_noFuture(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     reset(context.scheduler());
 
     when(context.scheduler().schedule(any(), any(), anyLong(), any()))
         .thenReturn(new CompletableFuture<>());
     cache.drainStatus = REQUIRED;
-    cache.pacer().cancel();
+    var pacer = requireNonNull(cache.pacer());
+    pacer.cancel();
 
     cache.rescheduleCleanUpIfIncomplete();
-    assertThat(cache.pacer().isScheduled()).isTrue();
+    assertThat(pacer.isScheduled()).isTrue();
     verify(context.scheduler()).schedule(any(), any(), anyLong(), any());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, scheduler = CacheScheduler.MOCKITO)
-  public void rescheduleCleanUpIfIncomplete_scheduled_doneFuture(
+  void rescheduleCleanUpIfIncomplete_scheduled_doneFuture(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     reset(context.scheduler());
 
     when(context.scheduler().schedule(any(), any(), anyLong(), any()))
         .thenReturn(new CompletableFuture<>());
-    cache.pacer().future = DisabledFuture.INSTANCE;
+    var pacer = requireNonNull(cache.pacer());
+    pacer.future = DisabledFuture.instance();
     cache.drainStatus = REQUIRED;
 
     cache.rescheduleCleanUpIfIncomplete();
-    assertThat(cache.pacer().isScheduled()).isTrue();
+    assertThat(pacer.isScheduled()).isTrue();
     verify(context.scheduler()).schedule(any(), any(), anyLong(), any());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, scheduler = CacheScheduler.MOCKITO)
+  void pacer_scheduler_isGuarded(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // a guarded scheduler never throws or returns null into Pacer.schedule, so the
+    // future==null && nextFireTime!=0 self-poison state stays unreachable
+    var pacer = requireNonNull(cache.pacer());
+    assertThat(pacer.scheduler).isInstanceOf(GuardedScheduler.class);
+    assertThat(((GuardedScheduler) pacer.scheduler).delegate).isSameInstanceAs(context.scheduler());
+  }
+
+  @ParameterizedTest
+  @SuppressFBWarnings("MDM_LOCK_ISLOCKED")
   @CacheSpec(population = Population.EMPTY)
-  public void afterWrite_drainFullWriteBuffer(
-      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void afterWrite_drainFullWriteBuffer(BoundedLocalCache<Int, Int> cache) {
     cache.drainStatus = PROCESSING_TO_IDLE;
 
     int[] queued = { 0 };
@@ -511,9 +1395,10 @@ public final class BoundedLocalCacheTest {
     assertThat(triggered[0]).isEqualTo(WRITE_BUFFER_MAX + 1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @SuppressFBWarnings("MDM_LOCK_ISLOCKED")
   @CacheSpec(population = Population.EMPTY, executor = CacheExecutor.DISCARDING)
-  public void afterWrite_drainFullWriteBuffer_discarded(
+  void afterWrite_drainFullWriteBuffer_discarded(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var oldValue = cache.put(context.absentKey(), context.absentValue());
     assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_IDLE);
@@ -538,12 +1423,53 @@ public final class BoundedLocalCacheTest {
     assertThat(triggered[0]).isEqualTo(WRITE_BUFFER_MAX + 1);
   }
 
+  @Test
+  @SuppressWarnings("PMD.LooseCoupling")
+  void drainWriteBuffer_unpublishedTask() {
+    var cache = asBoundedLocalCache(Caffeine.newBuilder()
+        .executor(Runnable::run)
+        .maximumSize(100)
+        .build());
+    var ran = new AtomicBoolean();
+    Runnable task = () -> ran.set(true);
+
+    // a producer reserved the buffer's head and was descheduled before publishing its task
+    BaseMpscLinkedArrayQueue<?> buffer = cache.writeBuffer;
+    Object[] elements = requireNonNull(buffer.producerBuffer);
+    long index = lvProducerIndex(buffer);
+    long offset = modifiedCalcElementOffset(index, buffer.producerMask);
+    soProducerIndex(buffer, index + 2);
+
+    var drained = new AtomicBoolean();
+    var consumer = new Thread(() -> {
+      cache.evictionLock.lock();
+      try {
+        cache.drainWriteBuffer();
+      } finally {
+        cache.evictionLock.unlock();
+      }
+      drained.set(true);
+    });
+    consumer.setDaemon(true);
+    consumer.start();
+    try {
+      await().untilTrue(drained);
+    } finally {
+      // publish, releasing a consumer that waited for the element rather than returning
+      soElement(elements, offset, task);
+    }
+
+    assertThat(ran.get()).isFalse();
+    cache.cleanUp();
+    assertThat(ran.get()).isTrue();
+  }
+
   @Test @CheckMaxLogLevel(ERROR)
-  public void afterWrite_exception() {
+  void afterWrite_exception() {
     var expected = new RuntimeException();
-    var cache = new BoundedLocalCache<Object, Object>(
-        Caffeine.newBuilder(), /* loader */ null, /* async */ false) {
-      @Override void maintenance(Runnable task) {
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {
+      @Override void maintenance(@Nullable Runnable task) {
         throw expected;
       }
     };
@@ -555,40 +1481,397 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_REQUIRED);
 
     cache.afterWrite(pendingTask);
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getThrowable().orElseThrow()).isSameInstanceAs(expected);
-    assertThat(event.getFormattedMessage()).isEqualTo(
-        "Exception thrown when performing the maintenance task");
-    assertThat(event.getLevel()).isEqualTo(ERROR);
+    assertThat(logEvents()
+        .withMessage("Exception thrown when performing the maintenance task")
+        .withThrowable(expected)
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
   }
 
-  @Test(dataProvider = "caches")
+  @Test @CheckMaxLogLevel(ERROR)
+  void afterWrite_drainThrows_runsInlineTask() {
+    // A drain that throws (e.g. a broken key hashCode) must not drop the writer's assisting task.
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {
+      @Override void drainReadBuffer() {
+        throw new IllegalStateException();
+      }
+    };
+    cache.drainStatus = PROCESSING_TO_IDLE;
+
+    Runnable pendingTask = () -> {};
+    for (int i = 0; i < WRITE_BUFFER_MAX; i++) {
+      cache.afterWrite(pendingTask);
+    }
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_REQUIRED);
+
+    var ran = new AtomicBoolean();
+    cache.afterWrite(() -> ran.set(true));
+    assertThat(ran.get()).isTrue();
+  }
+
+  @ParameterizedTest
   @CacheSpec(maximumSize = Maximum.FULL, weigher = CacheWeigher.TEN)
-  public void weightedSize_maintenance(BoundedLocalCache<Int, Int> cache,
-      CacheContext context, Eviction<Int, Int> eviction) {
+  void weightedSize_noMaintenance(
+      BoundedLocalCache<Int, Int> cache, Eviction<Int, Int> eviction) {
     cache.drainStatus = REQUIRED;
     var weight = eviction.weightedSize();
-
+    assertThat(cache.drainStatus).isEqualTo(REQUIRED);
     assertThat(weight).isPresent();
-    assertThat(cache.drainStatus).isEqualTo(IDLE);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(maximumSize = Maximum.FULL)
-  public void maximumSize_maintenance(BoundedLocalCache<Int, Int> cache,
+  void maximumSize_noMaintenance(BoundedLocalCache<Int, Int> cache,
       CacheContext context, Eviction<Int, Int> eviction) {
     cache.drainStatus = REQUIRED;
-    var maximum = eviction.getMaximum();
-
+    long maximum = eviction.getMaximum();
+    assertThat(cache.drainStatus).isEqualTo(REQUIRED);
     assertThat(maximum).isEqualTo(context.maximumWeightOrSize());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(maximumSize = Maximum.FULL)
+  void setMaximumSize_maintenance(BoundedLocalCache<Int, Int> cache,
+      CacheContext context, Eviction<Int, Int> eviction) {
+    cache.drainStatus = REQUIRED;
+    eviction.setMaximum(context.maximumWeightOrSize());
     assertThat(cache.drainStatus).isEqualTo(IDLE);
+    assertThat(eviction.getMaximum()).isEqualTo(context.maximumWeightOrSize());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void containsValue_notAlive(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      if (ThreadLocalRandom.current().nextBoolean()) {
+        node.retire();
+      } else {
+        node.die();
+      }
+    }
+    for (Int value : context.original().values()) {
+      assertThat(cache.containsValue(value)).isFalse();
+    }
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.STRONG, maximumSize = Maximum.FULL)
+  void evictionOrder_notAlive(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // Mark nodes as dead while still in the access-order deques to exercise the
+    // comparator's !isAlive() guard for retired strong-key sentinels.
+    for (var node : cache.data.values()) {
+      node.die();
+    }
+    var result = cache.evictionOrder(/* hottest= */ false, identity(),
+        stream -> stream.collect(toImmutableList()));
+    assertThat(result).isEmpty();
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.WEAK, maximumSize = Maximum.FULL)
+  void evictionOrder_collectedKey(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // Clear weak key references to simulate GC; nodes remain in the access-order
+    // deques. Exercises the comparator's keyRef == null branch.
+    for (var node : cache.data.values()) {
+      ((Reference<?>) node.getKeyReference()).clear();
+    }
+    var result = cache.evictionOrder(/* hottest= */ false, identity(),
+        stream -> stream.collect(toImmutableList()));
+    assertThat(result).isEmpty();
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      keys = ReferenceType.STRONG, maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
+  void addTask_retiredAfterSnapshot(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // Mock a node where isAlive() returns true for the synchronized snapshot
+    // and false for the inner re-check, simulating a concurrent retire between
+    // the two reads. Exercises the !isAlive() branch of the sketch-increment
+    // guard at the AddTask.run path.
+    var calls = new MutableInt();
+    Node<Int, Int> node = Mockito.mock();
+    when(node.isAlive()).thenAnswer(inv -> calls.getAndIncrement() == 0);
+    when(node.getKeyReferenceOrNull()).thenReturn(context.absentKey());
+
+    cache.new AddTask(node, /* weight= */ 0).run();
+    assertThat(calls.get()).isEqualTo(2);
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      keys = ReferenceType.STRONG, maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
+  void addTask_collectedKeyAfterSnapshot(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // Mock a node whose key reference reports null after the synchronized snapshot,
+    // simulating a weak/soft reference collected between AddTask creation and run.
+    // Exercises the keyRef == null branch of the sketch-increment guard.
+    Node<Int, Int> node = Mockito.mock();
+    when(node.isAlive()).thenReturn(true);
+    when(node.getKeyReferenceOrNull()).thenReturn(null);
+
+    cache.new AddTask(node, /* weight= */ 0).run();
+    verify(node).getKeyReferenceOrNull();
+    verify(node).isAlive();
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, keys = ReferenceType.STRONG,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
+      loader = Loader.IDENTITY, refreshAfterWrite = Expire.ONE_MINUTE)
+  void refreshIfNeeded_retiredAfterSnapshot(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // Mock a node alive for the gate's isAlive() snapshot but retired by the inner re-check,
+    // simulating a concurrent retire between the two. Exercises the !isAlive() branch of the
+    // refresh-registration guard, so a doomed reload is not launched for a retired node.
+    var calls = new MutableInt();
+    Node<Int, Int> node = Mockito.mock();
+    when(node.getWriteTime()).thenReturn(0L);
+    when(node.getKey()).thenReturn(context.absentKey());
+    when(node.getValue()).thenReturn(context.absentValue());
+    when(node.getKeyReference()).thenReturn(context.absentKey());
+    when(node.casWriteTime(anyLong(), anyLong())).thenReturn(true);
+    when(node.isAlive()).thenAnswer(invocation -> calls.getAndIncrement() == 0);
+
+    assertThat(cache.refreshIfNeeded(node, TimeUnit.MINUTES.toNanos(2))).isNull();
+    assertThat(cache.refreshes()).isEmpty();
+    assertThat(calls.get()).isEqualTo(2);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void equals_notAlive(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      if (ThreadLocalRandom.current().nextBoolean()) {
+        node.retire();
+      } else {
+        node.die();
+      }
+      node.setValue(context.absentValue(), cache.valueReferenceQueue());
+    }
+    assertThat(cache.equals(context.original())).isFalse();
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void keySpliterator_forEachRemaining_notAlive(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      if ((node.getKeyReference().hashCode() % 2) == 0) {
+        node.retire();
+      } else {
+        node.die();
+      }
+    }
+    cache.keySet().spliterator().forEachRemaining(key -> Assertions.fail());
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void keySpliterator_tryAdvance_notAlive(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      if ((node.getKeyReference().hashCode() % 2) == 0) {
+        node.retire();
+      } else {
+        node.die();
+      }
+    }
+    cache.keySet().spliterator().tryAdvance(key -> Assertions.fail());
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void valueSpliterator_forEachRemaining_notAlive(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      if ((node.getKeyReference().hashCode() % 2) == 0) {
+        node.retire();
+      } else {
+        node.die();
+      }
+    }
+    cache.values().spliterator().forEachRemaining(value -> Assertions.fail());
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void valueSpliterator_tryAdvance_notAlive(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      if ((node.getKeyReference().hashCode() % 2) == 0) {
+        node.retire();
+      } else {
+        node.die();
+      }
+    }
+    cache.values().spliterator().tryAdvance(value -> Assertions.fail());
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void entrySpliterator_forEachRemaining_notAlive(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      if ((node.getKeyReference().hashCode() % 2) == 0) {
+        node.retire();
+      } else {
+        node.die();
+      }
+    }
+    cache.entrySet().spliterator().forEachRemaining(entry -> Assertions.fail());
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void entrySpliterator_tryAdvance_notAlive(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      if ((node.getKeyReference().hashCode() % 2) == 0) {
+        node.retire();
+      } else {
+        node.die();
+      }
+    }
+    cache.entrySet().spliterator().tryAdvance(entry -> Assertions.fail());
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  /**
+   * An async cache always wraps its weigher, so identity against the singleton cannot answer
+   * whether weights vary. The answer sizes the frequency sketch, which the public API does not
+   * expose, so it is asserted against the sketch.
+   */
+  @Test
+  void isWeighted_onlyWhenWeightsVary() {
+    int maximum = 10_000;
+    var asyncCache = Caffeine.newBuilder()
+        .maximumSize(maximum).executor(Runnable::run).buildAsync();
+    var cache = asBoundedLocalCache(asyncCache);
+    assertThat(cache.isWeighted()).isFalse();
+    assertThat(asBoundedLocalCache(Caffeine.newBuilder().maximumWeight(maximum)
+        .weigher(Weigher.<Int, Int>singletonWeigher()).build()).isWeighted()).isFalse();
+    assertThat(asBoundedLocalCache(Caffeine.newBuilder().maximumWeight(maximum)
+        .weigher((Int key, Int value) -> key.intValue()).build()).isWeighted()).isTrue();
+
+    // The sketch initializes at half the maximum, sized by the maximum rather than the count.
+    for (int i = 0; i <= (maximum / 2); i++) {
+      asyncCache.put(Int.valueOf(i), CompletableFuture.completedFuture(Int.valueOf(i)));
+    }
+    assertWithMessage("the sketch was sized by the entry count, not the maximum")
+        .that(cache.frequencySketch().table).hasLength(Caffeine.ceilingPowerOfTwo(maximum));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void nodeToCacheEntry_notAlive(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      if ((node.getKeyReference().hashCode() % 2) == 0) {
+        node.retire();
+      } else {
+        node.die();
+      }
+      assertThat(cache.nodeToCacheEntry(node, v -> v, (int) node.getPolicyWeight())).isNull();
+    }
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.WEAK)
+  void nodeToCacheEntry_collectedKey(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    var weakKey = (Reference<?>) node.getKeyReference();
+    weakKey.clear();
+    assertThat(cache.nodeToCacheEntry(node, v -> v, (int) node.getPolicyWeight())).isNull();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, values = {ReferenceType.WEAK, ReferenceType.SOFT})
+  void nodeToCacheEntry_collectedValue(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    var weakValue = (Reference<?>) node.getValueReference();
+    weakValue.clear();
+    assertThat(cache.nodeToCacheEntry(node, v -> v, (int) node.getPolicyWeight())).isNull();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, values = {ReferenceType.WEAK, ReferenceType.SOFT})
+  void entrySet_contains_collectedValue(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var entry = Map.entry(context.firstKey(),
+        requireNonNull(context.original().get(context.firstKey())));
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    var valueRef = (Reference<?>) node.getValueReference();
+    valueRef.clear();
+    assertThat(cache.entrySet().contains(entry)).isFalse();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, expiryTime = Expire.ONE_MINUTE,
+      expiry = CacheExpiry.CREATE, values = {ReferenceType.WEAK, ReferenceType.SOFT})
+  void setExpiresAfter_collectedValue(BoundedLocalCache<Int, Int> cache,
+      CacheContext context, VarExpiration<Int, Int> expireVariably) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    long variableTimeBefore = node.getVariableTime();
+    var valueRef = (Reference<?>) node.getValueReference();
+    valueRef.clear();
+    expireVariably.setExpiresAfter(context.firstKey(), Duration.ofMinutes(2));
+    assertThat(node.getVariableTime()).isEqualTo(variableTimeBefore);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(mustExpireWithAnyOf = { AFTER_ACCESS, AFTER_WRITE, VARIABLE },
+      expiry = { CacheExpiry.DISABLED, CacheExpiry.CREATE, CacheExpiry.WRITE, CacheExpiry.ACCESS },
+      expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
+      expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE},
+      expiryTime = Expire.ONE_MINUTE, population = Population.FULL)
+  void nodeToCacheEntry_expiration(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var node : cache.data.values()) {
+      var entry = requireNonNull(cache.nodeToCacheEntry(node, v -> v, (int) node.getPolicyWeight()));
+      assertThat(entry.expiresAfter()).isEqualTo(Duration.ofMinutes(1));
+    }
+
+    context.ticker().advance(Duration.ofSeconds(30));
+    for (var node : cache.data.values()) {
+      var entry = requireNonNull(cache.nodeToCacheEntry(node, v -> v, (int) node.getPolicyWeight()));
+      assertThat(entry.expiresAfter()).isEqualTo(Duration.ofSeconds(30));
+    }
+
+    context.ticker().advance(Duration.ofMinutes(1));
+    for (var node : cache.data.values()) {
+      assertThat(cache.nodeToCacheEntry(node, v -> v, (int) node.getPolicyWeight())).isNull();
+    }
   }
 
   /* --------------- Eviction --------------- */
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.MAX_VALUE)
-  public void overflow_add_one(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void overflow_add_one(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     long actualWeight = cache.weightedSize();
     cache.setWeightedSize(BoundedLocalCache.MAXIMUM_CAPACITY);
     var oldValue = cache.put(context.absentKey(), context.absentValue());
@@ -607,9 +1890,9 @@ public final class BoundedLocalCacheTest {
     cache.setWeightedSize(actualWeight);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.MAX_VALUE)
-  public void overflow_add_many(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void overflow_add_many(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     long actualWeight = cache.weightedSize();
     cache.setWeightedSize(BoundedLocalCache.MAXIMUM_CAPACITY);
     cache.evictionLock.lock();
@@ -633,10 +1916,10 @@ public final class BoundedLocalCacheTest {
     cache.setWeightedSize(actualWeight);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.FULL,
       maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.VALUE)
-  public void overflow_update_one(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void overflow_update_one(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.setWeightedSize(BoundedLocalCache.MAXIMUM_CAPACITY);
     var oldValue = cache.put(context.firstKey(), Int.MAX_VALUE);
 
@@ -654,11 +1937,11 @@ public final class BoundedLocalCacheTest {
     cache.setWeightedSize(cache.data.values().stream().mapToLong(Node::getWeight).sum());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.FULL,
       maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.VALUE)
-  public void overflow_update_many(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    var updated = Maps.asMap(context.firstMiddleLastKeys(), key -> Int.MAX_VALUE);
+  void overflow_update_many(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var updated = Maps.toMap(context.firstMiddleLastKeys(), key -> Int.MAX_VALUE);
     cache.setWeightedSize(BoundedLocalCache.MAXIMUM_CAPACITY);
     cache.evictionLock.lock();
     try {
@@ -682,11 +1965,11 @@ public final class BoundedLocalCacheTest {
   }
 
   @CheckNoEvictions
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, maximumSize = Maximum.ONE)
-  public void evict_alreadyRemoved(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    var oldEntry = Iterables.get(context.absent().entrySet(), 0);
-    var newEntry = Iterables.get(context.absent().entrySet(), 1);
+  void evict_alreadyRemoved(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var oldEntry = requireNonNull(Iterables.get(context.absent().entrySet(), 0));
+    var newEntry = requireNonNull(Iterables.get(context.absent().entrySet(), 1));
     var oldValue = cache.put(oldEntry.getKey(), oldEntry.getValue());
     assertThat(oldValue).isNull();
 
@@ -694,23 +1977,22 @@ public final class BoundedLocalCacheTest {
     cache.evictionLock.lock();
     try {
       var lookupKey = cache.nodeFactory.newLookupKey(oldEntry.getKey());
-      var node = cache.data.get(lookupKey);
+      var node = requireNonNull(cache.data.get(lookupKey));
       checkStatus(node, Status.ALIVE);
-      ConcurrentTestHarness.execute(() -> {
+      var future = CompletableFuture.runAsync(() -> {
         var value = cache.put(newEntry.getKey(), newEntry.getValue());
         assertThat(value).isNull();
 
         assertThat(cache.remove(oldEntry.getKey())).isEqualTo(oldEntry.getValue());
         removed.set(true);
-      });
+      }, executor);
 
-      await().untilAsserted(() -> assertThat(cache).doesNotContainKey(oldEntry.getKey()));
-      await().untilTrue(removed);
-      await().until(() -> {
-        synchronized (node) {
-          return !node.isAlive();
-        }
-      });
+      future.join();
+      assertThat(cache).doesNotContainKey(oldEntry.getKey());
+      assertThat(removed.get()).isTrue();
+      synchronized (node) {
+        assertThat(node.isAlive()).isFalse();
+      }
       checkStatus(node, Status.RETIRED);
       cache.cleanUp();
 
@@ -723,9 +2005,10 @@ public final class BoundedLocalCacheTest {
     }
   }
 
-  enum Status { ALIVE, RETIRED, DEAD }
+  private enum Status { ALIVE, RETIRED, DEAD }
 
-  static void checkStatus(Node<Int, Int> node, Status expected) {
+  @SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter")
+  private static void checkStatus(Node<Int, Int> node, Status expected) {
     synchronized (node) {
       assertThat(node.isAlive()).isEqualTo(expected == Status.ALIVE);
       assertThat(node.isRetired()).isEqualTo(expected == Status.RETIRED);
@@ -733,10 +2016,11 @@ public final class BoundedLocalCacheTest {
     }
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, implementation = Implementation.Caffeine,
-      population = Population.EMPTY, maximumSize = Maximum.TEN, weigher = CacheWeigher.DISABLED)
-  public void evict_wtinylfu(Cache<Int, Int> cache, CacheContext context) {
+      population = Population.EMPTY, keys = ReferenceType.STRONG,
+      maximumSize = Maximum.TEN, weigher = CacheWeigher.DISABLED)
+  void evict_wtinylfu(Cache<Int, Int> cache, CacheContext context) {
     // Enforce full initialization of internal structures; clear sketch
     asBoundedLocalCache(cache).frequencySketch().ensureCapacity(context.maximumSize());
 
@@ -745,28 +2029,29 @@ public final class BoundedLocalCacheTest {
     }
 
     checkContainsInOrder(cache,
-        /* expect */ Int.listOf(9, 0, 1, 2, 3, 4, 5, 6, 7, 8));
+        /* expect= */ Int.listOf(9, 0, 1, 2, 3, 4, 5, 6, 7, 8));
 
     // re-order
-    checkReorder(cache, /* keys */ Int.listOf(0, 1, 2),
-        /* expect */ Int.listOf(9, 3, 4, 5, 6, 7, 8, 0, 1, 2));
+    checkReorder(cache, /* keys= */ Int.listOf(0, 1, 2),
+        /* expect= */ Int.listOf(9, 3, 4, 5, 6, 7, 8, 0, 1, 2));
 
     // evict 9, 10, 11
-    checkEvict(cache, /* keys */ Int.listOf(10, 11, 12),
-        /* expect */ Int.listOf(12, 3, 4, 5, 6, 7, 8, 0, 1, 2));
+    checkEvict(cache, /* keys= */ Int.listOf(10, 11, 12),
+        /* expect= */ Int.listOf(12, 3, 4, 5, 6, 7, 8, 0, 1, 2));
 
     // re-order
-    checkReorder(cache, /* keys */ Int.listOf(6, 7, 8),
-        /* expect */ Int.listOf(12, 3, 4, 5, 0, 1, 2, 6, 7, 8));
+    checkReorder(cache, /* keys= */ Int.listOf(6, 7, 8),
+        /* expect= */ Int.listOf(12, 3, 4, 5, 0, 1, 2, 6, 7, 8));
 
     // evict 12, 13, 14
-    checkEvict(cache, /* keys */ Int.listOf(13, 14, 15),
-        /* expect */ Int.listOf(15, 3, 4, 5, 0, 1, 2, 6, 7, 8));
+    checkEvict(cache, /* keys= */ Int.listOf(13, 14, 15),
+        /* expect= */ Int.listOf(15, 3, 4, 5, 0, 1, 2, 6, 7, 8));
 
     assertThat(context).stats().evictions(6);
   }
 
-  private void checkReorder(Cache<Int, Int> cache, List<Int> keys, List<Int> expect) {
+  private static void checkReorder(Cache<Int, Int> cache,
+      Iterable<Int> keys, Iterable<Int> expect) {
     for (var key : keys) {
       var value = cache.getIfPresent(key);
       assertThat(value).isNotNull();
@@ -774,119 +2059,123 @@ public final class BoundedLocalCacheTest {
     checkContainsInOrder(cache, expect);
   }
 
-  private void checkEvict(Cache<Int, Int> cache, List<Int> keys, List<Int> expect) {
+  private static void checkEvict(Cache<Int, Int> cache, Iterable<Int> keys, Iterable<Int> expect) {
     keys.forEach(i -> cache.put(i, i));
     checkContainsInOrder(cache, expect);
   }
 
-  private void checkContainsInOrder(Cache<Int, Int> cache, List<Int> expect) {
+  private static void checkContainsInOrder(Cache<Int, Int> cache, Iterable<Int> expect) {
     var evictionOrder = cache.policy().eviction().orElseThrow().coldest(Integer.MAX_VALUE).keySet();
     assertThat(cache).containsExactlyKeys(expect);
     assertThat(evictionOrder).containsExactlyElementsIn(expect).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
       removalListener = Listener.CONSUMING)
-  public void evict_candidate_lru(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_candidate_lru(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.setMainProtectedMaximum(0);
     cache.setWindowMaximum(context.maximumSize());
-    for (int i = 0; i < context.maximumSize(); i++) {
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       var oldValue = cache.put(Int.valueOf(i), Int.valueOf(i));
       assertThat(oldValue).isNull();
     }
 
     var expected = cache.accessOrderWindowDeque().stream()
-        .map(Node::getKey).collect(toImmutableList());
+        .map(node -> requireNonNull(node.getKey())).collect(toImmutableList());
     cache.setWindowMaximum(0L);
     var candidate = cache.evictFromWindow();
     assertThat(candidate).isNotNull();
 
     var actual = cache.accessOrderProbationDeque().stream()
-        .map(Node::getKey).collect(toImmutableList());
+        .map(node -> requireNonNull(node.getKey())).collect(toImmutableList());
     assertThat(actual).containsExactlyElementsIn(expected).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
       removalListener = Listener.CONSUMING)
-  public void evict_victim_lru(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_victim_lru(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.setWindowMaximum(0);
     var candidate = cache.evictFromWindow();
     assertThat(candidate).isNotNull();
 
-    var expected = FluentIterable
-        .from(cache.accessOrderProbationDeque())
-        .append(cache.accessOrderProtectedDeque())
-        .transform(Node::getKey).toList();
+    var expected = Stream
+        .concat(cache.accessOrderProbationDeque().stream(),
+            cache.accessOrderProtectedDeque().stream())
+        .map(node -> requireNonNull(node.getKey()))
+        .collect(toImmutableList());
     cache.setMaximumSize(0L);
     cache.cleanUp();
 
     var listener = (ConsumingRemovalListener<Int, Int>) context.removalListener();
-    var actual = listener.removed().stream().map(Map.Entry::getKey).collect(toImmutableList());
+    var actual = listener.removed().stream()
+        .map(entry -> requireNonNull(entry.getKey())).collect(toImmutableList());
     assertThat(actual).containsExactlyElementsIn(expected).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
       removalListener = Listener.CONSUMING)
-  public void evict_window_candidates(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_window_candidates(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.setWindowMaximum(context.maximumSize() / 2);
     cache.setMainProtectedMaximum(0);
 
-    for (int i = 0; i < context.maximumSize(); i++) {
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       var value = cache.put(Int.valueOf(i), Int.valueOf(i));
       assertThat(value).isNull();
     }
     Arrays.fill(cache.frequencySketch().table, 0L);
 
     var expected = cache.accessOrderWindowDeque().stream()
-        .map(Node::getKey).collect(toImmutableList());
+        .map(node -> requireNonNull(node.getKey())).collect(toImmutableList());
     cache.setMaximum(context.maximumSize() / 2);
     cache.setWindowMaximum(0);
-    cache.evictEntries();
+    cache.evictEntries(0L);
 
     var listener = (ConsumingRemovalListener<Int, Int>) context.removalListener();
-    var actual = listener.removed().stream().map(Map.Entry::getKey).collect(toImmutableList());
+    var actual = listener.removed().stream()
+        .map(entry -> requireNonNull(entry.getKey())).collect(toImmutableList());
     assertThat(actual).containsExactlyElementsIn(expected).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
       removalListener = Listener.CONSUMING)
-  public void evict_window_fallback(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_window_fallback(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.setWindowMaximum(context.maximumSize() / 2);
     cache.setMainProtectedMaximum(0);
 
-    for (int i = 0; i < context.maximumSize(); i++) {
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       var value = cache.put(Int.valueOf(i), Int.valueOf(i));
       assertThat(value).isNull();
     }
     Arrays.fill(cache.frequencySketch().table, 0L);
 
     var expected = cache.accessOrderWindowDeque().stream()
-        .map(Node::getKey).collect(toImmutableList());
+        .map(node -> requireNonNull(node.getKey())).collect(toImmutableList());
     cache.setMaximum(context.maximumSize() / 2);
-    cache.evictEntries();
+    cache.evictEntries(0L);
 
     var listener = (ConsumingRemovalListener<Int, Int>) context.removalListener();
-    var actual = listener.removed().stream().map(Map.Entry::getKey).collect(toImmutableList());
+    var actual = listener.removed().stream()
+        .map(entry -> requireNonNull(entry.getKey())).collect(toImmutableList());
     assertThat(actual).containsExactlyElementsIn(expected).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
       removalListener = Listener.CONSUMING)
-  public void evict_candidateIsVictim(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_candidateIsVictim(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.setMainProtectedMaximum(context.maximumSize() / 2);
     cache.setWindowMaximum(context.maximumSize() / 2);
 
-    for (int i = 0; i < context.maximumSize(); i++) {
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       var value = cache.put(Int.valueOf(i), Int.valueOf(i));
       assertThat(value).isNull();
     }
@@ -898,64 +2187,66 @@ public final class BoundedLocalCacheTest {
     Arrays.fill(cache.frequencySketch().table, 0L);
     cache.setMainProtectedWeightedSize(context.maximumSize() - cache.windowWeightedSize());
 
-    var expected = FluentIterable
-        .from(cache.accessOrderWindowDeque())
-        .append(cache.accessOrderProbationDeque())
-        .append(cache.accessOrderProtectedDeque())
-        .transform(Node::getKey).toList();
+    var expected = Streams
+        .concat(cache.accessOrderWindowDeque().stream(),
+            cache.accessOrderProbationDeque().stream(),
+            cache.accessOrderProtectedDeque().stream())
+        .map(node -> requireNonNull(node.getKey()))
+        .collect(toImmutableList());
     cache.setMainProtectedMaximum(0L);
     cache.setWindowMaximum(0L);
-    cache.setMaximum(0L);
-    cache.evictEntries();
+    cache.setMaximumSize(0L);
+    cache.evictEntries(0L);
 
     var listener = (ConsumingRemovalListener<Int, Int>) context.removalListener();
-    var actual = listener.removed().stream().map(Map.Entry::getKey).collect(toImmutableList());
+    var actual = listener.removed().stream()
+        .map(entry -> requireNonNull(entry.getKey())).collect(toImmutableList());
     assertThat(actual).containsExactlyElementsIn(expected).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
       removalListener = Listener.CONSUMING)
-  public void evict_toZero(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    for (int i = 0; i < context.maximumSize(); i++) {
+  void evict_toZero(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       var value = cache.put(Int.valueOf(i), Int.valueOf(i));
       assertThat(value).isNull();
     }
     Arrays.fill(cache.frequencySketch().table, 0L);
 
-    var expected = FluentIterable
-        .from(cache.accessOrderWindowDeque())
-        .append(cache.accessOrderProbationDeque())
-        .append(cache.accessOrderProtectedDeque())
-        .transform(Node::getKey).toList();
+    var expected = Streams
+        .concat(cache.accessOrderWindowDeque().stream(),
+            cache.accessOrderProbationDeque().stream(),
+            cache.accessOrderProtectedDeque().stream())
+        .map(node -> requireNonNull(node.getKey()))
+        .collect(toImmutableList());
     cache.setMaximumSize(0);
-    cache.evictEntries();
+    cache.evictEntries(0L);
 
     var listener = (ConsumingRemovalListener<Int, Int>) context.removalListener();
-    var actual = listener.removed().stream().map(Map.Entry::getKey).collect(toImmutableList());
+    var actual = listener.removed().stream()
+        .map(entry -> requireNonNull(entry.getKey())).collect(toImmutableList());
     assertThat(actual).containsExactlyElementsIn(expected).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
-  public void evict_retired_candidate(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_retired_candidate(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.evictionLock.lock();
     try {
-      var expected = cache.accessOrderWindowDeque().peekFirst();
-      var key = expected.getKey();
+      var expected = cache.accessOrderWindowDeque().getFirst();
+      var key = requireNonNull(expected.getKey());
 
-      ConcurrentTestHarness.execute(() -> {
-        var value = cache.remove(key);
-        assertThat(value).isNotNull();
-      });
-      await().until(() -> !cache.containsKey(key));
+      var future = CompletableFuture.supplyAsync(() -> cache.remove(key), executor);
+      assertThat(future.join()).isNotNull();
+      assertThat(cache).doesNotContainKey(key);
       assertThat(expected.isRetired()).isTrue();
 
       cache.setWindowMaximum(cache.windowMaximum() - 1);
       cache.setMaximum(context.maximumSize() - 1);
-      cache.evictEntries();
+      cache.evictEntries(0L);
 
       assertThat(expected.isDead()).isTrue();
       await().untilAsserted(() -> assertThat(cache).hasSize(cache.maximum()));
@@ -964,25 +2255,23 @@ public final class BoundedLocalCacheTest {
     }
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
-  public void evict_retired_victim(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_retired_victim(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.evictionLock.lock();
     try {
-      var expected = cache.accessOrderProbationDeque().peekFirst();
-      var key = expected.getKey();
+      var expected = cache.accessOrderProbationDeque().getFirst();
+      var key = requireNonNull(expected.getKey());
 
-      ConcurrentTestHarness.execute(() -> {
-        var value = cache.remove(key);
-        assertThat(value).isNotNull();
-      });
-      await().until(() -> !cache.containsKey(key));
+      var future = CompletableFuture.supplyAsync(() -> cache.remove(key), executor);
+      assertThat(future.join()).isNotNull();
+      assertThat(cache).doesNotContainKey(key);
       assertThat(expected.isRetired()).isTrue();
 
       cache.setWindowMaximum(cache.windowMaximum() - 1);
       cache.setMaximum(context.maximumSize() - 1);
-      cache.evictEntries();
+      cache.evictEntries(0L);
 
       assertThat(expected.isDead()).isTrue();
       await().untilAsserted(() -> assertThat(cache).hasSize(cache.maximum()));
@@ -991,50 +2280,123 @@ public final class BoundedLocalCacheTest {
     }
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
+  void onAccess_probationHitAttributedBeforePromotion(BoundedLocalCache<Int, Int> cache) {
+    // The climber attributes a hit to the region that earned it: onAccess captures the node's
+    // membership before reorderProbation can promote it, so the promoting access counts toward
+    // the probation sample and only the next access counts as a protected hit.
+    cache.evictionLock.lock();
+    try {
+      var node = cache.accessOrderProbationDeque().getFirst();
+      cache.climber().resetSample();
+
+      cache.onAccess(node, Access.HIT);
+      assertThat(node.inMainProtected()).isTrue();
+      assertThat(cache.climber().sample.probationHits).isEqualTo(1);
+      assertThat(cache.climber().sample.hits).isEqualTo(1);
+
+      cache.onAccess(node, Access.HIT);
+      assertThat(cache.climber().sample.probationHits).isEqualTo(1);
+      assertThat(cache.climber().sample.hits).isEqualTo(2);
+    } finally {
+      cache.evictionLock.unlock();
+    }
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
+  void reorderProbation_staleAccess(BoundedLocalCache<Int, Int> cache) {
+    // A node that is not in the probation deque (e.g., in the window deque) should be ignored
+    // by reorderProbation, leaving the probation deque unchanged.
+    cache.evictionLock.lock();
+    try {
+      var windowNode = cache.accessOrderWindowDeque().getFirst();
+      var probationBefore = cache.accessOrderProbationDeque().stream()
+          .map(node -> requireNonNull(node.getKey())).collect(toImmutableList());
+
+      cache.reorderProbation(windowNode);
+
+      var probationAfter = cache.accessOrderProbationDeque().stream()
+          .map(node -> requireNonNull(node.getKey())).collect(toImmutableList());
+      assertThat(probationAfter).containsExactlyElementsIn(probationBefore).inOrder();
+    } finally {
+      cache.evictionLock.unlock();
+    }
+  }
+
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
-      maximumSize = Maximum.FULL, weigher = CacheWeigher.VALUE)
-  public void evict_zeroWeight_candidate(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    for (int i = 0; i < context.maximumSize(); i++) {
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.MOCKITO)
+  void evict_zeroWeight_candidate(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    when(context.weigher().weigh(any(), any())).thenAnswer(invocation -> {
+      Int value = invocation.getArgument(1);
+      return Math.abs(value.intValue());
+    });
+
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       assertThat(cache.put(Int.valueOf(i), Int.valueOf(1))).isNull();
     }
 
-    var candidate = cache.accessOrderWindowDeque().peekFirst();
+    var candidate = cache.accessOrderWindowDeque().getFirst();
     cache.setWindowWeightedSize(cache.windowWeightedSize() - candidate.getWeight());
     cache.setWeightedSize(cache.weightedSize() - candidate.getWeight());
     candidate.setPolicyWeight(0);
     candidate.setWeight(0);
 
     cache.setMaximumSize(0);
-    cache.evictEntries();
+    cache.evictEntries(0L);
 
     assertThat(cache).containsExactly(candidate.getKey(), candidate.getValue());
     assertThat(cache.weightedSize()).isEqualTo(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
-      maximumSize = Maximum.FULL, weigher = CacheWeigher.VALUE)
-  public void evict_zeroWeight_victim(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    for (int i = 0; i < context.maximumSize(); i++) {
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.MOCKITO)
+  void evict_zeroWeight_victim(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    when(context.weigher().weigh(any(), any())).thenAnswer(invocation -> {
+      Int value = invocation.getArgument(1);
+      return Math.abs(value.intValue());
+    });
+
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       assertThat(cache.put(Int.valueOf(i), Int.valueOf(1))).isNull();
     }
 
-    var victim = cache.accessOrderProbationDeque().peekFirst();
+    var victim = cache.accessOrderProbationDeque().getFirst();
     cache.setWeightedSize(cache.weightedSize() - victim.getWeight());
     victim.setPolicyWeight(0);
     victim.setWeight(0);
 
-    cache.setMaximumSize(0);
-    cache.evictEntries();
+    cache.setMaximumSize(0L);
+    cache.evictEntries(0L);
 
     assertThat(cache.weightedSize()).isEqualTo(0);
     assertThat(cache).containsExactly(victim.getKey(), victim.getValue());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
+  void frequencySketch_sampleIsEntryDenominated(BoundedLocalCache<Int, Int> cache) {
+    // The add task lazily initializes the sketch with the entry count. A weighted cache passes
+    // its mapping count, not the weight-denominated maximum, so the mean entry weight cannot
+    // inflate the aging period (and this is the only path that retracks a weighted shrink)
+    cache.maintenance(/* ignored */ null);
+    assertThat(cache.frequencySketch().sampleSize)
+        .isEqualTo(10 * FrequencySketch.MIN_SKETCH_SIZE);
+  }
+
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, maximumSize = Maximum.FULL)
-  public void evict_admit(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_admit(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // This test modifies the thread's internal fields so that the random admission is predictable
+    // and therefore requires the JVM argument --add-opens java.base/java.lang=ALL-UNNAMED
+    resetThreadLocalRandom();
+
     cache.frequencySketch().ensureCapacity(context.maximumSize());
     Int candidate = Int.valueOf(0);
     Int victim = Int.valueOf(1);
@@ -1056,8 +2418,8 @@ public final class BoundedLocalCacheTest {
     while (cache.frequencySketch().frequency(candidate) < ADMIT_HASHDOS_THRESHOLD) {
       cache.frequencySketch().increment(candidate);
     }
-    int allow = 0;
-    int reject = 0;
+    @Var int allow = 0;
+    @Var int reject = 0;
     for (int i = 0; i < 1_000; i++) {
       if (cache.admit(candidate, victim)) {
         allow++;
@@ -1070,66 +2432,159 @@ public final class BoundedLocalCacheTest {
     assertThat(100.0 * allow / (allow + reject)).isIn(Range.open(0.2, 2.0));
   }
 
-  @Test(groups = "isolated")
-  public void evict_update() {
-    Int key = Int.valueOf(0);
-    Int oldValue = Int.valueOf(1);
-    Int newValue = Int.valueOf(2);
+  /** Forces the eviction jitter to be predictable. */
+  @SuppressFBWarnings("RFI_SET_ACCESSIBLE")
+  @SuppressWarnings("PMD.AvoidAccessibilityAlteration")
+  static void resetThreadLocalRandom() {
+    try {
+      Field probe = Thread.class.getDeclaredField("threadLocalRandomProbe");
+      Field seed = Thread.class.getDeclaredField("threadLocalRandomSeed");
+      probe.setAccessible(true);
+      seed.setAccessible(true);
 
-    var evictor = Thread.currentThread();
-    var started = new AtomicBoolean();
-    var writing = new AtomicBoolean();
-    var evictedValue = new AtomicReference<Int>();
-    var previousValue = new AtomicReference<Int>();
-    var removedValues = new AtomicReference<Int>(Int.valueOf(0));
-
-    RemovalListener<Int, Int> evictionListener =
-        (k, v, cause) -> evictedValue.set(v);
-    RemovalListener<Int, Int> removalListener =
-        (k, v, cause) -> removedValues.accumulateAndGet(v, Int::add);
-
-    var cache = Caffeine.newBuilder()
-        .executor(CacheExecutor.DIRECT.create())
-        .evictionListener(evictionListener)
-        .removalListener(removalListener)
-        .maximumSize(100)
-        .build();
-    var localCache = asBoundedLocalCache(cache);
-    cache.put(key, oldValue);
-    started.set(true);
-
-    ConcurrentTestHarness.execute(() -> {
-      var value = localCache.compute(key, (k, v) -> {
-        if (started.get()) {
-          writing.set(true);
-          await().untilAsserted(() -> assertThat(evictor.getState()).isEqualTo(BLOCKED));
-        }
-        previousValue.set(v);
-        return newValue;
-      });
-      assertThat(value).isEqualTo(newValue);
-    });
-    await().untilTrue(writing);
-
-    var node = localCache.data.values().iterator().next();
-    var evicted = localCache.evictEntry(node, SIZE, 0);
-    assertThat(evicted).isTrue();
-
-    await().untilAtomic(evictedValue, is(newValue));
-    await().untilAtomic(previousValue, is(oldValue));
-    await().untilAtomic(removedValues, is(oldValue.add(newValue)));
+      probe.setInt(Thread.currentThread(), /* probe */ 1_033_096_058);
+      seed.setLong(Thread.currentThread(), /* seed */ 0x9e3779b9);
+    } catch (InaccessibleObjectException e) {
+      throw new AssertionError("Requires --add-opens java.base/java.lang=ALL-UNNAMED", e);
+    } catch (NoSuchFieldException | IllegalAccessException e) {
+      throw new LinkageError("Failed to set ThreadLocalRandom fields", e);
+    }
   }
 
-  @Test(dataProvider = "caches")
+  @Nested @Isolated
+  final class IsolatedEvictionTest {
+
+    @Test
+    void evict_update() {
+      Int key = Int.valueOf(0);
+      Int oldValue = Int.valueOf(1);
+      Int newValue = Int.valueOf(2);
+
+      var evictor = Thread.currentThread();
+      var started = new AtomicBoolean();
+      var writing = new AtomicBoolean();
+      var evictedValue = new AtomicReference<@Nullable Int>();
+      var previousValue = new AtomicReference<@Nullable Int>();
+      var removedValues = new AtomicReference<>(Int.valueOf(0));
+
+      RemovalListener<Int, Int> evictionListener =
+          (k, v, cause) -> evictedValue.set(v);
+      RemovalListener<Int, Int> removalListener =
+          (k, v, cause) -> removedValues.accumulateAndGet(requireNonNull(v), Int::add);
+
+      var cache = Caffeine.newBuilder()
+          .evictionListener(evictionListener)
+          .removalListener(removalListener)
+          .executor(Runnable::run)
+          .maximumSize(100)
+          .build();
+      var localCache = asBoundedLocalCache(cache);
+      cache.put(key, oldValue);
+      started.set(true);
+
+      var future = CompletableFuture.supplyAsync(() -> {
+        return localCache.compute(key, (k, v) -> {
+          if (started.get()) {
+            writing.set(true);
+            await().untilAsserted(() -> assertThat(evictor.getState()).isEqualTo(BLOCKED));
+          }
+          previousValue.set(v);
+          return newValue;
+        });
+      }, executor);
+      await().untilTrue(writing);
+
+      var node = localCache.data.values().iterator().next();
+      boolean evicted = localCache.evictEntry(node, SIZE, 0);
+      assertThat(evicted).isTrue();
+
+      assertThat(future).succeedsWith(newValue);
+      assertThat(evictedValue.get()).isEqualTo(newValue);
+      assertThat(previousValue.get()).isEqualTo(oldValue);
+      assertThat(removedValues.get()).isEqualTo(oldValue.add(newValue));
+    }
+  }
+
+  @Nested @Isolated
+  final class IsolatedRemovalListenerTest {
+
+    @Test
+    @CheckMaxLogLevel(WARN)
+    void removeNode_rejectedExecutor_listenerWriteBlocksUnderEvictionLock() {
+      Int victimKey = Int.valueOf(1);
+      Int blockedKey = Int.valueOf(2);
+
+      var listenerEntered = new AtomicBoolean();
+      var mappingEntered = new AtomicBoolean();
+      var continueMapping = new AtomicBoolean();
+      var cacheRef = new AtomicReference<@Nullable Cache<Int, Int>>();
+      var localRef = new AtomicReference<@Nullable BoundedLocalCache<Int, Int>>();
+
+      var listener = new RemovalListener<Int, Int>() {
+        @Override @SuppressFBWarnings("MDM_LOCK_ISLOCKED")
+        public void onRemoval(@Nullable Int key, @Nullable Int value, RemovalCause cause) {
+          listenerEntered.set(true);
+          assertThat(requireNonNull(localRef.get()).evictionLock.isHeldByCurrentThread()).isTrue();
+          requireNonNull(cacheRef.get()).put(blockedKey, Int.valueOf(3));
+        }
+      };
+      var cache = Caffeine.newBuilder()
+          .executor(command -> { throw new RejectedExecutionException(); })
+          .removalListener(listener)
+          .maximumSize(10)
+          .build();
+      var localCache = asBoundedLocalCache(cache);
+      cacheRef.set(cache);
+      localRef.set(localCache);
+
+      cache.put(victimKey, Int.valueOf(1));
+      cache.put(blockedKey, Int.valueOf(2));
+
+      var computeFuture = CompletableFuture.runAsync(() -> {
+        cache.asMap().compute(blockedKey, (key, value) -> {
+          mappingEntered.set(true);
+          await().untilTrue(listenerEntered);
+          assertThat(localCache.evictionLock.tryLock()).isFalse();
+          await().untilTrue(continueMapping);
+          return value;
+        });
+      }, executor);
+      await().untilTrue(mappingEntered);
+
+      var evictor = new AtomicReference<@Nullable Thread>();
+      var victim = requireNonNull(localCache.data.get(localCache.referenceKey(victimKey)));
+      var evictionFuture = CompletableFuture.runAsync(() -> {
+        evictor.set(Thread.currentThread());
+        localCache.evictionLock.lock();
+        try {
+          localCache.removeNode(victim, localCache.expirationTicker().read());
+        } finally {
+          localCache.evictionLock.unlock();
+        }
+      }, executor);
+
+      await().untilTrue(listenerEntered);
+      await().untilAsserted(() -> assertThat(requireNonNull(evictor.get()).getState())
+          .isAnyOf(BLOCKED, WAITING));
+
+      continueMapping.set(true);
+      assertThat(computeFuture).succeedsWithNull();
+      assertThat(evictionFuture).succeedsWithNull();
+    }
+  }
+
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       maximumSize = Maximum.TEN, weigher = CacheWeigher.VALUE,
       initialCapacity = InitialCapacity.EXCESSIVE, removalListener = Listener.CONSUMING)
-  public void evict_update_entryTooBig_window(
+  void evict_update_entryTooBig_window(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     cache.putAll(Map.of(Int.valueOf(9), Int.valueOf(9), Int.valueOf(1), Int.valueOf(1)));
 
     var lookupKey = cache.nodeFactory.newLookupKey(Int.valueOf(1));
-    assertThat(cache.data.get(lookupKey).inWindow()).isTrue();
+    var node = requireNonNull(cache.data.get(lookupKey));
+    assertThat(node.inWindow()).isTrue();
+
     var oldValue = cache.put(Int.valueOf(1), Int.valueOf(20));
     assertThat(oldValue).isEqualTo(1);
 
@@ -1143,11 +2598,11 @@ public final class BoundedLocalCacheTest {
         .contains(Int.valueOf(1), Int.valueOf(20)).exclusively();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       maximumSize = Maximum.TEN, weigher = CacheWeigher.VALUE,
       initialCapacity = InitialCapacity.EXCESSIVE, removalListener = Listener.CONSUMING)
-  public void evict_update_entryTooBig_probation(
+  void evict_update_entryTooBig_probation(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     for (int i = 1; i <= 10; i++) {
       var oldValue = cache.put(Int.valueOf(i), Int.valueOf(1));
@@ -1155,7 +2610,9 @@ public final class BoundedLocalCacheTest {
     }
 
     var lookupKey = cache.nodeFactory.newLookupKey(Int.valueOf(1));
-    assertThat(cache.data.get(lookupKey).inMainProbation()).isTrue();
+    var node = requireNonNull(cache.data.get(lookupKey));
+    assertThat(node.inMainProbation()).isTrue();
+
     var oldValue = cache.put(Int.valueOf(1), Int.valueOf(20));
     assertThat(oldValue).isEqualTo(1);
 
@@ -1169,11 +2626,11 @@ public final class BoundedLocalCacheTest {
         .contains(Int.valueOf(1), Int.valueOf(20)).exclusively();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       maximumSize = Maximum.TEN, weigher = CacheWeigher.VALUE,
       initialCapacity = InitialCapacity.EXCESSIVE, removalListener = Listener.CONSUMING)
-  public void evict_update_entryTooBig_protected(
+  void evict_update_entryTooBig_protected(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     for (int i = 1; i <= 10; i++) {
       var oldValue = cache.put(Int.valueOf(i), Int.valueOf(1));
@@ -1185,7 +2642,9 @@ public final class BoundedLocalCacheTest {
     cache.cleanUp();
 
     var lookupKey = cache.nodeFactory.newLookupKey(Int.valueOf(1));
-    assertThat(cache.data.get(lookupKey).inMainProtected()).isTrue();
+    var node = requireNonNull(cache.data.get(lookupKey));
+    assertThat(node.inMainProtected()).isTrue();
+
     var oldValue = cache.put(Int.valueOf(1), Int.valueOf(20));
     assertThat(oldValue).isEqualTo(1);
 
@@ -1199,10 +2658,10 @@ public final class BoundedLocalCacheTest {
         .contains(Int.valueOf(1), Int.valueOf(20)).exclusively();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       values = {ReferenceType.WEAK, ReferenceType.SOFT}, removalListener = Listener.CONSUMING)
-  public void evict_resurrect_collected(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_resurrect_collected(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     Int key = Int.valueOf(1);
     Int oldValue = Int.valueOf(2);
     Int newValue = Int.valueOf(3);
@@ -1211,238 +2670,276 @@ public final class BoundedLocalCacheTest {
     assertThat(initialValue).isNull();
 
     var node = cache.data.get(cache.referenceKey(key));
+    assertThat(node).isNotNull();
+
     @SuppressWarnings("unchecked")
     var ref = (Reference<Int>) node.getValueReference();
     ref.enqueue();
 
     var started = new AtomicBoolean();
-    var done = new AtomicBoolean();
-    var evictor = new AtomicReference<Thread>();
+    var writing = new AtomicBoolean();
+    var evictor = new AtomicReference<@Nullable Thread>();
+    var future = CompletableFuture.runAsync(() -> {
+      evictor.set(Thread.currentThread());
+      started.set(true);
+      await().untilTrue(writing);
+      cache.cleanUp();
+    }, executor);
     var computed = cache.compute(key, (k, v) -> {
+      writing.set(true);
       assertThat(v).isNull();
-      ConcurrentTestHarness.execute(() -> {
-        evictor.set(Thread.currentThread());
-        started.set(true);
-        cache.cleanUp();
-        done.set(true);
-      });
       await().untilTrue(started);
-      var threadState = EnumSet.of(BLOCKED, WAITING);
-      await().until(() -> threadState.contains(evictor.get().getState()));
-
+      var thread = requireNonNull(evictor.get());
+      await().untilAsserted(() -> assertThat(thread.getState()).isAnyOf(BLOCKED, WAITING));
       return newValue;
     });
-    assertThat(computed).isEqualTo(newValue);
-    await().untilTrue(done);
 
+    assertThat(future).succeedsWithNull();
+    assertThat(computed).isEqualTo(newValue);
     assertThat(node.getValue()).isEqualTo(newValue);
     assertThat(context).notifications().withCause(COLLECTED)
         .contains(key, null).exclusively();
   }
 
   @CheckNoEvictions
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, implementation = Implementation.Caffeine,
       population = Population.EMPTY, maximumSize = Maximum.UNREACHABLE,
       weigher = CacheWeigher.COLLECTION)
-  public void evict_resurrect_weight(Cache<Int, List<Int>> cache, CacheContext context) {
+  void evict_resurrect_weight(Cache<Int, List<Int>> cache, CacheContext context) {
     Int key = Int.valueOf(1);
     var value = intern(List.of(key));
     cache.put(key, value);
 
+    var writing = new AtomicBoolean();
     var started = new AtomicBoolean();
-    var done = new AtomicBoolean();
-    var evictor = new AtomicReference<Thread>();
+    var evictor = new AtomicReference<@Nullable Thread>();
+    var future = CompletableFuture.runAsync(() -> {
+      evictor.set(Thread.currentThread());
+      await().untilTrue(writing);
+      started.set(true);
+      cache.policy().eviction().orElseThrow().setMaximum(0);
+    }, executor);
     cache.asMap().compute(key, (k, v) -> {
-      ConcurrentTestHarness.execute(() -> {
-        evictor.set(Thread.currentThread());
-        started.set(true);
-        cache.policy().eviction().orElseThrow().setMaximum(0);
-        done.set(true);
-      });
-
+      writing.set(true);
       await().untilTrue(started);
-      var threadState = EnumSet.of(BLOCKED, WAITING);
-      await().until(() -> threadState.contains(evictor.get().getState()));
-
+      var thread = requireNonNull(evictor.get());
+      await().untilAsserted(() -> assertThat(thread.getState()).isAnyOf(BLOCKED, WAITING));
       return List.of();
     });
-    await().untilTrue(done);
 
+    assertThat(future).succeedsWithNull();
     assertThat(cache).containsEntry(key, List.of());
     assertThat(context).removalNotifications().withCause(REPLACED)
         .contains(Map.entry(key, value)).exclusively();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, implementation = Implementation.Caffeine,
       population = Population.EMPTY, mustExpireWithAnyOf = {AFTER_ACCESS, AFTER_WRITE},
       expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
       expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE})
-  public void evict_resurrect_expireAfter(Cache<Int, Int> cache, CacheContext context) {
-    Int key = Int.valueOf(1);
-    cache.put(key, key);
-
+  void evict_resurrect_expireAfter(Cache<Int, Int> cache, CacheContext context) {
     var started = new AtomicBoolean();
-    var done = new AtomicBoolean();
-    var evictor = new AtomicReference<Thread>();
+    var writing = new AtomicBoolean();
+    var evictor = new AtomicReference<@Nullable Thread>();
+    cache.put(context.absentKey(), context.absentValue());
     context.ticker().advance(Duration.ofHours(1));
-    cache.asMap().compute(key, (k, v) -> {
-      ConcurrentTestHarness.execute(() -> {
-        evictor.set(Thread.currentThread());
-        started.set(true);
-        cache.cleanUp();
-        done.set(true);
-      });
 
+    var future = CompletableFuture.runAsync(() -> {
+      evictor.set(Thread.currentThread());
+      started.set(true);
+      await().untilTrue(writing);
+      cache.cleanUp();
+    }, executor);
+    cache.asMap().compute(context.absentKey(), (k, v) -> {
+      writing.set(true);
       await().untilTrue(started);
-      var threadState = EnumSet.of(BLOCKED, WAITING);
-      await().until(() -> threadState.contains(evictor.get().getState()));
-      return key.negate();
+      var thread = requireNonNull(evictor.get());
+      await().untilAsserted(() -> assertThat(thread.getState()).isAnyOf(BLOCKED, WAITING));
+      return context.absentKey();
     });
-    await().untilTrue(done);
 
-    assertThat(cache).containsEntry(key, key.negate());
+    assertThat(future).succeedsWithNull();
     assertThat(context).notifications().withCause(EXPIRED)
-        .contains(key, key).exclusively();
+        .contains(context.absentKey(), context.absentValue()).exclusively();
+    assertThat(cache).containsEntry(context.absentKey(), context.absentKey());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, implementation = Implementation.Caffeine,
       population = Population.EMPTY, expireAfterAccess = Expire.FOREVER)
-  public void evict_resurrect_expireAfterAccess(Cache<Int, Int> cache, CacheContext context) {
-    Int key = Int.valueOf(1);
-    cache.put(key, key);
-
+  void evict_resurrect_expireAfterAccess(Cache<Int, Int> cache, CacheContext context) {
     var started = new AtomicBoolean();
-    var done = new AtomicBoolean();
-    var evictor = new AtomicReference<Thread>();
+    var writing = new AtomicBoolean();
+    var evictor = new AtomicReference<@Nullable Thread>();
+    cache.put(context.absentKey(), context.absentValue());
     context.ticker().advance(Duration.ofMinutes(1));
-    cache.asMap().compute(key, (k, v) -> {
-      ConcurrentTestHarness.execute(() -> {
-        evictor.set(Thread.currentThread());
-        started.set(true);
-        cache.policy().expireAfterAccess().orElseThrow().setExpiresAfter(Duration.ZERO);
-        done.set(true);
-      });
 
+    var future = CompletableFuture.runAsync(() -> {
+      evictor.set(Thread.currentThread());
+      started.set(true);
+      await().untilTrue(writing);
+      cache.policy().expireAfterAccess().orElseThrow().setExpiresAfter(Duration.ZERO);
+    }, executor);
+    cache.asMap().compute(context.absentKey(), (k, v) -> {
       await().untilTrue(started);
-      var threadState = EnumSet.of(BLOCKED, WAITING);
-      await().until(() -> threadState.contains(evictor.get().getState()));
+      writing.set(true);
+      var thread = requireNonNull(evictor.get());
+      await().untilAsserted(() -> assertThat(thread.getState()).isAnyOf(BLOCKED, WAITING));
       cache.policy().expireAfterAccess().orElseThrow().setExpiresAfter(Duration.ofHours(1));
       return v;
     });
-    await().untilTrue(done);
 
-    assertThat(cache).containsEntry(key, key);
+    assertThat(future).succeedsWithNull();
     assertThat(context).notifications().isEmpty();
+    assertThat(cache).containsEntry(context.absentKey(), context.absentValue());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, implementation = Implementation.Caffeine,
       population = Population.EMPTY, expireAfterWrite = Expire.FOREVER)
-  public void evict_resurrect_expireAfterWrite(Cache<Int, Int> cache, CacheContext context) {
-    Int key = Int.valueOf(1);
-    cache.put(key, key);
-
+  void evict_resurrect_expireAfterWrite(Cache<Int, Int> cache, CacheContext context) {
     var started = new AtomicBoolean();
-    var done = new AtomicBoolean();
-    var evictor = new AtomicReference<Thread>();
+    var writing = new AtomicBoolean();
+    var evictor = new AtomicReference<@Nullable Thread>();
+    cache.put(context.absentKey(), context.absentValue());
     context.ticker().advance(Duration.ofMinutes(1));
-    cache.asMap().compute(key, (k, v) -> {
-      ConcurrentTestHarness.execute(() -> {
-        evictor.set(Thread.currentThread());
-        started.set(true);
-        cache.policy().expireAfterWrite().orElseThrow().setExpiresAfter(Duration.ZERO);
-        done.set(true);
-      });
 
+    var future = CompletableFuture.runAsync(() -> {
+      evictor.set(Thread.currentThread());
+      started.set(true);
+      await().untilTrue(writing);
+      cache.policy().expireAfterWrite().orElseThrow().setExpiresAfter(Duration.ZERO);
+    }, executor);
+    cache.asMap().compute(context.absentKey(), (k, v) -> {
+      writing.set(true);
       await().untilTrue(started);
-      var threadState = EnumSet.of(BLOCKED, WAITING);
-      await().until(() -> threadState.contains(evictor.get().getState()));
+      var thread = requireNonNull(evictor.get());
+      await().untilAsserted(() -> assertThat(thread.getState()).isAnyOf(BLOCKED, WAITING));
       cache.policy().expireAfterWrite().orElseThrow().setExpiresAfter(Duration.ofHours(1));
       return v;
     });
-    await().untilTrue(done);
 
-    assertThat(cache).containsEntry(key, key);
+    assertThat(future).succeedsWithNull();
     assertThat(context).notifications().isEmpty();
+    assertThat(cache).containsEntry(context.absentKey(), context.absentValue());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, implementation = Implementation.Caffeine,
       population = Population.EMPTY, expireAfterWrite = Expire.ONE_MINUTE)
-  public void evict_resurrect_expireAfterWrite_entry(Cache<Int, Int> cache, CacheContext context) {
-    Int key = Int.valueOf(1);
-    cache.put(key, key);
-
+  void evict_resurrect_expireAfterWrite_entry(Cache<Int, Int> cache, CacheContext context) {
     var started = new AtomicBoolean();
-    var done = new AtomicBoolean();
-    var evictor = new AtomicReference<Thread>();
+    var writing = new AtomicBoolean();
+    var evictor = new AtomicReference<@Nullable Thread>();
+    cache.put(context.absentKey(), context.absentValue());
+
+    var future = CompletableFuture.runAsync(() -> {
+      evictor.set(Thread.currentThread());
+      await().untilTrue(writing);
+      started.set(true);
+      cache.cleanUp();
+    }, executor);
     context.ticker().advance(Duration.ofHours(1));
-    cache.asMap().compute(key, (k, v) -> {
-      ConcurrentTestHarness.execute(() -> {
-        evictor.set(Thread.currentThread());
-        started.set(true);
-        cache.cleanUp();
-        done.set(true);
-      });
-
+    cache.asMap().compute(context.absentKey(), (k, v) -> {
+      writing.set(true);
       await().untilTrue(started);
-      var threadState = EnumSet.of(BLOCKED, WAITING);
-      await().until(() -> threadState.contains(evictor.get().getState()));
-      return key.negate();
+      var thread = requireNonNull(evictor.get());
+      await().untilAsserted(() -> assertThat(thread.getState()).isAnyOf(BLOCKED, WAITING));
+      return context.absentKey();
     });
-    await().untilTrue(done);
 
-    assertThat(cache).containsEntry(key, key.negate());
+    assertThat(future).succeedsWithNull();
+    assertThat(cache).containsEntry(context.absentKey(), context.absentKey());
     assertThat(context).notifications().withCause(EXPIRED)
-        .contains(key, key).exclusively();
+        .contains(context.absentKey(), context.absentValue())
+        .exclusively();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       expiry = CacheExpiry.CREATE, expiryTime = Expire.ONE_MINUTE)
-  public void evict_resurrect_expireAfterVar(
+  void evict_resurrect_expireAfterVar(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    Int key = Int.valueOf(1);
-    var oldValue = cache.put(key, key);
-    assertThat(oldValue).isNull();
-
     var started = new AtomicBoolean();
-    var done = new AtomicBoolean();
-    var evictor = new AtomicReference<Thread>();
-    var node = cache.data.get(cache.referenceKey(key));
-    synchronized (node) {
-      context.ticker().advance(Duration.ofHours(1));
-      ConcurrentTestHarness.execute(() -> {
-        evictor.set(Thread.currentThread());
-        started.set(true);
-        cache.cleanUp();
-        done.set(true);
-      });
+    var writing = new AtomicBoolean();
+    var evictor = new AtomicReference<@Nullable Thread>();
+    assertThat(cache.put(context.absentKey(), context.absentValue())).isNull();
+    var node = requireNonNull(cache.data.get(cache.referenceKey(context.absentKey())));
 
+    context.ticker().advance(Duration.ofHours(1));
+    var future = CompletableFuture.runAsync(() -> {
+      evictor.set(Thread.currentThread());
+      started.set(true);
+      await().untilTrue(writing);
+      cache.cleanUp();
+    }, executor);
+    synchronized (node) {
+      writing.set(true);
       await().untilTrue(started);
-      var threadState = EnumSet.of(BLOCKED, WAITING);
-      await().until(() -> threadState.contains(evictor.get().getState()));
+      var thread = requireNonNull(evictor.get());
+      await().untilAsserted(() -> assertThat(thread.getState()).isAnyOf(BLOCKED, WAITING));
       node.setVariableTime(context.ticker().read() + TimeUnit.DAYS.toNanos(1));
     }
-    await().untilTrue(done);
 
-    assertThat(cache).containsEntry(key, key);
+    assertThat(future).succeedsWithNull();
     assertThat(context).notifications().isEmpty();
+    assertThat(cache).containsEntry(context.absentKey(), context.absentValue());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, removalListener = Listener.CONSUMING,
+      mustExpireWithAnyOf = {AFTER_ACCESS, AFTER_WRITE, VARIABLE}, expiryTime = Expire.ONE_MINUTE,
+      expiry = {CacheExpiry.DISABLED, CacheExpiry.CREATE, CacheExpiry.WRITE, CacheExpiry.ACCESS},
+      expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
+      expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE})
+  void evict_resurrect_expireInFlight(AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), future);
+
+    var localCache = asBoundedLocalCache(cache);
+    var node = requireNonNull(localCache.data.get(localCache.referenceKey(context.absentKey())));
+
+    context.ticker().advance(Duration.ofNanos(ASYNC_EXPIRY).plus(Duration.ofMinutes(2)));
+    cache.synchronous().cleanUp();
+
+    assertThat(cache).containsEntry(context.absentKey(), future);
+    assertThat(context).notifications().isEmpty();
+
+    long expected = (context.ticker().read() + ASYNC_EXPIRY);
+    if (context.expiresAfterAccess()) {
+      assertThat(node.getAccessTime()).isEqualTo(expected);
+    }
+    if (context.expiresAfterWrite() || context.refreshes()) {
+      assertThat(node.getWriteTime()).isEqualTo(toWriteTime(expected));
+    }
+    if (context.expiresVariably()) {
+      assertThat(node.getVariableTime()).isEqualTo(expected);
+    }
+
+    future.complete(context.absentValue());
+    assertThat(cache).containsEntry(context.absentKey(), future);
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    cache.synchronous().cleanUp();
+
+    assertThat(cache).doesNotContainKey(context.absentKey());
+    assertThat(context).notifications().withCause(EXPIRED)
+        .contains(context.absentKey(), context.absentValue())
+        .exclusively();
+  }
+
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
       keys = ReferenceType.WEAK, removalListener = Listener.CONSUMING)
-  public void evict_collected_candidate(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_collected_candidate(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var candidate = cache.accessOrderWindowDeque().getFirst();
     var value = candidate.getValue();
 
     @SuppressWarnings("unchecked")
-    var keyReference = (WeakKeyReference<Int>) candidate.getKeyReference();
+    var keyReference = (Reference<Int>) candidate.getKeyReference();
     keyReference.clear();
 
     var oldValue = cache.put(context.absentKey(), context.absentValue());
@@ -1452,16 +2949,16 @@ public final class BoundedLocalCacheTest {
         .contains(null, value).exclusively();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
       keys = ReferenceType.WEAK, removalListener = Listener.CONSUMING)
-  public void evict_collected_victim(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void evict_collected_victim(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var victim = cache.accessOrderProbationDeque().getFirst();
     var value = victim.getValue();
 
     @SuppressWarnings("unchecked")
-    var keyReference = (WeakKeyReference<Int>) victim.getKeyReference();
+    var keyReference = (Reference<Int>) victim.getKeyReference();
     keyReference.clear();
 
     cache.setMaximumSize(cache.size() - 1);
@@ -1471,74 +2968,212 @@ public final class BoundedLocalCacheTest {
         .contains(null, value).exclusively();
   }
 
-  @CheckNoEvictions
-  @Test(dataProvider = "caches")
-  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
-  public void evictEntry_absent(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    var replaced = cache.nodeFactory.newNode(context.firstKey(), cache.keyReferenceQueue(),
-        context.absentValue(), cache.valueReferenceQueue(), 0, context.ticker().read());
-    var absent = cache.nodeFactory.newNode(context.absentKey(), cache.keyReferenceQueue(),
-        context.absentValue(), cache.valueReferenceQueue(), 0, context.ticker().read());
-    replaced.die();
-    absent.die();
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.MOCKITO)
+  void evictEntry_absent(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var keyRef = cache.nodeFactory.newReferenceKey(context.absentKey(), cache.keyReferenceQueue());
+    var absent = cache.nodeFactory.newNode(keyRef, context.absentValue(),
+        cache.valueReferenceQueue(), 0, context.ticker().read());
+
+    // This can occur due to a node being concurrently removed, but the operation is pending in the
+    // write buffer. The stale node is unlinked and treated as if evicted to allow further
+    // evictions, but the removal notification and stats are skipped as already handled.
+    assertThat(cache.evictEntry(absent, SIZE, context.ticker().read())).isTrue();
+    assertThat(cache).containsExactlyEntriesIn(context.original());
+    assertThat(absent.isDead()).isTrue();
+    assertThat(logEvents()
+        .withMessage(msg -> msg.contains("An invalid state was detected"))
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.MOCKITO)
+  void evictEntry_replaced(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var keyRef = cache.nodeFactory.newReferenceKey(context.absentKey(), cache.keyReferenceQueue());
+    var replaced = cache.nodeFactory.newNode(keyRef, context.absentValue(),
+        cache.valueReferenceQueue(), 0, context.ticker().read());
 
     // This can occur due to a node being concurrently removed, but the operation is pending in the
     // write buffer. The stale node is unlinked and treated as if evicted to allow further
     // evictions, but the removal notification and stats are skipped as already handled.
     assertThat(cache.evictEntry(replaced, SIZE, context.ticker().read())).isTrue();
-    assertThat(cache.evictEntry(absent, SIZE, context.ticker().read())).isTrue();
+    assertThat(cache).containsExactlyEntriesIn(context.original());
+    assertThat(replaced.isDead()).isTrue();
+    assertThat(logEvents()
+        .withMessage(msg -> msg.contains("An invalid state was detected"))
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.MOCKITO)
+  void evictEntry_dead(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var keyRef = cache.nodeFactory.newReferenceKey(context.absentKey(), cache.keyReferenceQueue());
+    var dead = cache.nodeFactory.newNode(keyRef, context.absentValue(),
+        cache.valueReferenceQueue(), 0, context.ticker().read());
+    dead.die();
+
+    // This can occur due to a node being concurrently removed, but the operation is pending in the
+    // write buffer. The stale node is unlinked and treated as if evicted to allow further
+    // evictions, but the removal notification and stats are skipped as already handled.
+    assertThat(cache.evictEntry(dead, SIZE, context.ticker().read())).isTrue();
     assertThat(cache).containsExactlyEntriesIn(context.original());
   }
 
-  @Test(dataProvider = "caches")
+  @Test
+  void demoteFromMain_absent() {
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {
+      long mainProtectedWeightedSize = 1000;
+
+      @Override protected long mainProtectedMaximum() {
+        return 100;
+      }
+      @Override protected long mainProtectedWeightedSize() {
+        return mainProtectedWeightedSize;
+      }
+      @Override protected AccessOrderDeque<Node<Object, Object>> accessOrderProtectedDeque() {
+        return new AccessOrderDeque<>();
+      }
+      @Override protected void setMainProtectedWeightedSize(long weightedSize) {
+        this.mainProtectedWeightedSize = weightedSize;
+      }
+    };
+    cache.demoteFromMainProtected();
+    assertThat(cache.mainProtectedWeightedSize).isEqualTo(1000);
+  }
+
+  @Test
+  void demoteFromMain_threshold() {
+    var accessOrderProbationDeque = new AccessOrderDeque<Node<Object, Object>>();
+    var accessOrderProtectedDeque = new AccessOrderDeque<Node<Object, Object>>();
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {
+      long mainProtectedWeightedSize = 100_000;
+
+      @Override protected long mainProtectedMaximum() {
+        return 1;
+      }
+      @Override protected long mainProtectedWeightedSize() {
+        return mainProtectedWeightedSize;
+      }
+      @Override protected AccessOrderDeque<Node<Object, Object>> accessOrderProbationDeque() {
+        return accessOrderProbationDeque;
+      }
+      @Override protected AccessOrderDeque<Node<Object, Object>> accessOrderProtectedDeque() {
+        return accessOrderProtectedDeque;
+      }
+      @Override protected void setMainProtectedWeightedSize(long weightedSize) {
+        this.mainProtectedWeightedSize = weightedSize;
+      }
+    };
+
+    for (int i = 0; i < 10 * QUEUE_TRANSFER_THRESHOLD; i++) {
+      assertThat(accessOrderProtectedDeque.add(new PSMS<>())).isTrue();
+    }
+    assertThat(accessOrderProtectedDeque).hasSize(10 * QUEUE_TRANSFER_THRESHOLD);
+    cache.demoteFromMainProtected();
+    assertThat(accessOrderProbationDeque).hasSize(QUEUE_TRANSFER_THRESHOLD);
+    assertThat(accessOrderProtectedDeque).hasSize(9 * QUEUE_TRANSFER_THRESHOLD);
+    assertThat(cache.mainProtectedWeightedSize).isEqualTo(100_000 - QUEUE_TRANSFER_THRESHOLD);
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_REQUIRED);
+  }
+
+  @Test
+  void demoteFromMain_cappedBacklog() {
+    var cache = Caffeine.newBuilder()
+        .executor(Runnable::run)
+        .maximumSize(10_000)
+        .<Int, Int>build();
+    var localCache = asBoundedLocalCache(cache);
+    for (int i = 0; i < 10_000; i++) {
+      cache.put(Int.valueOf(i), Int.valueOf(i));
+    }
+    for (int i = 0; i < 10_000; i++) {
+      assertThat(cache.getIfPresent(Int.valueOf(i))).isNotNull();
+    }
+    cache.cleanUp();
+    assertThat(localCache.drainStatus).isEqualTo(IDLE);
+    assertThat(localCache.mainProtectedWeightedSize())
+        .isEqualTo(localCache.mainProtectedMaximum());
+    assertThat(localCache.mainProtectedWeightedSize()).isGreaterThan(QUEUE_TRANSFER_THRESHOLD);
+
+    // A resize can leave the protected region oversized by more than one cycle's transfer budget,
+    // so the demotion is re-armed to drain the backlog across cycles
+    cache.policy().eviction().orElseThrow().setMaximum(8_000);
+    assertThat(localCache.mainProtectedWeightedSize())
+        .isGreaterThan(localCache.mainProtectedMaximum());
+    assertThat(localCache.drainStatus).isEqualTo(REQUIRED);
+
+    cache.cleanUp();
+    assertThat(localCache.drainStatus).isEqualTo(IDLE);
+    assertThat(localCache.mainProtectedWeightedSize())
+        .isEqualTo(localCache.mainProtectedMaximum());
+    assertThat(cache).isValid();
+  }
+
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
-  public void updateRecency_onGet(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void updateRecency_onGet(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var first = firstBeforeAccess(cache, context);
     updateRecency(cache, context, () -> {
-      var value = cache.get(first.getKey());
+      var key = requireNonNull(first.getKey());
+      var value = cache.get(key);
       assertThat(value).isNotNull();
     });
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
-  public void updateRecency_onPutIfAbsent(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void updateRecency_onPutIfAbsent(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var first = firstBeforeAccess(cache, context);
     updateRecency(cache, context, () -> {
-      var oldValue = cache.putIfAbsent(first.getKey(), first.getKey());
+      var key = requireNonNull(first.getKey());
+      var oldValue = cache.putIfAbsent(key, key);
       assertThat(oldValue).isNotNull();
     });
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
-  public void updateRecency_onPut(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void updateRecency_onPut(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var first = firstBeforeAccess(cache, context);
     updateRecency(cache, context, () -> {
-      var oldValue = cache.put(first.getKey(), first.getKey());
+      var key = requireNonNull(first.getKey());
+      var oldValue = cache.put(key, key);
       assertThat(oldValue).isNotNull();
     });
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
-  public void updateRecency_onReplace(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void updateRecency_onReplace(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var first = firstBeforeAccess(cache, context);
     updateRecency(cache, context, () -> {
-      var oldValue = cache.replace(first.getKey(), first.getKey());
+      var key = requireNonNull(first.getKey());
+      var oldValue = cache.replace(key, key);
       assertThat(oldValue).isNotNull();
     });
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
-  public void updateRecency_onReplaceConditionally(
+  void updateRecency_onReplaceConditionally(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var first = firstBeforeAccess(cache, context);
-    Int value = first.getValue();
+    Int value = requireNonNull(first.getValue());
 
     updateRecency(cache, context, () -> {
-      boolean replaced = cache.replace(first.getKey(), value, value);
+      var key = requireNonNull(first.getKey());
+      boolean replaced = cache.replace(key, value, value);
       assertThat(replaced).isTrue();
     });
   }
@@ -1546,8 +3181,8 @@ public final class BoundedLocalCacheTest {
   private static Node<Int, Int> firstBeforeAccess(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
     return context.isZeroWeighted()
-        ? cache.accessOrderWindowDeque().peek()
-        : cache.accessOrderProbationDeque().peek();
+        ? cache.accessOrderWindowDeque().getFirst()
+        : cache.accessOrderProbationDeque().getFirst();
   }
 
   private static void updateRecency(BoundedLocalCache<Int, Int> cache,
@@ -1566,33 +3201,39 @@ public final class BoundedLocalCacheTest {
     }
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, maximumSize = Maximum.FULL)
-  public void exceedsMaximumBufferSize_onRead(
-      BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    var dummy = cache.nodeFactory.newNode(
-        new WeakKeyReference<>(null, null), null, null, 1, 0);
+  void exceedsMaximumBufferSize_onRead(BoundedLocalCache<Int, Int> cache) {
+    var dummy = cache.nodeFactory.newNode(new WeakKeyReference<>(
+        nullKey(), nullReferenceQueue()), nullValue(), nullReferenceQueue(), 1, 0);
     cache.frequencySketch().ensureCapacity(1);
+    cache.recordReads();
 
     var buffer = cache.readBuffer;
-    for (int i = 0; i < BoundedBuffer.BUFFER_SIZE; i++) {
-      var result = buffer.offer(dummy);
+    for (int i = 0; i < (BoundedBuffer.BUFFER_SIZE - 1); i++) {
+      int result = buffer.offer(dummy);
       assertThat(result).isEqualTo(Buffer.SUCCESS);
     }
-    var result = buffer.offer(dummy);
+
+    // the offer that fills the last free slot is recorded and reports full
+    @Var int result = buffer.offer(dummy);
     assertThat(result).isEqualTo(Buffer.FULL);
 
-    var refreshed = cache.afterRead(dummy, 0, /* recordHit */ true);
+    // an offer on the full buffer is rejected
+    result = buffer.offer(dummy);
+    assertThat(result).isEqualTo(Buffer.FULL);
+
+    var refreshed = cache.afterRead(dummy, /* now= */ 0, /* recordHit= */ true);
     assertThat(refreshed).isNull();
 
     result = buffer.offer(dummy);
     assertThat(result).isEqualTo(Buffer.SUCCESS);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, maximumSize = Maximum.FULL)
-  public void exceedsMaximumBufferSize_onWrite(
-      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void exceedsMaximumBufferSize_onWrite(
+      BoundedLocalCache<Int, Int> cache) {
     var ran = new boolean[1];
     cache.afterWrite(() -> ran[0] = true);
     assertThat(ran[0]).isTrue();
@@ -1600,24 +3241,25 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.writeBuffer).isEmpty();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
       expireAfterAccess = Expire.DISABLED, expireAfterWrite = Expire.DISABLED,
       expiry = CacheExpiry.DISABLED, keys = ReferenceType.STRONG, values = ReferenceType.STRONG)
-  public void fastpath(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    assertThat(cache.skipReadBuffer()).isTrue();
+  void fastpath(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.readBuffer).isSameInstanceAs(Buffer.disabled());
 
-    for (int i = 0; i < (context.maximumSize() / 2) - 1; i++) {
+    for (int i = 0; i < Math.toIntExact(context.maximumSize() / 2) - 1; i++) {
       var oldValue = cache.put(Int.valueOf(i), Int.valueOf(-i));
       assertThat(oldValue).isNull();
     }
-    assertThat(cache.skipReadBuffer()).isTrue();
+    assertThat(cache.get(Int.valueOf(0))).isNotNull();
+    assertThat(cache.readBuffer).isSameInstanceAs(Buffer.disabled());
 
     var oldValue = cache.put(Int.valueOf(-1), Int.valueOf(-1));
     assertThat(oldValue).isNull();
 
-    assertThat(cache.skipReadBuffer()).isFalse();
+    assertThat(cache.readBuffer).isInstanceOf(BoundedBuffer.class);
     assertThat(cache.get(Int.valueOf(0))).isNotNull();
     assertThat(cache.readBuffer.writes()).isEqualTo(1);
 
@@ -1625,28 +3267,100 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.readBuffer.reads()).isEqualTo(1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      initialCapacity = InitialCapacity.FULL, maximumSize = Maximum.FULL,
+      weigher = CacheWeigher.DISABLED, expireAfterAccess = Expire.DISABLED,
+      expireAfterWrite = Expire.DISABLED, expiry = CacheExpiry.DISABLED,
+      keys = ReferenceType.STRONG, values = ReferenceType.STRONG)
+  void fastpath_presized(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.readBuffer).isInstanceOf(BoundedBuffer.class);
+
+    var oldValue = cache.put(context.absentKey(), context.absentValue());
+    assertThat(oldValue).isNull();
+    assertThat(cache.get(context.absentKey())).isNotNull();
+    assertThat(cache.readBuffer.writes()).isEqualTo(1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED,
+      expireAfterAccess = Expire.DISABLED, expireAfterWrite = Expire.DISABLED,
+      expiry = CacheExpiry.DISABLED, keys = ReferenceType.STRONG, values = ReferenceType.STRONG)
+  void fastpath_setMaximum(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var oldValue = cache.put(context.absentKey(), context.absentValue());
+    assertThat(oldValue).isNull();
+    assertThat(cache.readBuffer).isSameInstanceAs(Buffer.disabled());
+
+    cache.setMaximumSize(2);
+    assertThat(cache.readBuffer).isInstanceOf(BoundedBuffer.class);
+    assertThat(cache.get(context.absentKey())).isNotNull();
+    assertThat(cache.readBuffer.writes()).isEqualTo(1);
+  }
+
+  @Test
+  void getIfPresent_readinessProbes() {
+    // a hit inspects the future only where the read-extension consumes the answer; the expiry
+    // check is timestamp-only and probes solely on an expired verdict
+    Executor discarding = task -> {};
+    assertThat(readinessProbes(Caffeine.newBuilder().executor(discarding)
+        .maximumSize(100).buildAsync())).isEqualTo(0);
+    assertThat(readinessProbes(Caffeine.newBuilder().executor(discarding)
+        .maximumSize(100).expireAfterWrite(Duration.ofDays(1)).buildAsync())).isEqualTo(0);
+    assertThat(readinessProbes(Caffeine.newBuilder().executor(discarding)
+        .maximumSize(100).expireAfterAccess(Duration.ofDays(1)).buildAsync())).isEqualTo(1);
+    assertThat(readinessProbes(Caffeine.newBuilder().executor(discarding).maximumSize(100)
+        .expireAfter(Expiry.writing((Int key, Int value) -> Duration.ofDays(1)))
+        .buildAsync())).isEqualTo(2);
+  }
+
+  /**
+   * Returns how often a hit inspected the completion state of the entry's future. The cache
+   * discards its maintenance task so that only the read path is counted.
+   */
+  private static int readinessProbes(AsyncCache<Int, Int> cache) {
+    var probes = new AtomicInteger();
+    var future = new CompletableFuture<Int>() {
+      @Override public boolean isDone() {
+        probes.incrementAndGet();
+        return super.isDone();
+      }
+    };
+    future.complete(Int.valueOf(1));
+
+    cache.put(Int.valueOf(1), future);
+    var localCache = asBoundedLocalCache(cache);
+    localCache.cleanUp();
+
+    probes.set(0);
+    var value = localCache.getIfPresent(Int.valueOf(1), /* recordStats= */ false);
+    assertThat(value).isSameInstanceAs(future);
+    return probes.get();
+  }
+
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
-  public void drain_onRead(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void drain_onRead(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var buffer = cache.readBuffer;
-    for (int i = 0; i < BoundedBuffer.BUFFER_SIZE; i++) {
+    for (int i = 0; i < (BoundedBuffer.BUFFER_SIZE - 1); i++) {
       var value = cache.get(context.firstKey());
       assertThat(value).isEqualTo(context.original().get(context.firstKey()));
     }
 
     long pending = buffer.size();
     assertThat(buffer.writes()).isEqualTo(pending);
-    assertThat(pending).isEqualTo(BoundedBuffer.BUFFER_SIZE);
+    assertThat(pending).isEqualTo(BoundedBuffer.BUFFER_SIZE - 1);
 
+    // the read that fills the buffer is recorded and triggers the drain
     var value = cache.get(context.firstKey());
     assertThat(value).isEqualTo(context.original().get(context.firstKey()));
 
     assertThat(buffer.size()).isEqualTo(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
-  public void drain_onRead_absent(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void drain_onRead_absent(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var value = cache.get(context.firstKey());
     assertThat(value).isEqualTo(context.original().get(context.firstKey()));
 
@@ -1661,10 +3375,10 @@ public final class BoundedLocalCacheTest {
     assertThat(buffer.size()).isEqualTo(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, maximumSize = Maximum.FULL)
-  public void drain_onWrite(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    var oldValue = cache.put(Int.valueOf(1), Int.valueOf(1));
+  void drain_onWrite(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var oldValue = cache.put(context.absentKey(), context.absentValue());
     assertThat(oldValue).isNull();
 
     int size = cache.accessOrderWindowDeque().size() + cache.accessOrderProbationDeque().size();
@@ -1672,9 +3386,9 @@ public final class BoundedLocalCacheTest {
     assertThat(size).isEqualTo(1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, maximumSize = Maximum.FULL)
-  public void drain_nonblocking(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void drain_nonblocking(BoundedLocalCache<Int, Int> cache) {
     var done = new AtomicBoolean();
     Runnable task = () -> {
       cache.setDrainStatusRelease(REQUIRED);
@@ -1690,51 +3404,49 @@ public final class BoundedLocalCacheTest {
     }
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, maximumSize = Maximum.FULL)
-  public void drain_blocksClear(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void drain_blocksClear(BoundedLocalCache<Int, Int> cache) {
     checkDrainBlocks(cache, cache::clear);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, maximumSize = Maximum.FULL)
-  public void drain_blocksOrderedMap(BoundedLocalCache<Int, Int> cache,
+  void drain_blocksOrderedMap(BoundedLocalCache<Int, Int> cache,
       CacheContext context, Eviction<Int, Int> eviction) {
     checkDrainBlocks(cache, () -> {
-      var results = eviction.coldest(((int) context.maximumSize()));
+      var results = eviction.coldest(Math.toIntExact(context.maximumSize()));
       assertThat(results).isEmpty();
     });
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, maximumSize = Maximum.FULL)
-  public void drain_blocksCapacity(BoundedLocalCache<Int, Int> cache,
-      CacheContext context, Eviction<Int, Int> eviction) {
+  void drain_blocksCapacity(BoundedLocalCache<Int, Int> cache, Eviction<Int, Int> eviction) {
     checkDrainBlocks(cache, () -> eviction.setMaximum(0));
   }
 
-  void checkDrainBlocks(BoundedLocalCache<Int, Int> cache, Runnable task) {
-    var done = new AtomicBoolean();
+  private static void checkDrainBlocks(BoundedLocalCache<Int, Int> cache, Runnable task) {
     var lock = cache.evictionLock;
+    CompletableFuture<?> future;
     lock.lock();
     try {
-      ConcurrentTestHarness.execute(() -> {
+      future = CompletableFuture.runAsync(() -> {
         cache.setDrainStatusRelease(REQUIRED);
         task.run();
-        done.set(true);
-      });
+      }, executor);
       await().until(lock::hasQueuedThreads);
     } finally {
       lock.unlock();
     }
-    await().untilTrue(done);
+    assertThat(future).succeedsWithNull();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
       maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
-  public void adapt_increaseWindow(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    prepareForAdaption(cache, context, /* make frequency-bias */ false);
+  void adapt_increaseWindow(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    prepareForAdaption(cache, context, /* recencyBias= */ false);
 
     int sampleSize = cache.frequencySketch().sampleSize;
     long protectedSize = cache.mainProtectedWeightedSize();
@@ -1750,11 +3462,11 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.windowMaximum()).isGreaterThan(windowMaximum);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
       maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
-  public void adapt_decreaseWindow(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    prepareForAdaption(cache, context, /* make recency-bias */ true);
+  void adapt_decreaseWindow(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    prepareForAdaption(cache, context, /* recencyBias= */ true);
 
     int sampleSize = cache.frequencySketch().sampleSize;
     long protectedSize = cache.mainProtectedWeightedSize();
@@ -1770,9 +3482,908 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.windowMaximum()).isLessThan(windowMaximum);
   }
 
-  private void prepareForAdaption(BoundedLocalCache<Int, Int> cache,
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
+  void adapt_largeSampleCount(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    prepareForAdaption(cache, context, /* recencyBias= */ false);
+
+    // Counters past Integer.MAX_VALUE must not regress the hill climber: a sample count
+    // exceeding the int range under the prior storage would have wrapped to a negative value
+    // and skipped the adjustment/reset.
+    long hits = (long) Integer.MAX_VALUE + 1;
+    long misses = (long) Integer.MAX_VALUE + 1;
+
+    cache.climber().sample.hits = hits;
+    cache.climber().sample.misses = misses;
+    cache.climber().sample.previousHitRate = 0.80;
+
+    long windowMaximum = cache.windowMaximum();
+    long protectedMaximum = cache.mainProtectedMaximum();
+    cache.climb();
+
+    assertThat(cache.climber().sample.hits).isEqualTo(0);
+    assertThat(cache.climber().sample.misses).isEqualTo(0);
+    assertThat(cache.windowMaximum()).isNotEqualTo(windowMaximum);
+    assertThat(cache.mainProtectedMaximum()).isNotEqualTo(protectedMaximum);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_increaseWindowOnWindowDensity(BoundedLocalCache<Int, Int> cache) {
+    // Above the small-cache threshold the climber directs the window by the within-sample hit
+    // density of the two regions. Forcing all sampled hits into the admission window makes its
+    // density dominate the (hitless) main region, so the signed error is positive and the window
+    // grows. A large sample count guarantees the adjustment runs and the counters reset.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 10);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+
+    long hits = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.windowHits = hits;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    determineAdjustment(cache);
+
+    assertThat(cache.climber().sample.windowHits).isEqualTo(0);
+    assertThat(cache.climber().adjustment()).isGreaterThan(0);
+    assertThat(cache.climber().sample.misses).isEqualTo(0);
+    assertThat(cache.climber().sample.hits).isEqualTo(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_decreaseWindowOnMainDensity(BoundedLocalCache<Int, Int> cache) {
+    // The mirror case: all sampled hits land in the main region, so its density dominates and the
+    // signed error is negative, shrinking the window. The window sits far above its floor, so the
+    // proportional step is applied unclamped.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 2);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+
+    long hits = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.windowHits = 0;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    long windowMaximum = cache.windowMaximum();
+    determineAdjustment(cache);
+
+    long floor = Math.round(WINDOW_FLOOR_FRACTION * cache.maximum());
+    assertThat(windowMaximum + cache.climber().adjustment()).isGreaterThan(floor);
+    assertThat(cache.climber().adjustment()).isLessThan(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.TEN)
+  void adapt_largeCache_weighted_climbsByDensity(BoundedLocalCache<Int, Int> cache) {
+    // The tier gate reads the configured maximum in its native weight units, so a weighted cache
+    // climbs by density even though its entry count sits far below the threshold, and the step
+    // it commands is denominated in those same units
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 10);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+
+    long hits = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.windowHits = hits;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    determineAdjustment(cache);
+
+    assertThat(cache.climber().adjustment()).isGreaterThan(0);
+    assertThat(cache.climber().sample.windowHits).isEqualTo(0);
+    assertThat(cache.climber().sample.hits).isEqualTo(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      keys = ReferenceType.STRONG, values = ReferenceType.STRONG,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.TEN)
+  void adapt_largeCache_climbAppliesProbeEntryStride(BoundedLocalCache<Int, Int> cache) {
+    // A starved window at a blind corner arms an up probe, and climb() must carry the entry
+    // stride through the region transfer: the window and protected maxima shift by the stride
+    // with their sum conserved
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    // enough weight to pass the half of the maximum that releases the climber
+    for (int i = 0; i < ((DENSITY_THRESHOLD / 10) + 10); i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    cache.cleanUp();
+    cache.setWindowMaximum(cache.maximum() / 10);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+
+    long hits = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.windowHits = 0;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    long stride = Math.round(STEP_PERCENT * cache.maximum());
+    long protectedMaximum = cache.mainProtectedMaximum();
+    long windowMaximum = cache.windowMaximum();
+    cache.climb();
+
+    // The transfer applies as much of the stride as resident entries cover and gives the
+    // remainder back into the climber's adjustment as the multi-cycle carry-over, so the applied
+    // movement plus the carried remainder always equals the probe's entry stride.
+    var density = (DensityClimber) cache.climber().tier;
+    long moved = cache.windowMaximum() - windowMaximum;
+    assertThat(walkOf(density).down).isFalse();
+    assertThat(moved).isAtLeast(0);
+    assertThat(moved + cache.climber().adjustment()).isEqualTo(stride);
+    assertThat(cache.mainProtectedMaximum()).isEqualTo(protectedMaximum - moved);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      keys = ReferenceType.STRONG, values = ReferenceType.STRONG,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.TEN)
+  void adapt_largeCache_climbAppliesDownProbeStride(BoundedLocalCache<Int, Int> cache) {
+    // The mirror: a dead sample past the midpoint arms a down probe (the one down trigger left,
+    // since a starved main beside a large window steers instead of probing), and climb() shrinks
+    // the window by the entry stride through the transfer path
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    // enough weight to pass the half of the maximum that releases the climber
+    for (int i = 0; i < ((DENSITY_THRESHOLD / 10) + 10); i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    cache.cleanUp();
+    cache.setWindowMaximum((cache.maximum() * 7) / 8);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+
+    long misses = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.windowHits = 0;
+    cache.climber().sample.misses = misses;
+    cache.climber().sample.hits = 0;
+
+    long stride = Math.round(STEP_PERCENT * cache.maximum());
+    long protectedMaximum = cache.mainProtectedMaximum();
+    long windowMaximum = cache.windowMaximum();
+    cache.climb();
+
+    // as above: the applied shrink plus the carried remainder equals the down stride
+    var density = (DensityClimber) cache.climber().tier;
+    long moved = windowMaximum - cache.windowMaximum();
+    assertThat(walkOf(density).down).isTrue();
+    assertThat(moved).isAtLeast(0);
+    assertThat(moved - cache.climber().adjustment()).isEqualTo(stride);
+    assertThat(cache.mainProtectedMaximum()).isEqualTo(protectedMaximum + moved);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
+  void adapt_decreaseWindow_transferCapsAtThreshold(BoundedLocalCache<Int, Int> cache) {
+    // A single cycle transfers at most QUEUE_TRANSFER_THRESHOLD nodes; the unfulfilled quota is
+    // given back to the maxima and carried in the climber's adjustment for the next cycle
+    cache.setMaximumSize(8 * DENSITY_THRESHOLD);
+    cache.setWindowMaximum(cache.maximum() / 2);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    for (int i = 0; i < (QUEUE_TRANSFER_THRESHOLD + 100); i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    cache.cleanUp();
+
+    long windowMaximum = cache.windowMaximum();
+    cache.climber().carryOver(-(QUEUE_TRANSFER_THRESHOLD + 500));
+    cache.decreaseWindow();
+
+    assertThat(cache.windowMaximum()).isEqualTo(windowMaximum - QUEUE_TRANSFER_THRESHOLD);
+    assertThat(cache.climber().adjustment()).isEqualTo(-500);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
+  void adapt_increaseWindow_transferCapsAtThreshold(BoundedLocalCache<Int, Int> cache) {
+    // The mirror: growing the window demotes at most QUEUE_TRANSFER_THRESHOLD candidates from the
+    // main space per cycle, carrying the remainder
+    cache.setMaximumSize(8 * DENSITY_THRESHOLD);
+    cache.setWindowMaximum(100);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    for (int i = 0; i < (QUEUE_TRANSFER_THRESHOLD + 200); i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    cache.cleanUp();
+
+    long windowMaximum = cache.windowMaximum();
+    cache.climber().carryOver((QUEUE_TRANSFER_THRESHOLD + 500));
+    cache.increaseWindow();
+
+    assertThat(cache.windowMaximum()).isEqualTo(windowMaximum + QUEUE_TRANSFER_THRESHOLD);
+    assertThat(cache.climber().adjustment()).isEqualTo(500);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_shrinkClampsAtWindowFloor(BoundedLocalCache<Int, Int> cache) {
+    // A window near its floor with a shrink signal: the full proportional step would drive the
+    // window below its signal-capable floor (where a starved window can no longer measure its own
+    // density), so the step is clamped to land no lower than the floor. The window earns enough
+    // hits to stay above the starvation bar, so this is a density decision rather than a probe.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    long floor = Math.round(WINDOW_FLOOR_FRACTION * cache.maximum());
+    cache.setWindowMaximum(floor + 100);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+
+    long hits = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.windowHits = (hits >>> 8);
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    long windowMaximum = cache.windowMaximum();
+    determineAdjustment(cache);
+
+    assertThat(density.walk).isNull();
+    assertThat(cache.climber().adjustment()).isLessThan(0);
+    assertThat(windowMaximum + cache.climber().adjustment()).isAtLeast(floor);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_probesOutOfStarvedFloor(BoundedLocalCache<Int, Int> cache) {
+    // A floor-sized window earning ~nothing next to an earning main region is the density
+    // signal's blind corner: rather than hold a possibly-pinned position, the climber probes
+    // upward with the goal-driven walk.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    long floor = Math.round(WINDOW_FLOOR_FRACTION * cache.maximum());
+    cache.setWindowMaximum(floor);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+
+    long hits = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.windowHits = 0;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    determineAdjustment(cache);
+
+    var density = (DensityClimber) cache.climber().tier;
+    assertThat(cache.climber().adjustment()).isGreaterThan(0);
+    assertThat(walkOf(density).samples).isEqualTo(1);
+    assertThat(walkOf(density).down).isFalse();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_noProbeWhenMainStarvedAtSmallWindow(BoundedLocalCache<Int, Int> cache) {
+    // A large main region earning nothing next to a small window earning everything (a scan
+    // filling the main region) is fully visible to the density signal, so it must grow the window
+    // rather than probe-shrink the one region that is working.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 10);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+
+    long hits = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.windowHits = hits;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    determineAdjustment(cache);
+
+    assertThat(density.walk).isNull();
+    assertThat(cache.climber().adjustment()).isGreaterThan(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_refractoryTicksAndHolds(BoundedLocalCache<Int, Int> cache) {
+    // A refractory sample at a blind corner ticks the countdown and holds: the climber just
+    // classified the sample as one the density signal cannot be trusted on, so steering on it
+    // was the dead-phase rider's delivery vehicle.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 4);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+    density.refractoryLeft = 2;
+
+    long hits = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.windowHits = 0;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    determineAdjustment(cache);
+
+    assertThat(density.walk).isNull();
+    assertThat(density.refractoryLeft).isEqualTo(1);
+    assertThat(cache.climber().adjustment()).isEqualTo(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_probeStraysFailFirstRoundCheaply(BoundedLocalCache<Int, Int> cache) {
+    // On a first-round probe (no prior failures), watched hits above the bar that stay below
+    // the probation baseline frozen at arm time end the walk as a cheap failed experiment:
+    // strays and transferred hits reach the bar on workloads whose small window is genuinely
+    // correct, and there the boundary was earning when the probe armed.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    long floor = Math.round(WINDOW_FLOOR_FRACTION * cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 4);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+    long hits = (long) Integer.MAX_VALUE + 1;
+    injectWalk(density, /* down= */ false, /* baseWindow= */ floor,
+        /* baseRequestCount= */ 2 * hits, /* baseHitRate= */ 0.50,
+        /* baseProbationDensity= */ 1_000_000.0).samples = 1;
+    cache.climber().tier.step.size = STEP_PERCENT * cache.maximum();
+
+    cache.climber().sample.windowHits = (hits >>> 6);
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    long windowMaximum = cache.windowMaximum();
+    determineAdjustment(cache);
+
+    assertThat(density.walk).isNull();
+    assertThat(density.starvation.rung).isEqualTo(2 * PROBE_BACKOFF_INITIAL);
+    assertThat(cache.climber().adjustment()).isEqualTo(floor - windowMaximum);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_probeCommitmentBlocksEarlyStrayExit(BoundedLocalCache<Int, Int> cache) {
+    // After repeated failures the ladder's deepest rung commits the walk past the stray zone:
+    // the same stray-heavy sample that fails a first-round probe may not end a committed one. The
+    // walk is entered at the MIDDLE rung's depth so that the deepest rung's own constant is what
+    // blocks the exit; at a shallower depth every commitment above one blocks it alike.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    long floor = Math.round(WINDOW_FLOOR_FRACTION * cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 4);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+    long hits = (long) Integer.MAX_VALUE + 1;
+    injectWalk(density, /* down= */ false, /* baseWindow= */ floor,
+        /* baseRequestCount= */ 2 * hits, /* baseHitRate= */ 0.50,
+        /* baseProbationDensity= */ 1_000_000.0).samples = PROBE_COMMITMENT_MID;
+    cache.climber().tier.step.size = STEP_PERCENT * cache.maximum();
+    density.starvation.rung = PROBE_BACKOFF_MAX;
+
+    cache.climber().sample.windowHits = (hits >>> 6);
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    determineAdjustment(cache);
+
+    assertThat(density.walk).isNotNull();
+    assertThat(cache.climber().adjustment()).isGreaterThan(0);
+    assertThat(walkOf(density).samples).isEqualTo(PROBE_COMMITMENT_MID + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_probeBudgetExpiryFails(BoundedLocalCache<Int, Int> cache) {
+    // A walk that spends its budget without confirmation is a completed, failed experiment: the
+    // movement is undone and the refractory ladder doubles.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    long floor = Math.round(WINDOW_FLOOR_FRACTION * cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 4);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+    long hits = (long) Integer.MAX_VALUE + 1;
+    injectWalk(density, /* down= */ false, /* baseWindow= */ floor,
+        /* baseRequestCount= */ 2 * hits, /* baseHitRate= */ 0.50,
+        /* baseProbationDensity= */ 0.0).samples = PROBE_WALK_BUDGET;
+
+    // the watched region stays below the 4x-bar adjudication exit, so only the spent budget
+    // can end the walk
+    cache.climber().sample.windowHits = (hits >>> 10);
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    long windowMaximum = cache.windowMaximum();
+    determineAdjustment(cache);
+
+    assertThat(density.walk).isNull();
+    assertThat(density.refractoryLeft).isEqualTo(density.starvation.rung);
+    assertThat(density.starvation.rung).isEqualTo(2 * PROBE_BACKOFF_INITIAL);
+    assertThat(cache.climber().adjustment()).isEqualTo(floor - windowMaximum);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_probeReversalThroughBaseFails(BoundedLocalCache<Int, Int> cache) {
+    // A bold-driver reversal that would cross back through the probe's own starting window found
+    // nothing: the probe finishes as a failed experiment instead of walking out the other side.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    long floor = Math.round(WINDOW_FLOOR_FRACTION * cache.maximum());
+    cache.setWindowMaximum(floor + 200);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+    long hits = (long) Integer.MAX_VALUE + 1;
+    injectWalk(density, /* down= */ false, /* baseWindow= */ (floor + 100),
+        /* baseRequestCount= */ 2 * hits, /* baseHitRate= */ 0.50,
+        /* baseProbationDensity= */ 0.0).samples = 2;
+    cache.climber().tier.step.size = STEP_PERCENT * cache.maximum();
+
+    // A starvation probe's reversal is priced against the workload's own scatter, so the bar
+    // floors at the restart threshold only on a quiet workload; at the DEVIATION_SEED the bar is
+    // three deviations (15pp) and this 6pp drop would not reverse anything.
+    cache.climber().sample.previousHitRate = 0.56; // a crash-scale drop reverses the walk
+    cache.climber().sample.windowHits = 0;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+    density.rates.deviation = 0.001;
+
+    long windowMaximum = cache.windowMaximum();
+    determineAdjustment(cache);
+
+    assertThat(density.walk).isNull();
+    assertThat(density.starvation.rung).isEqualTo(2 * PROBE_BACKOFF_INITIAL);
+    assertThat(cache.climber().adjustment()).isEqualTo((floor + 100) - windowMaximum);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_probeAdjudicationSuccessResetsLadder(BoundedLocalCache<Int, Int> cache) {
+    // When the watched region out-earns the frozen probation baseline a reuse band was found:
+    // the position is kept and the refractory ladder resets so future probes are cheap.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    long floor = Math.round(WINDOW_FLOOR_FRACTION * cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 4);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+    long hits = (long) Integer.MAX_VALUE + 1;
+    injectWalk(density, /* down= */ false, /* baseWindow= */ floor,
+        /* baseRequestCount= */ 2 * hits, /* baseHitRate= */ 0.50,
+        /* baseProbationDensity= */ 0.0).samples = 10;
+    density.starvation.rung = PROBE_BACKOFF_MAX;
+
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.windowHits = hits;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    determineAdjustment(cache);
+
+    assertThat(cache.climber().adjustment()).isGreaterThan(0);
+    assertThat(density.starvation.rung).isEqualTo(1);
+    assertThat(density.refractoryLeft).isEqualTo(0);
+    assertThat(density.walk).isNull();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_probeCrashAborts(BoundedLocalCache<Int, Int> cache) {
+    // A probe that crashed the hit rate below its own starting point is undone immediately; the
+    // collapse may be exogenous, so the refractory re-arms without doubling.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    cache.setWindowMaximum(cache.maximum() / 4);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+    long hits = (long) Integer.MAX_VALUE + 1;
+    injectWalk(density, /* down= */ true, /* baseWindow= */ (cache.maximum() / 2),
+        /* baseRequestCount= */ 4 * hits, /* baseHitRate= */ 0.90,
+        /* baseProbationDensity= */ 0.0);
+
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.misses = 3 * hits;
+    cache.climber().sample.windowHits = 0;
+    cache.climber().sample.hits = hits;
+
+    long windowMaximum = cache.windowMaximum();
+    determineAdjustment(cache);
+
+    assertThat(cache.climber().adjustment()).isEqualTo((cache.maximum() / 2) - windowMaximum);
+    assertThat(density.starvation.rung).isEqualTo(PROBE_BACKOFF_INITIAL);
+    assertThat(density.refractoryLeft).isEqualTo(PROBE_BACKOFF_INITIAL);
+    assertThat(density.walk).isNull();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_liftsBelowFloorWindow(BoundedLocalCache<Int, Int> cache) {
+    // The initial window (1% of the maximum) starts below the signal-capable floor (2%); a shrink
+    // signal must not wedge it there. The clamp lifts a below-floor window up to the floor.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.frequencySketch().ensureCapacity(cache.maximum());
+    long floor = Math.round(WINDOW_FLOOR_FRACTION * cache.maximum());
+    cache.setWindowMaximum(floor / 2);
+    cache.setMainProtectedMaximum(
+        (long) (PERCENT_MAIN_PROTECTED * (cache.maximum() - cache.windowMaximum())));
+    var density = (DensityClimber) cache.climber().tier;
+
+    long hits = (long) Integer.MAX_VALUE + 1;
+    cache.climber().sample.windowHits = (hits >>> 8);
+    cache.climber().sample.previousHitRate = 0.50;
+    cache.climber().sample.misses = hits;
+    cache.climber().sample.hits = hits;
+
+    long windowMaximum = cache.windowMaximum();
+    determineAdjustment(cache);
+
+    assertThat(density.walk).isNull();
+    assertThat(cache.climber().adjustment()).isGreaterThan(0);
+    assertThat(windowMaximum + cache.climber().adjustment()).isAtMost(floor);
+    assertThat(windowMaximum + cache.climber().adjustment()).isAtLeast(floor - 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_resizeResetsProbeState(BoundedLocalCache<Int, Int> cache) {
+    // Changing the maximum re-seeds the climber; stale probe state must not carry across.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    var density = (DensityClimber) cache.climber().tier;
+    injectWalk(density, /* down= */ false, /* baseWindow= */ 1024,
+        /* baseRequestCount= */ 1000, /* baseHitRate= */ 0.5,
+        /* baseProbationDensity= */ 0.0);
+    density.refractoryLeft = 7;
+    cache.climber().carryOver(-280_000);
+    cache.climber().sample.previousHitRate = 0.80;
+    density.starvation.rung = PROBE_BACKOFF_MAX;
+
+    cache.setMaximumSize(4 * DENSITY_THRESHOLD);
+
+    var resetDensity = (DensityClimber) cache.climber().tier;
+    assertThat(resetDensity.walk).isNull();
+    assertThat(resetDensity.refractoryLeft).isEqualTo(0);
+    assertThat(cache.climber().adjustment()).isEqualTo(0);
+    assertThat(cache.climber().sample.previousHitRate).isEqualTo(0);
+    assertThat(resetDensity.starvation.rung).isEqualTo(PROBE_BACKOFF_INITIAL);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL, maximumSize = Maximum.FULL)
+  void adapt_largeCache_hugeMaximumStaysQuiescent(BoundedLocalCache<Int, Int> cache) {
+    // 4x a near-Long.MAX_VALUE maximum would overflow into a negative period; the saturated
+    // multiply keeps the gate positive so an idle cache never fabricates samples.
+    cache.setMaximumSize(Long.MAX_VALUE);
+    cache.frequencySketch().ensureCapacity(1024);
+    var density = (DensityClimber) cache.climber().tier;
+
+    determineAdjustment(cache);
+
+    assertThat(density.walk).isNull();
+    assertThat(cache.climber().adjustment()).isEqualTo(0);
+    assertThat(Double.isNaN(cache.climber().tier.step.size)).isFalse();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY, maximumSize = Maximum.FULL)
+  void adapt_largeCache_preInitResetsWindowHits(BoundedLocalCache<Int, Int> cache) {
+    // Window hits drained before the sketch initializes must not leak into the first real sample,
+    // where they would exceed hitsInSample and poison the density arithmetic.
+    cache.setMaximumSize(2 * DENSITY_THRESHOLD);
+    cache.climber().sample.windowHits = 5_000_000;
+    cache.climber().sample.misses = 100;
+    cache.climber().sample.hits = 100;
+
+    cache.climb();
+
+    assertThat(cache.climber().sample.windowHits).isEqualTo(0);
+    assertThat(cache.climber().sample.hits).isEqualTo(0);
+  }
+
+  @Test
+  @SuppressWarnings("CheckReturnValue")
+  void adapt_partiallyFilled_holdsWindow() {
+    // An initialCapacity hint sizes the sketch at construction, so a hint below the maximum used
+    // to release the climber over a cache that had not begun to evict, on a sample period
+    // compressed to the hint. The window is not on the Policy surface, so the hold is pinned
+    // here; what a user loses to it is hit rate, which the /climber-gate battery measures.
+    Cache<Integer, Boolean> cache = Caffeine.newBuilder()
+        .executor(Runnable::run)
+        .initialCapacity(256)
+        .maximumSize(8192)
+        .build();
+    var local = asBoundedLocalCache(cache);
+    long windowMaximum = local.windowMaximum();
+
+    int residents = (int) (local.maximum() / 2) - 1;
+    for (int i = 0; i < residents; i++) {
+      cache.put(i, Boolean.TRUE);
+      cache.getIfPresent(i);
+      cache.getIfPresent(i / 2);
+    }
+    cache.cleanUp();
+
+    assertThat(cache.estimatedSize()).isEqualTo(residents);
+    assertThat((long) local.frequencySketch().sampleSize).isLessThan(local.maximum());
+    assertThat(local.windowMaximum()).isEqualTo(windowMaximum);
+  }
+
+  @Test
+  @SuppressWarnings("CheckReturnValue")
+  void adapt_filled_climbsWindow() {
+    // The hold releases where the lazy sketch initialization already sat, so the same hinted
+    // cache adapts once it has filled.
+    Cache<Integer, Boolean> cache = Caffeine.newBuilder()
+        .executor(Runnable::run)
+        .initialCapacity(256)
+        .maximumSize(8192)
+        .build();
+    var local = asBoundedLocalCache(cache);
+    long windowMaximum = local.windowMaximum();
+
+    for (int i = 0; i < (int) (2 * local.maximum()); i++) {
+      cache.put(i, Boolean.TRUE);
+      cache.getIfPresent(i);
+      cache.getIfPresent(i / 2);
+    }
+    cache.cleanUp();
+
+    assertThat(cache.estimatedSize()).isEqualTo(local.maximum());
+    assertThat(local.windowMaximum()).isNotEqualTo(windowMaximum);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
+  void adapt_smallCache_postponesAdjustmentAsStepDecays(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // Maximum.FULL is well below SLOW_ADAPT_THRESHOLD so the adaptive-sample logic
+    // applies
+    assertThat(cache.maximum()).isAtMost(SLOW_ADAPT_THRESHOLD);
+    prepareForAdaption(cache, context, /* recencyBias= */ false);
+
+    // Decay the step size to half its initial magnitude, which doubles the effective sample
+    // period. Filling the sample buffer to only the base sample size should not trigger an
+    // adjustment because the climber is waiting for more requests.
+    double initialStep = STEP_PERCENT * cache.maximum();
+    cache.climber().tier.step.size = Math.copySign(initialStep / 2, cache.climber().tier.step.size);
+
+    int baseSampleSize = cache.frequencySketch().sampleSize;
+    long windowMaximum = cache.windowMaximum();
+    long protectedMaximum = cache.mainProtectedMaximum();
+
+    cache.climber().sample.previousHitRate = 0.80;
+    cache.climber().sample.misses = (baseSampleSize / 2);
+    cache.climber().sample.hits = (baseSampleSize - cache.climber().sample.misses);
+    cache.climb();
+
+    // Adjustment should have been postponed: counters preserved, sizes unchanged.
+    assertThat(cache.climber().sample.hits).isGreaterThan(0);
+    assertThat(cache.windowMaximum()).isEqualTo(windowMaximum);
+    assertThat(cache.mainProtectedMaximum()).isEqualTo(protectedMaximum);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
+  void adapt_smallCache_triggersAtGrownSamplePeriod(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.maximum()).isAtMost(SLOW_ADAPT_THRESHOLD);
+    prepareForAdaption(cache, context, /* recencyBias= */ false);
+
+    // With step decayed to half magnitude, the effective sample size is ratio=2 * base. A
+    // sample size matching that grown threshold should trigger the climber.
+    double initialStep = STEP_PERCENT * cache.maximum();
+    cache.climber().tier.step.size = Math.copySign(initialStep / 2, cache.climber().tier.step.size);
+
+    int baseSampleSize = cache.frequencySketch().sampleSize;
+    int grownSampleSize = 2 * baseSampleSize;
+
+    cache.climber().sample.previousHitRate = 0.80;
+    cache.climber().sample.misses = (grownSampleSize / 2);
+    cache.climber().sample.hits = (grownSampleSize - cache.climber().sample.misses);
+    cache.climb();
+
+    // Adjustment ran: counters reset.
+    assertThat(cache.climber().sample.hits).isEqualTo(0);
+    assertThat(cache.climber().sample.misses).isEqualTo(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
+  void adapt_smallCache_samplePeriodGrowthCappedAtRatioCap(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.maximum()).isAtMost(SLOW_ADAPT_THRESHOLD);
+    prepareForAdaption(cache, context, /* recencyBias= */ false);
+
+    // Force step to a value far below the cap: ratio would be > cap, so should be clamped.
+    double initialStep = STEP_PERCENT * cache.maximum();
+    double tinyStep = initialStep / (SLOW_ADAPT_RATIO_CAP * 10);
+    cache.climber().tier.step.size = Math.copySign(
+        Math.max(tinyStep, 0.001), cache.climber().tier.step.size);
+
+    int baseSampleSize = cache.frequencySketch().sampleSize;
+    @SuppressWarnings("Varifier")
+    int cappedSampleSize = (int) (baseSampleSize * SLOW_ADAPT_RATIO_CAP);
+
+    // At the capped threshold, the climber should run.
+    cache.climber().sample.previousHitRate = 0.80;
+    cache.climber().sample.misses = (cappedSampleSize / 2);
+    cache.climber().sample.hits = (cappedSampleSize - cache.climber().sample.misses);
+    cache.climb();
+
+    assertThat(cache.climber().sample.hits).isEqualTo(0);
+    assertThat(cache.climber().sample.misses).isEqualTo(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
+  void adapt_smallCache_zeroMagnitudeDoesNotPoisonHitRate(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    prepareForAdaption(cache, context, /* recencyBias= */ false);
+
+    // A zero maximum and zero step size make the sample-period ratio 0/0. The resulting NaN
+    // must not defeat the sample guard and poison the saved hit rate. The state is unreachable
+    // in practice (the step never decays to exactly 0.0); it is forced here to lock in the guard.
+    cache.setMaximumSize(0);
+    cache.frequencySketch().ensureCapacity(1);
+    cache.climber().tier.step.size = 0.0;
+    cache.climber().sample.hits = 0;
+    cache.climber().sample.misses = 0;
+    cache.climber().sample.previousHitRate = 0.80;
+
+    // An uninitialized sketch would short-circuit determineAdjustment before reaching the guard.
+    assertThat(cache.frequencySketch().isNotInitialized()).isFalse();
+    cache.climb();
+
+    assertThat(cache.climber().sample.previousHitRate).isFinite();
+    assertThat(cache.climber().adjustment()).isEqualTo(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
+  void adapt_resizeSeedsDirectionFromFreshBaseline(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    prepareForAdaption(cache, context, /* recencyBias= */ false);
+
+    // A resize re-seeds the slow-adapt regime to grow the window first, overriding the shrinking
+    // step above. A hit rate held over from the old geometry makes the first sample of the new one
+    // look like a decline, sending that step in the opposite direction.
+    cache.climber().sample.previousHitRate = 0.80;
+    cache.setMaximumSize(context.maximumWeightOrSize() / 2);
+    assertThat(cache.maximum()).isAtMost(SLOW_ADAPT_THRESHOLD);
+    assertThat(cache.climber().sample.previousHitRate).isEqualTo(0);
+
+    int sampleSize = cache.frequencySketch().sampleSize;
+    long windowMaximum = cache.windowMaximum();
+    cache.climber().sample.misses = (sampleSize / 2);
+    cache.climber().sample.hits = (sampleSize - cache.climber().sample.misses);
+    cache.climb();
+
+    assertThat(cache.windowMaximum()).isGreaterThan(windowMaximum);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.TEN)
+  void adapt_increaseWindow_negativeTransientOvershootTolerated(BoundedLocalCache<Int, Int> cache) {
+    // Pins the adjudicated telescoping-race tolerance (design-decisions, "Two weight fields"):
+    // a transiently negative policyWeight inflates the transfer quota, so the caps over-shift
+    // beyond the command and the remainder is carried over. The caps are policy targets that
+    // the controller coerces back. A skip, quota clamp, or counter clamp must fail here first.
+    cache.evictionLock.lock();
+    try {
+      var node = cache.accessOrderProbationDeque().getFirst();
+      node.setPolicyWeight(-3);
+      long windowSize = cache.windowWeightedSize();
+      long windowMaximum = cache.windowMaximum();
+      long protectedMaximum = cache.mainProtectedMaximum();
+
+      cache.climber().carryOver(1);
+      cache.increaseWindow();
+
+      // quota inflates 1 -> 4; the next candidate (weight 10) exceeds it, so the walk stops and
+      // the inflated remainder is given back and carried over
+      assertThat(node.inWindow()).isTrue();
+      assertThat(cache.climber().adjustment()).isEqualTo(4);
+      assertThat(cache.windowMaximum()).isEqualTo(windowMaximum - 3);
+      assertThat(cache.mainProtectedMaximum()).isEqualTo(protectedMaximum + 3);
+      assertThat(cache.windowWeightedSize()).isEqualTo(windowSize - 3);
+
+      // settle the transient as the late UpdateTask would (the coercion the design relies on)
+      node.setPolicyWeight(node.getPolicyWeight() + 13);
+      cache.setWindowWeightedSize(cache.windowWeightedSize() + 13);
+      assertThat(cache.evictFromWindow()).isNotNull();
+      cache.climber().carryOver(0);
+    } finally {
+      cache.evictionLock.unlock();
+    }
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.TEN)
+  void adapt_decreaseWindow_negativeTransientOvershootTolerated(BoundedLocalCache<Int, Int> cache) {
+    // The decrease-side mirror of the tolerated over-shift: the commanded shrink nets a grow
+    // and carries the inflated remainder, coerced back by subsequent samples.
+    cache.evictionLock.lock();
+    try {
+      // a 10-weight entry cannot fit the 1% window, so plant the transient's deque state
+      var node = cache.accessOrderProbationDeque().getFirst();
+      assertThat(cache.accessOrderProbationDeque().remove(node)).isTrue();
+      assertThat(cache.accessOrderWindowDeque().offerLast(node)).isTrue();
+      node.makeWindow();
+      node.setPolicyWeight(-3);
+      long windowSize = cache.windowWeightedSize();
+      long windowMaximum = cache.windowMaximum();
+      long protectedMaximum = cache.mainProtectedMaximum();
+
+      cache.climber().carryOver(-1);
+      cache.decreaseWindow();
+
+      assertThat(node.inMainProbation()).isTrue();
+      assertThat(cache.climber().adjustment()).isEqualTo(-4);
+      assertThat(cache.windowMaximum()).isEqualTo(windowMaximum + 3);
+      assertThat(cache.mainProtectedMaximum()).isEqualTo(protectedMaximum - 3);
+      assertThat(cache.windowWeightedSize()).isEqualTo(windowSize + 3);
+
+      // settle the transient as the late UpdateTask would (the coercion the design relies on)
+      node.setPolicyWeight(node.getPolicyWeight() + 13);
+      cache.setWindowWeightedSize(cache.windowWeightedSize() - 3);
+      cache.climber().carryOver(0);
+    } finally {
+      cache.evictionLock.unlock();
+    }
+  }
+
+  /** Runs the climber's sample against an initialized sketch, without applying the transfer. */
+  private static void determineAdjustment(BoundedLocalCache<?, ?> cache) {
+    cache.climber().determineAdjustment(cache.maximum(), cache.windowMaximum(),
+        cache.mainProtectedMaximum(), cache.frequencySketch().sampleSize);
+  }
+
+  /** The walk in flight, asserting that there is one; never hold it across an adaptation. */
+  private static Walk walkOf(DensityClimber density) {
+    var walk = density.walk;
+    assertThat(walk).isNotNull();
+    return walk;
+  }
+
+  /** Puts a starvation walk in flight, as an arm would have left it. */
+  @CanIgnoreReturnValue
+  private static Walk injectWalk(DensityClimber density, boolean down, long baseWindow,
+      long baseRequestCount, double baseHitRate, double baseProbationDensity) {
+    var walk = new Walk(density.starvation, /* isAudit= */ false, down, baseWindow,
+        baseRequestCount, baseHitRate, /* baseSmoothedRate= */ 0.0, baseProbationDensity);
+    density.walk = walk;
+    return walk;
+  }
+
+  private static void prepareForAdaption(BoundedLocalCache<Int, Int> cache,
       CacheContext context, boolean recencyBias) {
-    cache.setStepSize((recencyBias ? 1 : -1) * Math.abs(cache.stepSize()));
+    cache.climber().tier.step.size =
+        (recencyBias ? 1 : -1) * Math.abs(cache.climber().tier.step.size);
     cache.setWindowMaximum((long) (0.5 * context.maximumWeightOrSize()));
     cache.setMainProtectedMaximum((long)
         (PERCENT_MAIN_PROTECTED * (context.maximumWeightOrSize() - cache.windowMaximum())));
@@ -1790,10 +4401,10 @@ public final class BoundedLocalCacheTest {
     }
   }
 
-  private void adapt(BoundedLocalCache<Int, Int> cache, int sampleSize) {
-    cache.setPreviousSampleHitRate(0.80);
-    cache.setMissesInSample(sampleSize / 2);
-    cache.setHitsInSample(sampleSize - cache.missesInSample());
+  private static void adapt(BoundedLocalCache<Int, Int> cache, int sampleSize) {
+    cache.climber().sample.previousHitRate = 0.80;
+    cache.climber().sample.misses = (sampleSize / 2);
+    cache.climber().sample.hits = (sampleSize - cache.climber().sample.misses);
     cache.climb();
 
     // Fill main protected space
@@ -1803,13 +4414,1890 @@ public final class BoundedLocalCacheTest {
     }
   }
 
+  @Nested @Isolated
+  final class IsolatedPutTest {
+
+    @ParameterizedTest
+    @CheckMaxLogLevel(WARN)
+    @CacheSpec(population = Population.EMPTY,
+        expireAfterAccess = Expire.DISABLED, expireAfterWrite = Expire.DISABLED,
+        refreshAfterWrite = Expire.DISABLED, expiry = CacheExpiry.DISABLED,
+        maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.DISABLED,
+        compute = Compute.SYNC, loader = Loader.DISABLED, stats = Stats.DISABLED,
+        removalListener = Listener.DISABLED, evictionListener = Listener.DISABLED,
+        keys = ReferenceType.STRONG, values = ReferenceType.STRONG)
+    void put_warnIfEvictionBlocked(BoundedLocalCache<Int, Int> cache) {
+      var testLogger = new AtomicReference<@Nullable TestLogger>();
+      var thread = new AtomicReference<@Nullable Thread>();
+      var started = new AtomicBoolean();
+      var done = new AtomicBoolean();
+
+      var future = CompletableFuture.runAsync(() -> {
+        var logger = TestLoggerFactory.getTestLogger(BoundedLocalCache.class);
+        logger.setEnabledLevels(WARN, ERROR);
+        thread.set(Thread.currentThread());
+        testLogger.set(logger);
+
+        await().untilTrue(started);
+        for (int i = 0; true; i++) {
+          if (done.get()) {
+            return;
+          }
+          var oldValue = cache.put(Int.valueOf(i), Int.valueOf(i));
+          assertThat(oldValue).isNull();
+        }
+      }, executor);
+
+      cache.evictionLock.lock();
+      try {
+        started.set(true);
+        var halfWaitTime = Duration.ofNanos(WARN_AFTER_LOCK_WAIT_NANOS / 2);
+        await().until(cache.evictionLock::hasQueuedThreads);
+        requireNonNull(thread.get()).interrupt();
+
+        Uninterruptibles.sleepUninterruptibly(halfWaitTime);
+        assertThat(cache.evictionLock.hasQueuedThreads()).isTrue();
+        var threadLogger = requireNonNull(testLogger.get());
+        assertThat(threadLogger.getAllLoggingEvents()).isEmpty();
+
+        Uninterruptibles.sleepUninterruptibly(halfWaitTime.plusMillis(500));
+        await().until(() -> !threadLogger.getAllLoggingEvents().isEmpty());
+
+        assertThat(cache.evictionLock.hasQueuedThreads()).isTrue();
+
+        var event = Iterables.getOnlyElement(TestLoggerFactory.getAllLoggingEvents().stream()
+            .filter(e -> e.getLevel() == WARN)
+            .collect(toImmutableList()));
+        requireNonNull(event);
+        assertThat(event.getFormattedMessage()).contains("excessive wait times");
+        assertThat(event.getThrowable().orElseThrow()).isInstanceOf(TimeoutException.class);
+      } finally {
+        done.set(true);
+        cache.evictionLock.unlock();
+      }
+      future.join();
+    }
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @SuppressWarnings("ConstantValue")
+  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
+  void put_spinToCompute(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var initialValue = cache.put(context.absentKey(), context.absentValue());
+    assertThat(initialValue).isNull();
+
+    var node = requireNonNull(cache.data.get(context.absentKey()));
+    node.retire();
+
+    var future = new Future<?>[1];
+    var value = cache.data.compute(context.absentKey(), (k, n) -> {
+      var writer = new AtomicReference<@Nullable Thread>();
+      future[0] = ConcurrentTestHarness.submit(() -> {
+        writer.set(Thread.currentThread());
+        var oldValue = cache.put(context.absentKey(), context.absentKey());
+        assertThat(oldValue).isAnyOf(context.absentValue(), null);
+      });
+
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().untilAsserted(() -> assertThat(writer).isNotNull());
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+
+      return null;
+    });
+    assertThat(value).isNull();
+
+    await().untilAsserted(() -> assertThat(cache)
+        .containsEntry(context.absentKey(), context.absentKey()));
+    assertThat(Futures.getUnchecked(future[0])).isNull();
+    cache.afterWrite(cache.new RemovalTask(node));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL)
+  void isPendingEviction(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (var key : context.original().keySet()) {
+      assertThat(cache.isPendingEviction(key)).isFalse();
+    }
+    assertThat(cache.isPendingEviction(context.absentKey())).isFalse();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY)
+  void isPendingEviction_async(AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), future);
+    var localCache = (LocalAsyncCache<Int, Int>) cache;
+    assertThat(localCache.cache().isPendingEviction(context.absentKey())).isFalse();
+    future.complete(context.absentValue());
+    assertThat(localCache.cache().isPendingEviction(context.absentKey())).isFalse();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY,
+      mustExpireWithAnyOf = {AFTER_ACCESS, AFTER_WRITE, VARIABLE}, expiryTime = Expire.ONE_MINUTE,
+      expiry = {CacheExpiry.DISABLED, CacheExpiry.CREATE, CacheExpiry.WRITE, CacheExpiry.ACCESS},
+      expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
+      expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE})
+  void isPendingEviction_async_expiredInFlight(AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), future);
+    context.ticker().advance(Duration.ofNanos(ASYNC_EXPIRY).plus(Duration.ofMinutes(2)));
+
+    var localCache = (LocalAsyncCache<Int, Int>) cache;
+    assertThat(localCache.cache().isPendingEviction(context.absentKey())).isFalse();
+    future.complete(context.absentValue());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.ASYNC, population = Population.EMPTY, keys = ReferenceType.STRONG)
+  void asyncCompletion_removesRefresh(AsyncCache<Int, Int> cache, CacheContext context) {
+    var localCache = ((LocalAsyncCache<Int, Int>) cache).cache();
+    var keyRef = localCache.referenceKey(context.absentKey());
+    localCache.refreshes().put(keyRef, new CompletableFuture<>());
+
+    var future = cache.get(context.absentKey(), (key, executor) ->
+        CompletableFuture.completedFuture(context.absentValue()));
+    assertThat(future).succeedsWith(context.absentValue());
+    assertThat(localCache.refreshes()).doesNotContainKey(keyRef);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.ASYNC, population = Population.EMPTY,
+      maximumSize = Maximum.FULL, keys = ReferenceType.STRONG)
+  void asyncCompletion_doesNotRecordAccess(AsyncCache<Int, Int> cache, CacheContext context) {
+    var localCache = asBoundedLocalCache(cache);
+    localCache.frequencySketch().ensureCapacity(context.maximumSize());
+
+    var future = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), future);
+    future.complete(context.absentValue());
+    cache.synchronous().cleanUp();
+
+    assertThat(localCache.climber().sample.misses).isEqualTo(1);
+    assertThat(localCache.climber().sample.hits).isEqualTo(0);
+    assertThat(localCache.climber().sample.windowHits).isEqualTo(0);
+    assertThat(localCache.frequencySketch().frequency(context.absentKey())).isEqualTo(1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.ASYNC, population = Population.EMPTY,
+      loader = Loader.BULK_IDENTITY, maximumSize = Maximum.FULL, keys = ReferenceType.STRONG)
+  void asyncBulkCompletion_doesNotRecordAccess(
+      AsyncLoadingCache<Int, Int> cache, CacheContext context) {
+    var localCache = asBoundedLocalCache(cache);
+    localCache.frequencySketch().ensureCapacity(context.maximumSize());
+
+    cache.getAll(context.absentKeys()).join();
+    cache.synchronous().cleanUp();
+
+    assertThat(localCache.climber().sample.misses).isEqualTo(context.absentKeys().size());
+    assertThat(localCache.climber().sample.hits).isEqualTo(0);
+    assertThat(localCache.climber().sample.windowHits).isEqualTo(0);
+    for (var key : context.absentKeys()) {
+      assertThat(localCache.frequencySketch().frequency(key)).isEqualTo(1);
+    }
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, compute = Compute.SYNC,
+      population = Population.SINGLETON, maximumSize = Maximum.FULL,
+      weigher = CacheWeigher.ZERO, keys = ReferenceType.STRONG, values = ReferenceType.STRONG)
+  void zeroWeight_doesNotRecordClimberHit(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.frequencySketch().ensureCapacity(context.maximumSize());
+    int frequency = cache.frequencySketch().frequency(context.firstKey());
+    long windowHits = cache.climber().sample.windowHits;
+    long hits = cache.climber().sample.hits;
+
+    var value = cache.getIfPresent(context.firstKey(), /* recordStats= */ true);
+    cache.cleanUp();
+
+    assertThat(value).isNotNull();
+    // A zero-weight entry occupies no capacity, so its hit must not steer the climber; the
+    // admission sketch still observes the key
+    assertThat(cache.climber().sample.hits).isEqualTo(hits);
+    assertThat(cache.climber().sample.windowHits).isEqualTo(windowHits);
+    assertThat(cache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, compute = Compute.ASYNC,
+      population = Population.EMPTY, maximumSize = Maximum.FULL,
+      weigher = CacheWeigher.DISABLED, keys = ReferenceType.STRONG)
+  void asyncInFlightRead_doesNotRecordClimberHit(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var localCache = asBoundedLocalCache(cache);
+    localCache.frequencySketch().ensureCapacity(context.maximumSize());
+    localCache.recordReads();
+    var future = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), future);
+    cache.synchronous().cleanUp();
+    long hits = localCache.climber().sample.hits;
+    var node = requireNonNull(localCache.data.get(
+        localCache.nodeFactory.newLookupKey(context.absentKey())));
+    assertThat(node.getPolicyWeight()).isEqualTo(0);
+
+    // An in-flight future's policy weight is zero: its coalesced reads are free window credit
+    // until the load completes, so they must not steer the climber
+    var read = cache.getIfPresent(context.absentKey());
+    cache.synchronous().cleanUp();
+    assertThat(read).isSameInstanceAs(future);
+    assertThat(localCache.climber().sample.hits).isEqualTo(hits);
+
+    // once completed the entry has weight, so a read steers again
+    future.complete(context.absentValue());
+    cache.synchronous().cleanUp();
+    assertThat(node.getPolicyWeight()).isEqualTo(1);
+    var completed = cache.getIfPresent(context.absentKey());
+    cache.synchronous().cleanUp();
+    assertThat(completed).isSameInstanceAs(future);
+    assertThat(localCache.climber().sample.hits).isEqualTo(hits + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, compute = Compute.SYNC,
+      population = Population.SINGLETON, maximumSize = Maximum.FULL,
+      weigher = CacheWeigher.DISABLED, keys = ReferenceType.STRONG,
+      values = ReferenceType.STRONG, expireAfterWrite = Expire.ONE_MINUTE)
+  void expiredReload_recordsClimberMiss(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.frequencySketch().ensureCapacity(context.maximumSize());
+    int frequency = cache.frequencySketch().frequency(context.firstKey());
+    long misses = cache.climber().sample.misses;
+    long hits = cache.climber().sample.hits;
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    var value = cache.computeIfAbsent(context.firstKey(), key -> context.absentValue());
+    cache.cleanUp();
+
+    assertThat(value).isEqualTo(context.absentValue());
+    assertThat(context).stats().hits(0).misses(1);
+    assertThat(cache.climber().sample.hits).isEqualTo(hits);
+    assertThat(cache.climber().sample.windowHits).isEqualTo(0);
+    assertThat(cache.climber().sample.misses).isEqualTo(misses + 1);
+    assertThat(cache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, compute = Compute.SYNC,
+      population = Population.SINGLETON, maximumSize = Maximum.FULL,
+      weigher = CacheWeigher.DISABLED, keys = ReferenceType.STRONG,
+      values = ReferenceType.STRONG, mustExpireWithAnyOf = {AFTER_ACCESS, AFTER_WRITE},
+      expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
+      expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE})
+  void expiredRemap_recordsClimberMiss(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.frequencySketch().ensureCapacity(context.maximumSize());
+    int frequency = cache.frequencySketch().frequency(context.firstKey());
+    long misses = cache.climber().sample.misses;
+    long hits = cache.climber().sample.hits;
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    var value = cache.compute(context.firstKey(), (key, oldValue) -> context.absentValue());
+    cache.cleanUp();
+
+    assertThat(value).isEqualTo(context.absentValue());
+    assertThat(cache.climber().sample.hits).isEqualTo(hits);
+    assertThat(cache.climber().sample.windowHits).isEqualTo(0);
+    assertThat(cache.climber().sample.misses).isEqualTo(misses + 1);
+    assertThat(cache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, compute = Compute.SYNC,
+      population = Population.SINGLETON, maximumSize = Maximum.FULL,
+      weigher = CacheWeigher.DISABLED, keys = ReferenceType.STRONG,
+      values = ReferenceType.STRONG, expireAfterWrite = Expire.ONE_MINUTE)
+  void expiredPut_recordsClimberMiss(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.frequencySketch().ensureCapacity(context.maximumSize());
+    int frequency = cache.frequencySketch().frequency(context.firstKey());
+    long misses = cache.climber().sample.misses;
+    long hits = cache.climber().sample.hits;
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    var previous = cache.put(context.firstKey(), context.absentValue());
+    cache.cleanUp();
+
+    assertThat(previous).isNull();
+    assertThat(cache.climber().sample.hits).isEqualTo(hits);
+    assertThat(cache.climber().sample.windowHits).isEqualTo(0);
+    assertThat(cache.climber().sample.misses).isEqualTo(misses + 1);
+    assertThat(cache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, compute = Compute.SYNC,
+      population = Population.FULL, maximumSize = Maximum.UNREACHABLE,
+      weigher = CacheWeigher.VALUE, keys = ReferenceType.STRONG,
+      values = ReferenceType.STRONG, expireAfterWrite = Expire.ONE_MINUTE)
+  void put_recordsClimberHit(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.frequencySketch().ensureCapacity(context.initialSize());
+    int frequency = cache.frequencySketch().frequency(context.firstKey());
+    long misses = cache.climber().sample.misses;
+    long hits = cache.climber().sample.hits;
+
+    // the weight change routes the live update through the same task the expired put takes
+    var previous = cache.put(context.firstKey(), context.absentValue());
+    cache.cleanUp();
+
+    assertThat(previous).isEqualTo(context.original().get(context.firstKey()));
+    assertThat(cache.climber().sample.hits).isEqualTo(hits + 1);
+    assertThat(cache.climber().sample.misses).isEqualTo(misses);
+    assertThat(cache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, compute = Compute.SYNC,
+      population = Population.SINGLETON, maximumSize = Maximum.FULL,
+      weigher = CacheWeigher.DISABLED, keys = ReferenceType.STRONG,
+      values = ReferenceType.STRONG, refreshAfterWrite = Expire.ONE_MINUTE,
+      loader = Loader.IDENTITY)
+  void refreshCompletion_doesNotRecordAccess(LoadingCache<Int, Int> cache, CacheContext context) {
+    var localCache = asBoundedLocalCache(cache);
+    localCache.frequencySketch().ensureCapacity(context.maximumSize());
+    localCache.recordReads();
+    int frequency = localCache.frequencySketch().frequency(context.firstKey());
+    long misses = localCache.climber().sample.misses;
+    long hits = localCache.climber().sample.hits;
+
+    // The read is refresh-eligible; with a direct executor and an identity loader the reload
+    // and its completion run inline before the read returns
+    context.ticker().advance(Duration.ofMinutes(2));
+    var value = cache.get(context.firstKey());
+    cache.cleanUp();
+
+    assertThat(value).isEqualTo(context.firstKey());
+    assertThat(cache).containsEntry(context.firstKey(), context.firstKey());
+
+    // Only the triggering read records an access; the completion's update is quiet
+    assertThat(localCache.climber().sample.hits).isEqualTo(hits + 1);
+    assertThat(localCache.climber().sample.misses).isEqualTo(misses);
+    assertThat(localCache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, keys = ReferenceType.STRONG,
+      weigher = {CacheWeigher.DISABLED, CacheWeigher.TEN})
+  void replace_notQuietly_recordsAccess(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.frequencySketch().ensureCapacity(context.maximumSize());
+    int frequency = cache.frequencySketch().frequency(context.firstKey());
+    long hits = cache.climber().sample.hits;
+
+    var oldValue = requireNonNull(context.original().get(context.firstKey()));
+    cache.replace(context.firstKey(), oldValue, context.absentValue(),
+        /* shouldDiscardRefresh= */ true, /* quietly= */ false);
+    cache.cleanUp();
+
+    assertThat(cache.climber().sample.hits).isEqualTo(hits + 1);
+    assertThat(cache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, keys = ReferenceType.STRONG)
+  void replace_quietly_doesNotRecordAccess(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.frequencySketch().ensureCapacity(context.maximumSize());
+    int frequency = cache.frequencySketch().frequency(context.firstKey());
+    long hits = cache.climber().sample.hits;
+
+    var oldValue = requireNonNull(context.original().get(context.firstKey()));
+    cache.replace(context.firstKey(), oldValue, context.absentValue(),
+        /* shouldDiscardRefresh= */ true, /* quietly= */ true);
+    cache.cleanUp();
+
+    assertThat(cache.climber().sample.hits).isEqualTo(hits);
+    assertThat(cache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, keys = ReferenceType.STRONG, weigher = CacheWeigher.DISABLED,
+      expireAfterAccess = Expire.DISABLED, expireAfterWrite = Expire.DISABLED,
+      refreshAfterWrite = Expire.DISABLED, expiry = CacheExpiry.DISABLED)
+  void remap_notQuietly_recordsAccess(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.frequencySketch().ensureCapacity(context.maximumSize());
+    int frequency = cache.frequencySketch().frequency(context.firstKey());
+    long hits = cache.climber().sample.hits;
+
+    var hints = new LocalCache.RemapHints();
+    var value = cache.compute(context.firstKey(), (key, oldValue) -> oldValue, cache.expiry(),
+        /* recordLoad= */ false, /* recordLoadFailure= */ false, hints);
+    cache.cleanUp();
+
+    assertThat(value).isEqualTo(context.original().get(context.firstKey()));
+    assertThat(cache.climber().sample.hits).isEqualTo(hits + 1);
+    assertThat(cache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency + 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.FULL,
+      maximumSize = Maximum.FULL, keys = ReferenceType.STRONG, weigher = CacheWeigher.DISABLED,
+      expireAfterAccess = Expire.DISABLED, expireAfterWrite = Expire.DISABLED,
+      refreshAfterWrite = Expire.DISABLED, expiry = CacheExpiry.DISABLED)
+  void remap_quietly_doesNotRecordAccess(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    cache.frequencySketch().ensureCapacity(context.maximumSize());
+    int frequency = cache.frequencySketch().frequency(context.firstKey());
+    long hits = cache.climber().sample.hits;
+
+    // An unchanged weight within the write time tolerance settles the write on the read path,
+    // where a quiet caller must not have the usage recorded either
+    var hints = new LocalCache.RemapHints();
+    hints.quietly = true;
+    var value = cache.compute(context.firstKey(), (key, oldValue) -> oldValue, cache.expiry(),
+        /* recordLoad= */ false, /* recordLoadFailure= */ false, hints);
+    cache.cleanUp();
+
+    assertThat(value).isEqualTo(context.original().get(context.firstKey()));
+    assertThat(cache.climber().sample.hits).isEqualTo(hits);
+    assertThat(cache.frequencySketch().frequency(context.firstKey())).isEqualTo(frequency);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.STRONG,
+      values = {ReferenceType.WEAK, ReferenceType.SOFT})
+  void isPendingEviction_collected(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    node.setValue(nullValue(), cache.valueReferenceQueue());
+    assertThat(cache.isPendingEviction(context.firstKey())).isTrue();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(mustExpireWithAnyOf = { AFTER_ACCESS, AFTER_WRITE, VARIABLE },
+      expiry = { CacheExpiry.DISABLED, CacheExpiry.CREATE, CacheExpiry.WRITE, CacheExpiry.ACCESS },
+      expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
+      expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE},
+      expiryTime = Expire.ONE_MINUTE, population = Population.FULL)
+  void isPendingEviction_expired(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    context.ticker().advance(Duration.ofMinutes(1));
+    for (var key : context.original().keySet()) {
+      assertThat(cache.isPendingEviction(key)).isTrue();
+    }
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG,
+      expiry = {CacheExpiry.DISABLED, CacheExpiry.CREATE, CacheExpiry.WRITE, CacheExpiry.ACCESS},
+      expiryTime = Expire.IMMEDIATELY, maximumSize = Maximum.DISABLED,
+      mustExpireWithAnyOf = {AFTER_ACCESS, AFTER_WRITE, VARIABLE},
+      expireAfterAccess = {Expire.DISABLED, Expire.IMMEDIATELY},
+      expireAfterWrite = {Expire.DISABLED, Expire.IMMEDIATELY})
+  void putIfAbsent_expired(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var keyReference = cache.nodeFactory.newReferenceKey(
+        context.absentKey(), cache.keyReferenceQueue());
+    var writer = new AtomicReference<@Nullable Thread>();
+    var started = new AtomicBoolean();
+
+    var future = CompletableFuture.runAsync(() -> {
+      writer.set(Thread.currentThread());
+      await().untilTrue(started);
+      assertThat(cache.putIfAbsent(context.absentKey(), context.absentKey())).isNull();
+    }, executor);
+    cache.data.compute(context.absentKey(), (k, v) -> {
+      started.set(true);
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      return cache.nodeFactory.newNode(keyReference, context.absentValue(),
+          cache.valueReferenceQueue(), 1, cache.expirationTicker().read());
+    });
+    assertThat(future).succeedsWithNull();
+    assertThat(context).notifications().withCause(EXPIRED)
+        .contains(context.absentKey(), context.absentValue())
+        .exclusively();
+    cache.data.remove(keyReference);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG,
+      values = {ReferenceType.WEAK, ReferenceType.SOFT}, maximumSize = Maximum.DISABLED)
+  void putIfAbsent_collectedValue(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var keyReference = cache.nodeFactory.newReferenceKey(
+        context.absentKey(), cache.keyReferenceQueue());
+    var writer = new AtomicReference<@Nullable Thread>();
+    var started = new AtomicBoolean();
+
+    var future = CompletableFuture.runAsync(() -> {
+      writer.set(Thread.currentThread());
+      await().untilTrue(started);
+      assertThat(cache.putIfAbsent(context.absentKey(), context.absentKey())).isNull();
+    }, executor);
+    cache.data.compute(context.absentKey(), (k, v) -> {
+      started.set(true);
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      return cache.nodeFactory.newNode(keyReference, nullValue(),
+          cache.valueReferenceQueue(), 1, cache.expirationTicker().read());
+    });
+    assertThat(future).succeedsWithNull();
+    assertThat(context).notifications().withCause(COLLECTED)
+        .contains(context.absentKey(), null)
+        .exclusively();
+    cache.data.remove(keyReference);
+  }
+
+  @Test
+  @SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter")
+  void putIfAbsent_accessTime_notCorruptedByAsyncValue() {
+    var ticker = new FakeTicker();
+    AsyncCache<Int, Int> asyncCache = Caffeine.newBuilder()
+        .expireAfterAccess(Duration.ofMinutes(1))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .buildAsync();
+    var cache = asBoundedLocalCache(asyncCache);
+
+    var key = Int.valueOf(1);
+    asyncCache.put(key, CompletableFuture.completedFuture(Int.valueOf(100)));
+    var lookupKey = cache.nodeFactory.newLookupKey(key);
+    var node = requireNonNull(cache.data.get(lookupKey));
+
+    // Expire the entry so that put()'s fast path falls through to the synchronized block
+    ticker.advance(Duration.ofMinutes(2));
+    long now = ticker.read();
+
+    // Force the slow path: hold the node lock so the putIfAbsent thread blocks on it after the fast
+    // path fails (entry is expired). Then un-expire the entry and release. The writer enters the
+    // synchronized block, finds the entry alive (mayUpdate=false), and computes expirationTime,
+    // which must be based on the existing value, not the unstored new value.
+    var writer = new AtomicReference<@Nullable Thread>();
+    var started = new AtomicBoolean();
+    var incomplete = new CompletableFuture<Int>();
+
+    CompletableFuture<?> writerDone;
+    synchronized (node) {
+      writerDone = CompletableFuture.runAsync(() -> {
+        writer.set(Thread.currentThread());
+        await().untilTrue(started);
+        asyncCache.asMap().putIfAbsent(key, incomplete);
+      }, executor);
+
+      // Signal the writer to proceed, then wait for it to block on synchronized(node)
+      started.set(true);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && (thread.getState() == BLOCKED);
+      });
+
+      // Un-expire the entry while the writer is blocked on the node lock
+      node.setAccessTime(now);
+    }
+
+    // Wait for the writer to complete putIfAbsent before reading the access time
+    writerDone.join();
+
+    // Read the access time before any get() call, which would overwrite it
+    long accessTime = node.getAccessTime();
+
+    // The access time must reflect 'now', not now+ASYNC_EXPIRY (~220 years). Before the fix,
+    // isComputingAsync(value) used the new incomplete future to compute expirationTime, which
+    // corrupted the access time to ~220 years and prevented expiration.
+    assertThat(accessTime).isAtMost(now + TimeUnit.MINUTES.toNanos(1));
+  }
+
+  @Test
+  @SuppressWarnings("SynchronizationOnLocalVariableOrMethodParameter")
+  void putIfAbsent_variableTime_notCorruptedByAsyncSentinel() {
+    var ticker = new FakeTicker();
+    AsyncCache<Int, Int> asyncCache = Caffeine.newBuilder()
+        .expireAfter(Expiry.creating((Int key, Int value) -> Duration.ofMinutes(1)))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .buildAsync();
+    var cache = asBoundedLocalCache(asyncCache);
+
+    var key = Int.valueOf(1);
+    asyncCache.put(key, CompletableFuture.completedFuture(Int.valueOf(100)));
+    var lookupKey = cache.nodeFactory.newLookupKey(key);
+    var node = requireNonNull(cache.data.get(lookupKey));
+
+    // Expire the entry so that put()'s fast path falls through to the synchronized block
+    ticker.advance(Duration.ofMinutes(2));
+    long now = ticker.read();
+
+    // Force the slow path as above, and stand in for the concurrent write that installs a fresh
+    // in-flight future whose value arrives before the completion can claim the node lock. The
+    // writer finds the entry alive (mayUpdate=false) and extends the read duration, which must
+    // preserve the sentinel that tells the completion this is a first load rather than an update.
+    var writer = new AtomicReference<@Nullable Thread>();
+    var started = new AtomicBoolean();
+    var incomplete = new CompletableFuture<Int>();
+
+    CompletableFuture<?> writerDone;
+    synchronized (node) {
+      writerDone = CompletableFuture.runAsync(() -> {
+        writer.set(Thread.currentThread());
+        await().untilTrue(started);
+        asyncCache.asMap().putIfAbsent(key, incomplete);
+      }, executor);
+
+      started.set(true);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && (thread.getState() == BLOCKED);
+      });
+
+      node.setVariableTime(now + ASYNC_EXPIRY);
+    }
+
+    writerDone.join();
+    assertThat(node.getVariableTime()).isEqualTo(now + ASYNC_EXPIRY);
+  }
+
+  @Test
+  void computeIfAbsent_expiredOptimistic_liveUnderLock() {
+    var ticker = new FakeTicker();
+    var removed = new ArrayList<Int>();
+    Cache<Int, Int> cache = Caffeine.newBuilder()
+        .removalListener((@Nullable Int key, @Nullable Int value, RemovalCause cause) ->
+            removed.add(key))
+        .expireAfterAccess(Duration.ofMinutes(1))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .recordStats()
+        .build();
+    var localCache = asBoundedLocalCache(cache);
+
+    var key = Int.valueOf(1);
+    var value = Int.valueOf(100);
+    cache.put(key, value);
+    var node = requireNonNull(localCache.data.get(localCache.nodeFactory.newLookupKey(key)));
+
+    // Expire the entry so that computeIfAbsent's optimistic read falls through to the locked
+    // recheck, then stand in for the concurrent write that makes the entry live again before it
+    // is reached. The mapping function must not run and the entry must not be evicted.
+    ticker.advance(Duration.ofMinutes(2));
+    long now = ticker.read();
+
+    var reader = new AtomicReference<@Nullable Thread>();
+    var started = new AtomicBoolean();
+    var mappings = new AtomicInteger();
+
+    CompletableFuture<Int> readerDone;
+    synchronized (node) {
+      readerDone = CompletableFuture.supplyAsync(() -> {
+        reader.set(Thread.currentThread());
+        await().untilTrue(started);
+        return cache.get(key, k -> {
+          mappings.incrementAndGet();
+          return Int.valueOf(-1);
+        });
+      }, executor);
+
+      started.set(true);
+      await().until(() -> {
+        var thread = reader.get();
+        return (thread != null) && (thread.getState() == BLOCKED);
+      });
+
+      node.setAccessTime(now);
+    }
+
+    assertThat(readerDone.join()).isEqualTo(value);
+    assertThat(mappings.get()).isEqualTo(0);
+    assertThat(removed).isEmpty();
+    assertThat(cache.stats().evictionCount()).isEqualTo(0);
+    assertThat(cache).isValid();
+  }
+
+  @Test
+  void computeIfAbsent_inFlightAfterOptimisticMiss_keptUnderLock() {
+    var ticker = new FakeTicker();
+    var lookups = new AtomicInteger();
+    var onLookup = new AtomicReference<@Nullable Runnable>();
+    AsyncCache<Object, Int> cache = Caffeine.newBuilder()
+        .expireAfterWrite(Duration.ofMinutes(1))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .buildAsync();
+
+    // The second hash occurs after the optimistic lookup and before the locked computation.
+    // Insert an in-flight load there. Past the async horizon its timestamps read expired, so
+    // the locked path must keep the load rather than evict it and run the mapping function.
+    var key = new Object() {
+      @SuppressFBWarnings("HE_HASHCODE_USE_OBJECT_EQUALS")
+      @SuppressWarnings("PMD.OverrideBothEqualsAndHashcode")
+      @Override public int hashCode() {
+        if (lookups.incrementAndGet() == 2) {
+          requireNonNull(onLookup.getAndSet(null)).run();
+        }
+        return 1;
+      }
+    };
+    var future = new CompletableFuture<Int>();
+    onLookup.set(() -> {
+      cache.put(key, future);
+      ticker.advance(Duration.ofNanos(ASYNC_EXPIRY).plus(Duration.ofMinutes(2)));
+    });
+
+    var result = cache.asMap().computeIfAbsent(key, k -> {
+      throw new AssertionError("the in-flight load must not be replaced");
+    });
+    assertThat(result).isSameInstanceAs(future);
+    future.complete(Int.valueOf(100));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine,
+      population = Population.SINGLETON, expireAfterWrite = Expire.ONE_MINUTE,
+      weigher = CacheWeigher.TEN, maximumSize = Maximum.UNREACHABLE, stats = Stats.ENABLED)
+  void compute_expiredEntry_evictionWeightRecorded(
+      Cache<Int, Int> cache, CacheContext context) {
+    // compute() has no fast path for expired entries, so it enters remap where the expired entry
+    // is evicted. The remapping function sees null (expired) and returns null, triggering the
+    // eviction recording. Previously, ctx.oldWeight was not set before the eviction check, so
+    // recordEviction logged weight 0 instead of the actual entry weight.
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(cache.asMap().compute(context.firstKey(), (k, v) -> {
+      assertThat(v).isNull();
+      return null;
+    })).isNull();
+    assertThat(context).stats().evictionWeight(10);
+  }
+
+  @Test
+  void compute_expiredEntry_expiryThrows_evictionCommitted() {
+    // When compute() encounters an expired entry and the Expiry throws during expireAfterCreate,
+    // the catch-commit-rethrow pattern should: commit the eviction (retire the node), record
+    // eviction stats with the old weight, send the EXPIRED notification, and rethrow the exception.
+    var ticker = new FakeTicker();
+    var throwOnCreate = new AtomicBoolean();
+    var listener = new ConsumingRemovalListener<Int, Int>();
+    var cache = Caffeine.newBuilder()
+        .expireAfter(Expiry.creating((Int key, Int value) -> {
+          checkState(!throwOnCreate.get() || (key.intValue() > 1), "expiry failure");
+          return Duration.ofMinutes(1);
+        }))
+        .weigher((Int key, Int value) -> value.intValue())
+        .removalListener(listener)
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .maximumWeight(100)
+        .recordStats()
+        .build();
+
+    cache.put(Int.valueOf(1), Int.valueOf(5));
+    ticker.advance(Duration.ofMinutes(2));
+
+    // Enable the throw for the re-create after expiration
+    throwOnCreate.set(true);
+
+    // compute on the entry whose expiry throws — exception must propagate
+    assertThrows(IllegalStateException.class, () ->
+        cache.asMap().compute(Int.valueOf(1), (k, v) -> Int.valueOf(10)));
+
+    // The expired entry must have been evicted and removed from the cache
+    assertThat(cache.asMap()).doesNotContainKey(Int.valueOf(1));
+    assertThat(cache.stats().evictionWeight()).isEqualTo(5);
+
+    // Removal notification for the expired entry should have been sent
+    var expiredNotifications = listener.removed().stream()
+        .filter(n -> n.getCause() == EXPIRED)
+        .collect(toImmutableList());
+    assertThat(expiredNotifications).hasSize(1);
+  }
+
+  @Test
+  void computeIfAbsent_expiredEntry_expiryThrows_evictionCommitted() {
+    var ticker = new FakeTicker();
+    var throwOnCreate = new AtomicBoolean();
+    var listener = new ConsumingRemovalListener<Int, Int>();
+    var cache = Caffeine.newBuilder()
+        .expireAfter(Expiry.creating((Int key, Int value) -> {
+          checkState(!throwOnCreate.get(), "expiry failure");
+          return Duration.ofMinutes(1);
+        }))
+        .removalListener(listener)
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .maximumSize(100)
+        .recordStats()
+        .build();
+
+    cache.put(Int.valueOf(1), Int.valueOf(5));
+    ticker.advance(Duration.ofMinutes(2));
+
+    throwOnCreate.set(true);
+    assertThrows(IllegalStateException.class, () ->
+        cache.asMap().computeIfAbsent(Int.valueOf(1), k -> Int.valueOf(10)));
+
+    assertThat(cache.asMap()).doesNotContainKey(Int.valueOf(1));
+    assertThat(listener.removed().stream()
+        .filter(n -> n.getCause() == EXPIRED)).hasSize(1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, expireAfterWrite = Expire.ONE_MINUTE)
+  void computeIfAbsent_exceptionAfterExpiredEviction(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThrows(IllegalStateException.class, () ->
+        cache.computeIfAbsent(context.firstKey(), key -> {
+          throw new IllegalStateException();
+        }, /* recordStats= */ false, /* recordLoad= */ true));
+    assertThat(cache).doesNotContainKey(context.firstKey());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, expireAfterWrite = Expire.ONE_MINUTE)
+  void compute_exceptionAfterExpiredEviction(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThrows(IllegalStateException.class, () ->
+        cache.compute(context.firstKey(), (key, value) -> {
+          throw new IllegalStateException();
+        }, cache.expiry(), /* recordLoad= */ false, /* recordLoadFailure= */ true));
+    assertThat(cache).doesNotContainKey(context.firstKey());
+  }
+
+  @ParameterizedTest
+  @CacheSpec
+  void doComputeIfAbsent_throwsException(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // Pre-set ctx.exception to bypass a JaCoCo instrumentation limitation where probes inside
+    // ConcurrentHashMap.compute lambdas with synchronized + try-catch can't track ctx.exception
+    // being set. The mapping function returns null for the absent key so data.compute is a no-op,
+    // and the post-lambda code sees the pre-set checked exception, wraps it in CompletionException.
+    var ctx = new ComputeContext<Int, Int>();
+    ctx.exception = new IOException("test");
+    Object keyRef = cache.nodeFactory.newReferenceKey(
+        context.absentKey(), cache.keyReferenceQueue());
+
+    var exception = assertThrows(CompletionException.class, () ->
+        cache.doComputeIfAbsent(context.absentKey(), keyRef,
+            k -> null, ctx, /* recordStats= */ false));
+    assertThat(exception).hasCauseThat().isInstanceOf(IOException.class);
+  }
+
+  @ParameterizedTest
+  @CacheSpec
+  void remap_throwsException(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var ctx = new ComputeContext<Int, Int>();
+    ctx.exception = new IOException("test");
+    Object keyRef = cache.nodeFactory.newLookupKey(context.absentKey());
+
+    var exception = assertThrows(CompletionException.class, () ->
+        cache.remap(context.absentKey(), keyRef,
+            (k, v) -> { throw new AssertionError(); }, cache.expiry(),
+            ctx, /* computeIfAbsent= */ false));
+    assertThat(exception).hasCauseThat().isInstanceOf(IOException.class);
+  }
+
+  @Test
+  void computeIfAbsent_expiredEntry_mappingThrows_evictionCommitted() {
+    // When computeIfAbsent() encounters an expired entry in doComputeIfAbsent and the mapping
+    // function throws, the catch-commit-rethrow pattern should: commit the eviction (retire
+    // the node), record eviction stats, send the EXPIRED notification, and rethrow the exception.
+    var ticker = new FakeTicker();
+    var listener = new ConsumingRemovalListener<Int, Int>();
+    var cache = Caffeine.newBuilder()
+        .expireAfterWrite(Duration.ofMinutes(1))
+        .weigher((Int k, Int v) -> v.intValue())
+        .removalListener(listener)
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .maximumWeight(100)
+        .recordStats()
+        .build();
+
+    cache.put(Int.valueOf(1), Int.valueOf(7));
+    ticker.advance(Duration.ofMinutes(2));
+
+    assertThrows(IllegalStateException.class, () ->
+        cache.asMap().computeIfAbsent(Int.valueOf(1), k -> {
+          throw new IllegalStateException("mapping failure");
+        }));
+
+    assertThat(cache.asMap()).doesNotContainKey(Int.valueOf(1));
+    assertThat(cache.stats().evictionWeight()).isEqualTo(7);
+    var expiredNotifications = listener.removed().stream()
+        .filter(n -> n.getCause() == EXPIRED)
+        .collect(toImmutableList());
+    assertThat(expiredNotifications).hasSize(1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON,
+      expireAfterWrite = Expire.ONE_MINUTE, removalListener = Listener.CONSUMING)
+  void compute_expiredEntry_mappingThrowsError_evictionCommitted(
+      Cache<Int, Int> cache, CacheContext context) {
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThrows(AssertionError.class, () ->
+        cache.asMap().compute(context.firstKey(),
+            (k, v) -> { throw new AssertionError("test"); }));
+    assertThat(cache.asMap()).doesNotContainKey(context.firstKey());
+    assertThat(context).notifications().withCause(EXPIRED)
+        .contains(context.original()).exclusively();
+  }
+
+  @Test
+  void put_expiredEntry_recordsEviction() {
+    // When put() encounters an expired entry and replaces it, the cache's eviction strategy
+    // caused the old value's removal (detected by the put). Stats should record this eviction
+    // consistently with compute() (which does record it).
+    var ticker = new FakeTicker();
+    var listener = new ConsumingRemovalListener<Int, Int>();
+    var cache = Caffeine.newBuilder()
+        .expireAfterWrite(Duration.ofMinutes(1))
+        .weigher((Int k, Int v) -> v.intValue())
+        .removalListener(listener)
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .maximumWeight(1000)
+        .recordStats()
+        .build();
+
+    cache.put(Int.valueOf(1), Int.valueOf(5));
+    ticker.advance(Duration.ofMinutes(2));
+    cache.put(Int.valueOf(1), Int.valueOf(7));
+
+    assertThat(listener.removed().stream()
+        .filter(n -> n.getCause() == EXPIRED)).hasSize(1);
+    assertThat(cache.stats().evictionCount()).isEqualTo(1);
+    assertThat(cache.stats().evictionWeight()).isEqualTo(5);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine,
+      population = Population.SINGLETON, expireAfterWrite = Expire.ONE_MINUTE,
+      weigher = CacheWeigher.TEN, maximumSize = Maximum.UNREACHABLE,
+      removalListener = Listener.CONSUMING, stats = Stats.ENABLED)
+  void remove_expiredEntry_recordsEviction(Cache<Int, Int> cache, CacheContext context) {
+    context.ticker().advance(Duration.ofMinutes(2));
+    var prior = cache.asMap().remove(context.firstKey());
+    assertThat(prior).isNull();
+    assertThat(context).notifications().withCause(EXPIRED)
+        .contains(context.original()).exclusively();
+    assertThat(context).stats().evictions(1).evictionWeight(10);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, expireAfterWrite = Expire.ONE_MINUTE,
+      removalListener = Listener.CONSUMING, stats = Stats.ENABLED)
+  void compute_expiredEntry_remappingReturnsOldInstance(
+      Cache<Int, Int> cache, CacheContext context) {
+    // When compute() finds an expired entry and the remapping function returns a value that is
+    // the same instance as the expired value, the entry should be treated as a fresh creation.
+    var value = context.original().get(context.firstKey());
+    context.ticker().advance(Duration.ofMinutes(2));
+
+    var result = cache.asMap().compute(context.firstKey(), (k, v) -> {
+      assertThat(v).isNull();
+      return value;
+    });
+    assertThat(result).isSameInstanceAs(value);
+    assertThat(cache.getIfPresent(context.firstKey())).isSameInstanceAs(value);
+    assertThat(context).notifications().withCause(EXPIRED)
+        .contains(context.firstKey(), value).exclusively();
+    assertThat(context).stats().evictions(1);
+  }
+
+  @Test
+  void compute_expiredEntry_mappingThrows_evictionCommitted() {
+    // When compute() encounters an expired entry in remap and the mapping function throws after
+    // the eviction notification was sent (catch-commit-rethrow path), the eviction must be
+    // committed (node retired) and the exception rethrown. The eviction stats should record
+    // the old weight, and the removal cause should be EXPIRED.
+    var ticker = new FakeTicker();
+    var listener = new ConsumingRemovalListener<Int, Int>();
+    var cache = Caffeine.newBuilder()
+        .expireAfterWrite(Duration.ofMinutes(1))
+        .weigher((Int k, Int v) -> v.intValue())
+        .removalListener(listener)
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .maximumWeight(100)
+        .recordStats()
+        .build();
+
+    cache.put(Int.valueOf(1), Int.valueOf(7));
+    ticker.advance(Duration.ofMinutes(2));
+
+    // compute on expired entry — mapping function throws
+    assertThrows(IllegalStateException.class, () ->
+        cache.asMap().compute(Int.valueOf(1), (k, v) -> {
+          throw new IllegalStateException("compute failure");
+        }));
+
+    // The expired entry must have been removed
+    assertThat(cache.asMap()).doesNotContainKey(Int.valueOf(1));
+
+    // Eviction stats should record the old weight (7), cause should be EXPIRED
+    assertThat(cache.stats().evictionWeight()).isEqualTo(7);
+    var expiredNotifications = listener.removed().stream()
+        .filter(n -> n.getCause() == EXPIRED)
+        .collect(toImmutableList());
+    assertThat(expiredNotifications).hasSize(1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, weigher = CacheWeigher.TEN,
+      maximumSize = Maximum.FULL, expireAfterWrite = Expire.ONE_MINUTE,
+      removalListener = Listener.CONSUMING)
+  void compute_expiredEntry_mappingThrows_evictionCommitted(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // The weighted expired-entry variant runs parameterized so the validation listener also proves
+    // that weightedSize converges, which the hand-built sibling cannot observe
+    context.ticker().advance(Duration.ofMinutes(2));
+
+    assertThrows(IllegalStateException.class, () ->
+        cache.compute(context.firstKey(), (k, v) -> {
+          throw new IllegalStateException("compute failure");
+        }));
+
+    assertThat(cache).doesNotContainKey(context.firstKey());
+    assertThat(context).notifications().withCause(EXPIRED)
+        .contains(context.firstKey(), context.original().get(context.firstKey())).exclusively();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, keys = ReferenceType.STRONG,
+      values = {ReferenceType.WEAK, ReferenceType.SOFT}, weigher = CacheWeigher.TEN,
+      maximumSize = Maximum.FULL, removalListener = Listener.CONSUMING)
+  void compute_collectedEntry_mappingThrows_evictionCommitted(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    node.setValue(nullValue(), cache.valueReferenceQueue());
+
+    assertThrows(IllegalStateException.class, () ->
+        cache.compute(context.firstKey(), (k, v) -> {
+          throw new IllegalStateException("compute failure");
+        }));
+
+    assertThat(cache).doesNotContainKey(context.firstKey());
+    assertThat(context).notifications().withCause(COLLECTED)
+        .contains(context.firstKey(), null).exclusively();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, keys = ReferenceType.STRONG,
+      values = {ReferenceType.WEAK, ReferenceType.SOFT}, weigher = CacheWeigher.TEN,
+      maximumSize = Maximum.FULL, removalListener = Listener.CONSUMING)
+  void computeIfAbsent_collectedEntry_mappingThrows_evictionCommitted(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    node.setValue(nullValue(), cache.valueReferenceQueue());
+
+    assertThrows(IllegalStateException.class, () ->
+        cache.computeIfAbsent(context.firstKey(), k -> {
+          throw new IllegalStateException("mapping failure");
+        }));
+
+    assertThat(cache).doesNotContainKey(context.firstKey());
+    assertThat(context).notifications().withCause(COLLECTED)
+        .contains(context.firstKey(), null).exclusively();
+  }
+
+  @Test
+  void compute_expiredEntry_weigherThrows_evictionCommitted() {
+    var ticker = new FakeTicker();
+    var listener = new ConsumingRemovalListener<Int, Int>();
+    var throwOnWeigh = new AtomicBoolean();
+    var cache = Caffeine.newBuilder()
+        .expireAfterWrite(Duration.ofMinutes(1))
+        .weigher((Int k, Int v) -> {
+          checkState(!throwOnWeigh.get(), "weigher failure");
+          return v.intValue();
+        })
+        .removalListener(listener)
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .maximumWeight(100)
+        .recordStats()
+        .build();
+
+    cache.put(Int.valueOf(1), Int.valueOf(7));
+    ticker.advance(Duration.ofMinutes(2));
+    throwOnWeigh.set(true);
+
+    assertThrows(IllegalStateException.class, () ->
+        cache.asMap().compute(Int.valueOf(1), (k, v) -> Int.valueOf(10)));
+
+    assertThat(cache.asMap()).doesNotContainKey(Int.valueOf(1));
+    assertThat(cache.stats().evictionWeight()).isEqualTo(7);
+    var expired = listener.removed().stream()
+        .filter(n -> n.getCause() == EXPIRED)
+        .collect(toImmutableList());
+    assertThat(expired).hasSize(1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, keys = ReferenceType.STRONG,
+      values = {ReferenceType.WEAK, ReferenceType.SOFT}, weigher = CacheWeigher.MOCKITO,
+      maximumSize = Maximum.FULL, removalListener = Listener.CONSUMING)
+  void compute_collectedEntry_weigherThrows_evictionCommitted(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    node.setValue(nullValue(), cache.valueReferenceQueue());
+    when(context.weigher().weigh(any(), any()))
+        .thenThrow(new IllegalStateException("weigher failure"));
+
+    assertThrows(IllegalStateException.class, () ->
+        cache.compute(context.firstKey(), (k, v) -> context.absentValue()));
+
+    assertThat(cache).doesNotContainKey(context.firstKey());
+    assertThat(context).notifications().withCause(COLLECTED)
+        .contains(context.firstKey(), null).exclusively();
+  }
+
+  @Test
+  void replaceConditionally_weigherThrows_wrongOldValue() {
+    var throwOnWeigh = new AtomicBoolean();
+    var listener = new ConsumingRemovalListener<Int, Int>();
+    var cache = Caffeine.newBuilder()
+        .weigher((Int k, Int v) -> {
+          checkState(!throwOnWeigh.get(), "weigher failure");
+          return v.intValue();
+        })
+        .removalListener(listener)
+        .executor(Runnable::run)
+        .maximumWeight(100)
+        .recordStats()
+        .build();
+
+    cache.put(Int.valueOf(1), Int.valueOf(7));
+    throwOnWeigh.set(true);
+
+    // The weigher is invoked before the data.computeIfPresent lookup, by design: user
+    // code is kept out of the bin's critical section. A buggy weigher therefore throws
+    // even when the value-equality check would have made the replacement a no-op.
+    assertThrows(IllegalStateException.class, () ->
+        cache.asMap().replace(Int.valueOf(1), Int.valueOf(99), Int.valueOf(10)));
+
+    // The mapping should not have changed, since no replace took place.
+    assertThat(cache.asMap()).containsEntry(Int.valueOf(1), Int.valueOf(7));
+    assertThat(listener.removed()).isEmpty();
+  }
+
+  @Test
+  @CheckMaxLogLevel(WARN)
+  void asyncCompletion_expiryThrows_entryRemoved() {
+    // When an async future completes and handleCompletion calls replace() to update weight and
+    // expiration, the AsyncExpiry delegates to expireAfterCreate (since currentDuration exceeds
+    // MAXIMUM_EXPIRY from the initial computing state). If the user's Expiry throws, the entry
+    // should be removed from the cache and load failure recorded.
+    var throwOnCreate = new AtomicBoolean();
+    var cache = Caffeine.newBuilder()
+        .expireAfter(Expiry.creating((Int key, Int value) -> {
+            checkState(!throwOnCreate.get(), "expiry create failure");
+            return Duration.ofMinutes(5);
+        }))
+        .executor(Runnable::run)
+        .recordStats()
+        .buildAsync();
+
+    var future = new CompletableFuture<Int>();
+    cache.put(Int.valueOf(1), future);
+
+    // Enable the expiry failure before completion — AsyncExpiry.expireAfterUpdate delegates
+    // to the user's expireAfterCreate when the entry transitions from computing to ready
+    throwOnCreate.set(true);
+    future.complete(Int.valueOf(42));
+
+    // The entry should have been removed due to the expiry exception
+    assertThat(cache.synchronous().getIfPresent(Int.valueOf(1))).isNull();
+    assertThat(cache.synchronous().estimatedSize()).isEqualTo(0);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @Test
+  void getAll_bulkLoad_partialPutFailure() {
+    // When bulkLoad calls loaded.forEach(cache::put) and a put throws mid-iteration (e.g.,
+    // weigher failure), entries inserted before the failure remain in the cache. The exception
+    // propagates to the caller. Stats record load failure.
+    var weigherCallCount = new MutableInt();
+    LoadingCache<Int, Int> cache = Caffeine.newBuilder()
+        .maximumWeight(1000)
+        .weigher((Int key, Int value) -> {
+          weigherCallCount.increment();
+          checkState(value.intValue() != 99, "weigher failure");
+          return value.intValue();
+        })
+        .executor(Runnable::run)
+        .recordStats()
+        .build(new CacheLoader<>() {
+          @Override public Int load(Int key) {
+            throw new UnsupportedOperationException();
+          }
+          @Override public Map<Int, Int> loadAll(Set<? extends Int> keys) {
+            // Return a map where one entry will cause a weigher failure.
+            // Use a LinkedHashMap to ensure insertion order: 1→1, 2→99 (fails), 3→3
+            var result = new LinkedHashMap<Int, Int>();
+            result.put(Int.valueOf(1), Int.valueOf(1));
+            result.put(Int.valueOf(2), Int.valueOf(99));
+            result.put(Int.valueOf(3), Int.valueOf(3));
+            return result;
+          }
+        });
+
+    // getAll should propagate the weigher exception
+    assertThrows(IllegalStateException.class, () ->
+        cache.getAll(List.of(Int.valueOf(1), Int.valueOf(2), Int.valueOf(3))));
+
+    // Stats should record load failure
+    assertThat(cache.stats().loadFailureCount()).isEqualTo(1);
+    assertThat(cache.stats().loadSuccessCount()).isEqualTo(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, expiryTime = Expire.ONE_MINUTE,
+      expiry = {CacheExpiry.DISABLED, CacheExpiry.CREATE, CacheExpiry.WRITE, CacheExpiry.ACCESS},
+      mustExpireWithAnyOf = {AFTER_ACCESS, AFTER_WRITE, VARIABLE},
+      expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
+      expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE})
+  void replace_expiredEntry_schedulesCleanup(Cache<Int, Int> cache, CacheContext context) {
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(cache.asMap().replace(context.firstKey(), context.absentValue())).isNull();
+    cache.cleanUp();
+    assertThat(cache.asMap()).doesNotContainKey(context.firstKey());
+    assertThat(context).notifications().withCause(EXPIRED)
+        .contains(context.original()).exclusively();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.WEAK)
+  void remove_collectedKey(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    var writer = new AtomicReference<@Nullable Thread>();
+    var weakKey = (Reference<?>) node.getKeyReference();
+    var key = requireNonNull(node.getKey());
+    var started = new AtomicBoolean();
+
+    var future = CompletableFuture.runAsync(() -> {
+      writer.set(Thread.currentThread());
+      await().untilTrue(started);
+      assertThat(cache.remove(key)).isNull();
+    }, executor);
+    synchronized (node) {
+      started.set(true);
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      weakKey.enqueue();
+    }
+    assertThat(future).succeedsWithNull();
+
+    cache.cleanUp();
+    assertThat(context).notifications().withCause(COLLECTED)
+        .contains(null, context.original().get(context.firstKey()))
+        .exclusively();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.WEAK)
+  void removeConditionally_collectedKey(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    var writer = new AtomicReference<@Nullable Thread>();
+    var weakKey = (Reference<?>) node.getKeyReference();
+    var value = requireNonNull(node.getValue());
+    var key = requireNonNull(node.getKey());
+    var started = new AtomicBoolean();
+
+    var future = CompletableFuture.runAsync(() -> {
+      writer.set(Thread.currentThread());
+      await().untilTrue(started);
+      assertThat(cache.remove(key, value)).isFalse();
+    }, executor);
+    synchronized (node) {
+      started.set(true);
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      weakKey.enqueue();
+    }
+    assertThat(future).succeedsWithNull();
+
+    cache.cleanUp();
+    assertThat(context).notifications().withCause(COLLECTED)
+        .contains(null, context.original().get(context.firstKey()))
+        .exclusively();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.WEAK)
+  void replace_collectedKey(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    var writer = new AtomicReference<@Nullable Thread>();
+    var weakKey = (Reference<?>) node.getKeyReference();
+    var value = requireNonNull(node.getValue());
+    var key = requireNonNull(node.getKey());
+    var started = new AtomicBoolean();
+
+    var future = CompletableFuture.runAsync(() -> {
+      writer.set(Thread.currentThread());
+      await().untilTrue(started);
+      assertThat(cache.replace(key, value)).isNull();
+    }, executor);
+    synchronized (node) {
+      started.set(true);
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      weakKey.clear();
+    }
+    assertThat(future).succeedsWithNull();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.WEAK)
+  void replaceConditionally_collectedKey(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    var writer = new AtomicReference<@Nullable Thread>();
+    var weakKey = (Reference<?>) node.getKeyReference();
+    var value = requireNonNull(node.getValue());
+    var key = requireNonNull(node.getKey());
+    var started = new AtomicBoolean();
+
+    var future = CompletableFuture.runAsync(() -> {
+      writer.set(Thread.currentThread());
+      await().untilTrue(started);
+      assertThat(cache.replace(key, value, context.absentValue())).isFalse();
+    }, executor);
+    synchronized (node) {
+      started.set(true);
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      weakKey.clear();
+    }
+    assertThat(future).succeedsWithNull();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.WEAK)
+  void computeIfAbsent_collectedKey(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    var writer = new AtomicReference<@Nullable Thread>();
+    var weakKey = (Reference<?>) node.getKeyReference();
+    var key = requireNonNull(node.getKey());
+    var started = new AtomicBoolean();
+
+    var future = CompletableFuture.runAsync(() -> {
+      writer.set(Thread.currentThread());
+      await().untilTrue(started);
+      var result = cache.doComputeIfAbsent(key, node.getKeyReference(),
+          k -> context.absentValue(), new ComputeContext<>(), /* recordStats= */ false);
+      assertThat(result).isEqualTo(context.absentValue());
+    }, executor);
+    synchronized (node) {
+      started.set(true);
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      weakKey.clear();
+    }
+    assertThat(future).succeedsWithNull();
+    assertThat(context).notifications().withCause(COLLECTED)
+        .contains(null, context.original().get(context.firstKey()))
+        .exclusively();
+  }
+
+  @CheckNoEvictions
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, population = Population.SINGLETON,
+      keys = ReferenceType.STRONG, values = ReferenceType.STRONG,
+      refreshAfterWrite = Expire.ONE_MINUTE, loader = Loader.IDENTITY)
+  void doComputeIfAbsent_existingEntry_returnsRefreshedValue(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(
+        cache.nodeFactory.newLookupKey(context.firstKey())));
+    Int original = requireNonNull(node.getValue());
+
+    // No expiration policy is configured, so the locked hasExpired check inside data.compute
+    // returns false and the lambda takes the `return n` branch; the existing-entry-found path that
+    // mirrors the optimistic fast path. Advancing past refreshAfterWrite makes the entry refresh
+    // eligible; with a DIRECT executor and Loader.IDENTITY the reload completes inline so afterRead
+    // returns the refreshed value (the key itself, distinct from the populated negation). The bug
+    // discarded that return; the fix uses it.
+    context.ticker().advance(Duration.ofMinutes(2));
+
+    var result = cache.doComputeIfAbsent(context.firstKey(), node.getKeyReference(),
+        key -> { throw new AssertionError("mapping must not run for valid entry"); },
+        new ComputeContext<>(), /* recordStats= */ false);
+
+    assertThat(cache).containsEntry(context.firstKey(), context.firstKey());
+    assertThat(result).isEqualTo(context.firstKey());
+    assertThat(result).isNotEqualTo(original);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.STRONG,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
+  void remap_throws_leavesTheSuccessorsRefresh(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // A stale completion's remapping runs past the hint before a user component throws. The
+    // registration it would discard by key belongs to the successor that outbid it, so the
+    // exception exit owes the same narrowing as the reject and absent exits
+    var expiry = requireNonNull(context.expiry());
+    when(expiry.expireAfterUpdate(any(), any(), anyLong(), anyLong()))
+        .thenThrow(new IllegalStateException());
+
+    var key = context.firstKey();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(key)));
+    var keyRef = node.getKeyReference();
+    var successor = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, successor);
+
+    var hints = new LocalCache.RemapHints();
+    hints.preserveRefresh = true;
+    assertThrows(IllegalStateException.class,
+        () -> cache.compute(key, (k, v) -> context.absentValue(), expiry,
+            /* recordLoad= */ false, /* recordLoadFailure= */ false, hints));
+    assertThat(cache.refreshes()).containsEntry(keyRef, successor);
+    cache.refreshes().remove(keyRef);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
+  void computeIfAbsent_removesRefresh_absent(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var keyRef = cache.nodeFactory.newReferenceKey(context.absentKey(), cache.keyReferenceQueue());
+    var future = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, future);
+
+    var result = cache.doComputeIfAbsent(context.absentKey(), keyRef,
+        key -> context.absentValue(), new ComputeContext<>(), /* recordStats= */ false);
+    assertThat(result).isEqualTo(context.absentValue());
+    assertThat(cache.refreshes()).doesNotContainKey(keyRef);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
+  void computeIfAbsent_removesRefresh_absent_null(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var keyRef = cache.nodeFactory.newReferenceKey(context.absentKey(), cache.keyReferenceQueue());
+    var future = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, future);
+
+    Function<Int, @Nullable Int> function = key -> null;
+    var result = cache.doComputeIfAbsent(context.absentKey(), keyRef,
+        function, new ComputeContext<>(), /* recordStats= */ false);
+    assertThat(result).isNull();
+    assertThat(cache.refreshes()).doesNotContainKey(keyRef);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, keys = ReferenceType.STRONG)
+  void computeIfAbsent_removesRefresh_present(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    node.setValue(nullValue(), cache.valueReferenceQueue());
+    var keyRef = node.getKeyReference();
+    var future = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, future);
+
+    var result = cache.doComputeIfAbsent(requireNonNull(node.getKey()), keyRef,
+        key -> context.absentValue(), new ComputeContext<>(), /* recordStats= */ false);
+    assertThat(result).isEqualTo(context.absentValue());
+    assertThat(cache.refreshes()).doesNotContainKey(keyRef);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, keys = ReferenceType.STRONG)
+  void computeIfAbsent_removesRefresh_present_null(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    node.setValue(nullValue(), cache.valueReferenceQueue());
+    var keyRef = node.getKeyReference();
+    var future = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, future);
+
+    var result = cache.doComputeIfAbsent(requireNonNull(node.getKey()), keyRef,
+        key -> nullValue(), new ComputeContext<>(), /* recordStats= */ false);
+    assertThat(result).isNull();
+    assertThat(cache.refreshes()).doesNotContainKey(keyRef);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG,
+      maximumSize = Maximum.FULL, weigher = CacheWeigher.MOCKITO)
+  void computeIfAbsent_absent_weigherThrows_keepsRefresh(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    when(context.weigher().weigh(any(), any()))
+        .thenThrow(new IllegalStateException("weigher failure"));
+    var keyRef = cache.nodeFactory.newReferenceKey(context.absentKey(), cache.keyReferenceQueue());
+    var future = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, future);
+
+    // A weigher throw aborts the creation without installing a value, unlike a clean value or null
+    // return. Since nothing was mutated and an independent in-flight refresh may still populate the
+    // absent key, the refresh is preserved (not discarded like remap's completion-path self-clean).
+    assertThrows(IllegalStateException.class, () ->
+        cache.doComputeIfAbsent(context.absentKey(), keyRef,
+            key -> context.absentValue(), new ComputeContext<>(), /* recordStats= */ false));
+
+    assertThat(cache.refreshes()).containsKey(keyRef);
+    cache.refreshes().remove(keyRef); // the artificial token has no completion to self-clean it
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.WEAK)
+  void remap_collectedKey(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    var writer = new AtomicReference<@Nullable Thread>();
+    var weakKey = (Reference<?>) node.getKeyReference();
+    var started = new AtomicBoolean();
+
+    var future = CompletableFuture.runAsync(() -> {
+      writer.set(Thread.currentThread());
+      await().untilTrue(started);
+      var result = cache.remap(context.firstKey(), node.getKeyReference(),
+          (k, v) -> context.absentValue(), context.expiresVariably() ? context.expiry() : null,
+          new ComputeContext<>(), /* computeIfAbsent= */ true);
+      assertThat(result).isEqualTo(context.absentValue());
+    }, executor);
+    synchronized (node) {
+      started.set(true);
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      weakKey.clear();
+    }
+    assertThat(future).succeedsWithNull();
+    assertThat(context).notifications().withCause(COLLECTED)
+        .contains(null, context.original().get(context.firstKey()))
+        .exclusively();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL,
+      maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.VALUE)
+  void weightOf_notAlive(BoundedLocalCache<Int, Int> cache,
+      CacheContext context, Eviction<Int, Int> eviction) {
+    for (var node : cache.data.values()) {
+      var key = requireNonNull(node.getKey());
+      assertThat(eviction.weightOf(key)).isPresent();
+      if ((node.getKeyReference().hashCode() % 2) == 0) {
+        node.retire();
+      } else {
+        node.die();
+      }
+      assertThat(eviction.weightOf(key)).isEmpty();
+    }
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @Test
+  void weightLimiter_overflow_disregardsMaxValueLimit() {
+    var limiter = new BoundedLocalCache.WeightLimiter<Int, Int>(Long.MAX_VALUE);
+    limiter.weightedSize = Long.MAX_VALUE;
+
+    Policy.CacheEntry<Int, Int> entry = Mockito.mock();
+    when(entry.weight()).thenReturn(1);
+    when(entry.getKey()).thenReturn(Int.valueOf(1));
+    when(entry.getValue()).thenReturn(Int.valueOf(2));
+
+    // Long.MAX_VALUE disregards the limit, so the weight sum must saturate rather than throw
+    var result = limiter.apply(Stream.of(entry));
+    assertThat(result).containsEntry(Int.valueOf(1), Int.valueOf(2));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY,
+      initialCapacity = InitialCapacity.FULL, maximumSize = Maximum.UNREACHABLE)
+  void frequencySketch_addTask(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.put(context.absentKey(), context.absentValue())).isNull();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.absentKey())));
+    assertThat(cache.frequencySketch().frequency(node.getKeyReference())).isEqualTo(1);
+    if (context.isWeakKeys()) {
+      int hashCode = requireNonNull(node.getKey()).hashCode();
+      assertThat(node.getKeyReference().hashCode()).isNotEqualTo(hashCode);
+      assertThat(cache.frequencySketch().frequency(hashCode)).isEqualTo(0);
+    }
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON,
+      initialCapacity = InitialCapacity.FULL, maximumSize = Maximum.UNREACHABLE)
+  void frequencySketch_onAccess(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    requireNonNull(cache.get(context.firstKey()));
+    cache.cleanUp();
+
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    assertThat(cache.frequencySketch().frequency(node.getKeyReference())).isEqualTo(2);
+    if (context.isWeakKeys()) {
+      int hashCode = requireNonNull(node.getKey()).hashCode();
+      assertThat(node.getKeyReference().hashCode()).isNotEqualTo(hashCode);
+      assertThat(cache.frequencySketch().frequency(hashCode)).isEqualTo(0);
+    }
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON,
+      initialCapacity = InitialCapacity.FULL, maximumSize = Maximum.UNREACHABLE)
+  void frequencySketch_onAccess_afterRemoval(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var lookupKey = cache.nodeFactory.newLookupKey(context.firstKey());
+    var node = requireNonNull(cache.data.get(lookupKey));
+    var keyRef = node.getKeyReference();
+    int freqBefore = cache.frequencySketch().frequency(keyRef);
+
+    // Access the key to buffer a read, then remove before the buffer is drained
+    requireNonNull(cache.get(context.firstKey()));
+    var oldValue = cache.remove(context.firstKey());
+    assertThat(oldValue).isNotNull();
+    cache.cleanUp();
+
+    // The frequency should not be incremented for the removed entry's buffered read
+    assertThat(cache.frequencySketch().frequency(keyRef)).isEqualTo(freqBefore);
+  }
+
+  @Test
+  void frequencySketch_admit_strongKeys() {
+    var builder = Caffeine.newBuilder()
+        .executor(Runnable::run)
+        .initialCapacity(100)
+        .maximumSize(100);
+    var calls = new int[1];
+    var cache = new SSMS<>(builder, /* cacheLoader= */ Mockito.mock(), /* isAsync= */ false) {
+      @Override boolean admit(Object candidateKeyRef, Object victimKeyRef) {
+        calls[0]++;
+        assertThat(victimKeyRef).isInstanceOf(Int.class);
+        assertThat(candidateKeyRef).isInstanceOf(Int.class);
+        return super.admit(candidateKeyRef, victimKeyRef);
+      }
+    };
+    for (int i = 0; i < 200; i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    assertThat(calls[0]).isEqualTo(100);
+  }
+
+  @Test
+  void frequencySketch_admit_weakKeys() {
+    var builder = Caffeine.newBuilder()
+        .executor(Runnable::run)
+        .initialCapacity(100)
+        .maximumSize(100)
+        .weakKeys();
+    var calls = new int[1];
+    var cache = new WSMS<>(builder, /* cacheLoader= */ Mockito.mock(), /* isAsync= */ false) {
+      @Override boolean admit(Object candidateKeyRef, Object victimKeyRef) {
+        calls[0]++;
+        assertThat(victimKeyRef).isInstanceOf(InternalReference.class);
+        assertThat(candidateKeyRef).isInstanceOf(InternalReference.class);
+        return super.admit(candidateKeyRef, victimKeyRef);
+      }
+    };
+    for (int i = 0; i < 200; i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    assertThat(calls[0]).isEqualTo(100);
+  }
+
   /* --------------- Expiration --------------- */
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       initialCapacity = InitialCapacity.FULL, expireAfterWrite = Expire.ONE_MINUTE)
-  public void put_expireTolerance_expireAfterWrite(
+  void expireTolerance_expireAfterWrite_put(
       BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpireAfterWriteTolerance(cache, context, cache::put);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      initialCapacity = InitialCapacity.FULL, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireTolerance_expireAfterWrite_replace(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpireAfterWriteTolerance(cache, context, cache::replace);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      initialCapacity = InitialCapacity.FULL, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireTolerance_expireAfterWrite_replaceConditionally(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpireAfterWriteTolerance(cache, context, (key, value) -> {
+      var oldValue = requireNonNull(cache.getIfPresentQuietly(key));
+      assertThat(cache.replace(key, oldValue, value)).isTrue();
+      return oldValue;
+    });
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      initialCapacity = InitialCapacity.FULL, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireTolerance_expireAfterWrite_computeIfPresent(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpireAfterWriteTolerance(cache, context, (key, value) -> {
+      var oldValue = requireNonNull(cache.getIfPresentQuietly(key));
+      assertThat(cache.computeIfPresent(key, (k, v) -> value)).isEqualTo(value);
+      return oldValue;
+    });
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      initialCapacity = InitialCapacity.FULL, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireTolerance_expireAfterWrite_compute(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpireAfterWriteTolerance(cache, context, (key, value) -> {
+      var oldValue = requireNonNull(cache.getIfPresentQuietly(key));
+      assertThat(cache.compute(key, (k, v) -> value)).isEqualTo(value);
+      return oldValue;
+    });
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      initialCapacity = InitialCapacity.FULL, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireTolerance_expireAfterWrite_merge(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpireAfterWriteTolerance(cache, context, (key, value) -> {
+      var oldValue = requireNonNull(cache.getIfPresentQuietly(key));
+      assertThat(cache.merge(key, value, (k, v) -> value)).isEqualTo(value);
+      return oldValue;
+    });
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireAfterWriteEntries_stalePosition_wraparound(BoundedLocalCache<Int, Int> cache) {
+    // The stale-position check compares two absolute timestamps, so it must use the (a - b) < 0
+    // form: nanoTime has a random origin, so two write times can straddle the signed-long wrap
+    // within a real JVM. Here the oldest (expired) entry sits behind an out-of-order newest entry;
+    // a direct a < b would stop the scan and strand it.
+    var newest = Int.valueOf(1);
+    var oldest = Int.valueOf(2);
+    assertThat(cache.put(newest, newest)).isNull();
+    assertThat(cache.put(oldest, oldest)).isNull();
+    cache.cleanUp();
+
+    long duration = TimeUnit.MINUTES.toNanos(1);
+    long now = Long.MIN_VALUE + duration;
+    var newestNode = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(newest)));
+    var oldestNode = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(oldest)));
+    newestNode.setWriteTime(toWriteTime(Long.MIN_VALUE + (duration / 2)));
+    oldestNode.setWriteTime(toWriteTime(Long.MAX_VALUE - (duration / 2)));
+
+    cache.expireAfterWriteEntries(now);
+    assertThat(cache.data.get(cache.nodeFactory.newLookupKey(oldest))).isNull();
+    assertThat(cache.data.get(cache.nodeFactory.newLookupKey(newest))).isNotNull();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, expireAfterAccess = Expire.ONE_MINUTE)
+  void expireAfterAccessEntries_stalePosition_wraparound(BoundedLocalCache<Int, Int> cache) {
+    // Access-order sibling of expireAfterWriteEntries_stalePosition_wraparound.
+    var newest = Int.valueOf(1);
+    var oldest = Int.valueOf(2);
+    assertThat(cache.put(newest, newest)).isNull();
+    assertThat(cache.put(oldest, oldest)).isNull();
+    cache.cleanUp();
+
+    long duration = TimeUnit.MINUTES.toNanos(1);
+    long now = Long.MIN_VALUE + duration;
+    var newestNode = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(newest)));
+    var oldestNode = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(oldest)));
+    newestNode.setAccessTime(Long.MIN_VALUE + (duration / 2));
+    oldestNode.setAccessTime(Long.MAX_VALUE - (duration / 2));
+
+    cache.expireAfterAccessEntries(now);
+    assertThat(cache.data.get(cache.nodeFactory.newLookupKey(oldest))).isNull();
+    assertThat(cache.data.get(cache.nodeFactory.newLookupKey(newest))).isNotNull();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireAfterWriteEntries_boundedPerCycle(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (int i = 0; i < (2 * EXPIRATION_THRESHOLD); i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    cache.cleanUp();
+    assertThat(cache.estimatedSize()).isEqualTo(2 * EXPIRATION_THRESHOLD);
+
+    // A large expired backlog is drained in a bounded batch, re-arming to finish the remainder.
+    context.ticker().advance(Duration.ofHours(1));
+    cache.expireAfterWriteEntries(cache.expirationTicker().read());
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_REQUIRED);
+    assertThat(cache.estimatedSize()).isEqualTo(EXPIRATION_THRESHOLD);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, expireAfterAccess = Expire.ONE_MINUTE)
+  void expireAfterAccessEntries_boundedPerCycle(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (int i = 0; i < (2 * EXPIRATION_THRESHOLD); i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    cache.cleanUp();
+    assertThat(cache.estimatedSize()).isEqualTo(2 * EXPIRATION_THRESHOLD);
+
+    // A large expired backlog is drained in a bounded batch, re-arming to finish the remainder.
+    context.ticker().advance(Duration.ofHours(1));
+    cache.expireAfterAccessEntries(cache.expirationTicker().read());
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_REQUIRED);
+    assertThat(cache.estimatedSize()).isEqualTo(EXPIRATION_THRESHOLD);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireAfterWriteEntries_belowThreshold_doesNotReArm(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (int i = 0; i < 10; i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    cache.cleanUp();
+    assertThat(cache.drainStatus).isEqualTo(IDLE);
+
+    // A backlog below the per-cycle cap is fully drained without re-arming maintenance.
+    context.ticker().advance(Duration.ofHours(1));
+    cache.expireAfterWriteEntries(cache.expirationTicker().read());
+    assertThat(cache.estimatedSize()).isEqualTo(0);
+    assertThat(cache.drainStatus).isEqualTo(IDLE);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY,
+      expiry = CacheExpiry.CREATE, expiryTime = Expire.ONE_MINUTE)
+  void expireVariableEntries_boundedPerCycle(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    for (int i = 0; i < (2 * EXPIRATION_THRESHOLD); i++) {
+      assertThat(cache.put(Int.valueOf(i), Int.valueOf(i))).isNull();
+    }
+    cache.cleanUp();
+    assertThat(cache.estimatedSize()).isEqualTo(2 * EXPIRATION_THRESHOLD);
+
+    // A large expired backlog is drained in a bounded batch, re-arming to finish the remainder.
+    context.ticker().advance(Duration.ofHours(1));
+    cache.expireVariableEntries(cache.expirationTicker().read());
+    assertThat(cache.estimatedSize()).isEqualTo(EXPIRATION_THRESHOLD);
+    assertThat(cache.drainStatus).isEqualTo(PROCESSING_TO_REQUIRED);
+  }
+
+  private static void checkExpireAfterWriteTolerance(BoundedLocalCache<Int, Int> cache,
+      CacheContext context, BiFunction<Int, Int, @Nullable Int> write) {
     boolean mayCheckReads = context.isStrongKeys() && context.isStrongValues()
         && (cache.readBuffer != Buffer.<Node<Int, Int>>disabled());
 
@@ -1818,7 +6306,7 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.writeBuffer.producerIndex).isEqualTo(2);
 
     // If within the tolerance, treat the update as a read
-    var oldValue = cache.put(Int.valueOf(1), Int.valueOf(2));
+    var oldValue = write.apply(Int.valueOf(1), Int.valueOf(2));
     assertThat(oldValue).isEqualTo(1);
     if (mayCheckReads) {
       assertThat(cache.readBuffer.reads()).isEqualTo(0);
@@ -1827,8 +6315,8 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.writeBuffer.producerIndex).isEqualTo(2);
 
     // If exceeds the tolerance, treat the update as a write
-    context.ticker().advance(Duration.ofNanos(EXPIRE_WRITE_TOLERANCE + 1));
-    var lastValue = cache.put(Int.valueOf(1), Int.valueOf(3));
+    context.ticker().advance(Duration.ofNanos(EXPIRE_TOLERANCE + 1));
+    var lastValue = write.apply(Int.valueOf(1), Int.valueOf(3));
     assertThat(lastValue).isEqualTo(2);
     if (mayCheckReads) {
       assertThat(cache.readBuffer.reads()).isEqualTo(1);
@@ -1837,33 +6325,142 @@ public final class BoundedLocalCacheTest {
     assertThat(cache.writeBuffer.producerIndex).isEqualTo(4);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
-  public void put_expireTolerance_expiry(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    var oldValue = cache.put(Int.valueOf(1), Int.valueOf(1));
+  void expireTolerance_expiry_put(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpiryWriteTolerance(cache, context, cache::put);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
+  void expireTolerance_expiry_replace(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpiryWriteTolerance(cache, context, cache::replace);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
+  void expireTolerance_expiry_replaceConditionally(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpiryWriteTolerance(cache, context, (key, value) -> {
+      var oldValue = requireNonNull(cache.getIfPresentQuietly(key));
+      assertThat(cache.replace(key, oldValue, value)).isTrue();
+      return oldValue;
+    });
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
+  void expireTolerance_expiry_computeIfPresent(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpiryWriteTolerance(cache, context, (key, value) -> {
+      var oldValue = requireNonNull(cache.getIfPresentQuietly(key));
+      assertThat(cache.computeIfPresent(key, (k, v) -> value)).isEqualTo(value);
+      return oldValue;
+    });
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
+  void expireTolerance_expiry_compute(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpiryWriteTolerance(cache, context, (key, value) -> {
+      var oldValue = requireNonNull(cache.getIfPresentQuietly(key));
+      assertThat(cache.compute(key, (k, v) -> value)).isEqualTo(value);
+      return oldValue;
+    });
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
+  void expireTolerance_expiry_merge(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    checkExpiryWriteTolerance(cache, context, (key, value) -> {
+      var oldValue = requireNonNull(cache.getIfPresentQuietly(key));
+      assertThat(cache.merge(key, value, (k, v) -> value)).isEqualTo(value);
+      return oldValue;
+    });
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
+  void tryExpireAfterRead_valueChanged_keepsCurrentDuration(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // A reader captures value v1, then a concurrent replace stores v2 with its own duration; the
+    // read-extension computed from the stale v1 must not rebind its duration onto v2
+    var expiry = requireNonNull(context.expiry());
+    when(expiry.expireAfterRead(any(), any(), anyLong(), anyLong()))
+        .thenReturn(Duration.ofHours(1).toNanos());
+
+    var v1 = Int.valueOf(1);
+    var key = context.absentKey();
+    assertThat(cache.put(key, v1)).isNull();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(key)));
+    assertThat(cache.put(key, Int.valueOf(2))).isEqualTo(1);
+    long expected = node.getVariableTime();
+
+    cache.tryExpireAfterRead(node, key, v1, expiry, context.ticker().read());
+    assertThat(node.getVariableTime()).isEqualTo(expected);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
+  void tryExpireAfterRead_alreadyDue_reportsNoDurationLeft(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // A reader that saw the entry live reaches the extension after a concurrent write shortened it
+    // past the boundary. What is left of the duration is none, and an Expiry that returns what it
+    // was given must leave the entry due rather than lift it a nanosecond back into life
+    var expiry = requireNonNull(context.expiry());
+    when(expiry.expireAfterRead(any(), any(), anyLong(), anyLong()))
+        .thenAnswer(invocation -> invocation.getArgument(3));
+
+    var key = context.absentKey();
+    var value = context.absentValue();
+    assertThat(cache.put(key, value)).isNull();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(key)));
+    long now = context.ticker().read();
+    node.setVariableTime(now - 1);
+
+    cache.tryExpireAfterRead(node, key, value, expiry, now);
+    verify(expiry).expireAfterRead(key, value, now, 0L);
+    assertThat(node.getVariableTime()).isEqualTo(now);
+    assertThat(cache.hasExpired(node, now)).isTrue();
+  }
+
+  private static void checkExpiryWriteTolerance(BoundedLocalCache<Int, Int> cache,
+      CacheContext context, BiFunction<Int, Int, @Nullable Int> write) {
+    @Var var oldValue = cache.put(Int.valueOf(1), Int.valueOf(1));
     assertThat(oldValue).isNull();
     assertThat(cache.writeBuffer.producerIndex).isEqualTo(2);
 
     // If within the tolerance, treat the update as a read
-    oldValue = cache.put(Int.valueOf(1), Int.valueOf(2));
+    oldValue = write.apply(Int.valueOf(1), Int.valueOf(2));
     assertThat(oldValue).isEqualTo(1);
     assertThat(cache.readBuffer.reads()).isEqualTo(0);
     assertThat(cache.readBuffer.writes()).isEqualTo(1);
     assertThat(cache.writeBuffer.producerIndex).isEqualTo(2);
 
     // If exceeds the tolerance, treat the update as a write
-    context.ticker().advance(Duration.ofNanos(EXPIRE_WRITE_TOLERANCE + 1));
-    oldValue = cache.put(Int.valueOf(1), Int.valueOf(3));
+    context.ticker().advance(Duration.ofNanos(EXPIRE_TOLERANCE + 1));
+    oldValue = write.apply(Int.valueOf(1), Int.valueOf(3));
     assertThat(oldValue).isEqualTo(2);
     assertThat(cache.readBuffer.reads()).isEqualTo(1);
     assertThat(cache.readBuffer.writes()).isEqualTo(1);
     assertThat(cache.writeBuffer.producerIndex).isEqualTo(4);
 
     // If the expiration time reduces by more than the tolerance, treat the update as a write
+    requireNonNull(context.expiry());
     when(context.expiry().expireAfterUpdate(any(), any(), anyLong(), anyLong()))
         .thenReturn(Expire.ONE_MILLISECOND.timeNanos());
-    oldValue = cache.put(Int.valueOf(1), Int.valueOf(4));
+    oldValue = write.apply(Int.valueOf(1), Int.valueOf(4));
     assertThat(oldValue).isEqualTo(3);
     assertThat(cache.readBuffer.reads()).isEqualTo(1);
     assertThat(cache.readBuffer.writes()).isEqualTo(1);
@@ -1872,139 +6469,242 @@ public final class BoundedLocalCacheTest {
     // If the expiration time increases by more than the tolerance, treat the update as a write
     when(context.expiry().expireAfterUpdate(any(), any(), anyLong(), anyLong()))
         .thenReturn(Expire.FOREVER.timeNanos());
-    oldValue = cache.put(Int.valueOf(1), Int.valueOf(4));
+    oldValue = write.apply(Int.valueOf(1), Int.valueOf(4));
     assertThat(oldValue).isEqualTo(4);
     assertThat(cache.readBuffer.reads()).isEqualTo(1);
     assertThat(cache.readBuffer.writes()).isEqualTo(1);
     assertThat(cache.writeBuffer.producerIndex).isEqualTo(8);
   }
 
-  @CheckMaxLogLevel(WARN)
-  @Test(dataProvider = "caches", groups = "isolated")
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expireAfterAccess = Expire.ONE_MINUTE)
+  void expireTolerance_accessTime_skipsWithinTolerance(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.put(Int.valueOf(1), Int.valueOf(1))).isNull();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(Int.valueOf(1))));
+    long initialAccessTime = node.getAccessTime();
+
+    // Within tolerance: accessTime is left alone
+    assertThat(cache.get(Int.valueOf(1))).isEqualTo(Int.valueOf(1));
+    assertThat(node.getAccessTime()).isEqualTo(initialAccessTime);
+
+    // Beyond tolerance: accessTime is updated
+    context.ticker().advance(Duration.ofNanos(EXPIRE_TOLERANCE + 1));
+    assertThat(cache.get(Int.valueOf(1))).isEqualTo(Int.valueOf(1));
+    assertThat(node.getAccessTime()).isGreaterThan(initialAccessTime);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expireAfterAccess = Expire.ONE_MILLISECOND)
+  void expireTolerance_accessTime_bypassedForShortDuration(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.put(Int.valueOf(1), Int.valueOf(1))).isNull();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(Int.valueOf(1))));
+    long initialAccessTime = node.getAccessTime();
+
+    // expireAfterAccess (1ms) <= EXPIRE_TOLERANCE (1s), so the tolerance is bypassed:
+    // a sub-millisecond read still updates accessTime to track the short window faithfully.
+    context.ticker().advance(Duration.ofNanos(1));
+    assertThat(cache.get(Int.valueOf(1))).isEqualTo(Int.valueOf(1));
+    assertThat(node.getAccessTime()).isGreaterThan(initialAccessTime);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expiry = {CacheExpiry.CREATE, CacheExpiry.WRITE}, expiryTime = Expire.ONE_MINUTE)
+  void expireTolerance_variableTime_skipsForUnchangedDuration(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.put(Int.valueOf(1), Int.valueOf(1))).isNull();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(Int.valueOf(1))));
+    long initialVariableTime = node.getVariableTime();
+
+    // Expiry.creating(...) and Expiry.writing(...) both return the existing currentDuration on
+    // read, so the recomputed expirationTime equals the stored variableTime — no CAS, even after
+    // time advances.
+    context.ticker().advance(Duration.ofSeconds(10));
+    assertThat(cache.get(Int.valueOf(1))).isEqualTo(Int.valueOf(1));
+    assertThat(node.getVariableTime()).isEqualTo(initialVariableTime);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expiry = CacheExpiry.ACCESS, expiryTime = Expire.ONE_MINUTE)
+  void expireTolerance_variableTime_skipsWithinTolerance(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.put(Int.valueOf(1), Int.valueOf(1))).isNull();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(Int.valueOf(1))));
+    long initialVariableTime = node.getVariableTime();
+
+    // Expiry.accessing(...) returns the configured 1-minute duration fresh on every read.
+    // Within tolerance the recomputed expirationTime is close enough to skip the CAS.
+    assertThat(cache.get(Int.valueOf(1))).isEqualTo(Int.valueOf(1));
+    assertThat(node.getVariableTime()).isEqualTo(initialVariableTime);
+
+    // Beyond tolerance the recomputed expirationTime moves enough to fire the CAS.
+    context.ticker().advance(Duration.ofNanos(EXPIRE_TOLERANCE + 1));
+    assertThat(cache.get(Int.valueOf(1))).isEqualTo(Int.valueOf(1));
+    assertThat(node.getVariableTime()).isGreaterThan(initialVariableTime);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
+  void expireTolerance_variableTime_bypassedForShortDuration(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.put(Int.valueOf(1), Int.valueOf(1))).isNull();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(Int.valueOf(1))));
+    long initialVariableTime = node.getVariableTime();
+
+    // Expiry returns a sub-second duration, which bypasses the tolerance — every read fires
+    // the CAS to faithfully track short expirations.
+    requireNonNull(context.expiry());
+    when(context.expiry().expireAfterRead(any(), any(), anyLong(), anyLong()))
+        .thenReturn(Expire.ONE_MILLISECOND.timeNanos());
+    assertThat(cache.get(Int.valueOf(1))).isEqualTo(Int.valueOf(1));
+    assertThat(node.getVariableTime()).isNotEqualTo(initialVariableTime);
+  }
+
+  @Test
+  void expireAfterRead_asyncSentinel() {
+    // An async entry carries the sentinel as its duration until the completion applies the create
+    // duration, so the read extension must leave it in place while computing and while the value is
+    // ready but not yet applied. An Expiry that returns what it was given would otherwise cap the
+    // sentinel to MAXIMUM_EXPIRY and erase the mark that says the load has not been accounted for
+    var ticker = new FakeTicker();
+    var cache = Caffeine.newBuilder()
+        .expireAfter(Expiry.creating((Int key, Int value) -> Duration.ofMinutes(1)))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .buildAsync();
+    var localCache = asBoundedLocalCache(cache);
+    var key = Int.valueOf(1);
+    var future = new CompletableFuture<Int>();
+    cache.put(key, future);
+
+    var node = requireNonNull(localCache.data.get(localCache.nodeFactory.newLookupKey(key)));
+    long sentinel = node.getVariableTime();
+    assertThat(sentinel).isEqualTo(ticker.read() + ASYNC_EXPIRY);
+    assertThat(localCache.expireAfterRead(node, key, requireNonNull(node.getValue()),
+        localCache.expiry(), ticker.read())).isEqualTo(sentinel);
+
+    future.complete(Int.valueOf(2));
+    node.setVariableTime(sentinel);
+    assertThat(localCache.expireAfterRead(node, key, requireNonNull(node.getValue()),
+        localCache.expiry(), ticker.read())).isEqualTo(sentinel);
+  }
+
+  @Test
+  void expireAfterRead_asyncSentinel_completionIsACreate() {
+    // Consuming the sentinel leaves the completion unable to tell a first load from an update, so
+    // an Expiry that sets a duration only on creation pins the entry for the sentinel's span
+    var ticker = new FakeTicker();
+    var cache = Caffeine.newBuilder()
+        .expireAfter(Expiry.creating((Int key, Int value) -> Duration.ofMinutes(1)))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .buildAsync();
+    var localCache = asBoundedLocalCache(cache);
+    var key = Int.valueOf(1);
+    var future = new CompletableFuture<Int>();
+    cache.put(key, future);
+
+    var node = requireNonNull(localCache.data.get(localCache.nodeFactory.newLookupKey(key)));
+    long sentinel = node.getVariableTime();
+    future.complete(Int.valueOf(2));
+    node.setVariableTime(sentinel);
+
+    var value = requireNonNull(node.getValue());
+    node.setVariableTime(localCache.expireAfterRead(node, key, value,
+        localCache.expiry(), ticker.read()));
+    assertThat(localCache.replace(key, value, value,
+        /* shouldDiscardRefresh= */ false, /* quietly= */ true)).isTrue();
+
+    var expireAfterVar = cache.synchronous().policy().expireVariably().orElseThrow();
+    assertThat(expireAfterVar.getExpiresAfter(key)).hasValue(Duration.ofMinutes(1));
+  }
+
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY,
-      expireAfterAccess = Expire.DISABLED, expireAfterWrite = Expire.DISABLED,
-      refreshAfterWrite = Expire.DISABLED, expiry = CacheExpiry.DISABLED,
-      maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.DISABLED,
-      compute = Compute.SYNC, loader = Loader.DISABLED, stats = Stats.DISABLED,
-      removalListener = Listener.DISABLED, evictionListener = Listener.DISABLED,
-      keys = ReferenceType.STRONG, values = ReferenceType.STRONG)
-  public void put_warnIfEvictionBlocked(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    var testLogger = new AtomicReference<TestLogger>();
-    var thread = new AtomicReference<Thread>();
-    var done = new AtomicBoolean();
-    cache.evictionLock.lock();
-    try {
-      ConcurrentTestHarness.execute(() -> {
-        var logger = TestLoggerFactory.getTestLogger(BoundedLocalCache.class);
-        logger.setEnabledLevels(WARN, ERROR);
-        thread.set(Thread.currentThread());
-        testLogger.set(logger);
+      compute = Compute.ASYNC, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireTolerance_writeTime_put_syncToAsync_updatesSentinel(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var localCache = asBoundedLocalCache(cache);
+    cache.put(context.absentKey(), context.absentValue().toFuture());
+    var node = requireNonNull(localCache.data.get(
+        localCache.nodeFactory.newLookupKey(context.absentKey())));
+    long realWriteTime = node.getWriteTime();
 
-        for (int i = 0; true; i++) {
-          if (done.get()) {
-            return;
-          }
-          var oldValue = cache.put(Int.valueOf(i), Int.valueOf(i));
-          assertThat(oldValue).isNull();
-        }
-      });
-
-      var halfWaitTime = Duration.ofNanos(WARN_AFTER_LOCK_WAIT_NANOS / 2);
-      await().until(cache.evictionLock::hasQueuedThreads);
-      thread.get().interrupt();
-
-      Uninterruptibles.sleepUninterruptibly(halfWaitTime);
-      assertThat(cache.evictionLock.hasQueuedThreads()).isTrue();
-      assertThat(testLogger.get().getAllLoggingEvents()).isEmpty();
-
-      Uninterruptibles.sleepUninterruptibly(halfWaitTime.plusMillis(500));
-      await().until(() -> !testLogger.get().getAllLoggingEvents().isEmpty());
-
-      assertThat(cache.evictionLock.hasQueuedThreads()).isTrue();
-
-      var event = Iterables.getOnlyElement(TestLoggerFactory.getAllLoggingEvents().stream()
-          .filter(e -> e.getLevel() == WARN)
-          .collect(toImmutableList()));
-      assertThat(event.getFormattedMessage()).contains("excessive wait times");
-      assertThat(event.getThrowable().orElseThrow()).isInstanceOf(TimeoutException.class);
-    } finally {
-      done.set(true);
-      cache.evictionLock.unlock();
-    }
+    // Replacing the completed future with an in-flight one within the tolerance window must
+    // bump writeTime to the async sentinel — comparing the *candidate* new writeTime against
+    // the stored writeTime (rather than wall-clock now) is what surfaces the transition.
+    var inFlight = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), inFlight);
+    long expected = toWriteTime(context.ticker().read() + ASYNC_EXPIRY);
+    assertThat(node.getWriteTime()).isEqualTo(expected);
+    assertThat(node.getWriteTime()).isNotEqualTo(realWriteTime);
+    inFlight.complete(context.absentKey());
   }
 
-  @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
-  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
-  public void put_spinToCompute(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    var initialValue = cache.put(context.absentKey(), context.absentValue());
-    assertThat(initialValue).isNull();
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY,
+      compute = Compute.SYNC, expireAfterWrite = Expire.ONE_MINUTE)
+  void expireTolerance_writeTime_put_syncToSync_skipsWithinTolerance(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.put(context.absentKey(), context.absentValue())).isNull();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.absentKey())));
+    long initialWriteTime = node.getWriteTime();
 
-    var node = cache.data.get(context.absentKey());
-    node.retire();
-
-    var value = cache.data.compute(context.absentKey(), (k, n) -> {
-      var writer = new AtomicReference<Thread>();
-      ConcurrentTestHarness.execute(() -> {
-        writer.set(Thread.currentThread());
-        var oldValue = cache.put(context.absentKey(), context.absentKey());
-        assertThat(oldValue).isAnyOf(context.absentValue(), null);
-      });
-
-      var threadState = EnumSet.of(BLOCKED, WAITING);
-      await().untilAtomic(writer, is(not(nullValue())));
-      await().until(() -> threadState.contains(writer.get().getState()));
-
-      return null;
-    });
-    assertThat(value).isNull();
-
-    await().untilAsserted(() ->
-        assertThat(cache).containsEntry(context.absentKey(), context.absentKey()));
-    cache.afterWrite(cache.new RemovalTask(node));
+    // Within tolerance, repeated sync writes leave writeTime alone (the existing optimization).
+    assertThat(cache.put(context.absentKey(), context.absentKey()))
+        .isEqualTo(context.absentValue());
+    assertThat(node.getWriteTime()).isEqualTo(initialWriteTime);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.FULL,
       expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE)
-  public void putIfAbsent_expireAfterRead(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void putIfAbsent_expireAfterRead(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     var node = cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey()));
-    context.ticker().advance(Duration.ofHours(1));
-    var result = new AtomicReference<Int>();
+    var writer = new AtomicReference<@Nullable Thread>();
+    var started = new AtomicBoolean();
+    var writing = new AtomicBoolean();
     long currentDuration = 1;
+    requireNonNull(node);
 
+    context.ticker().advance(Duration.ofHours(1));
+    var future = CompletableFuture.supplyAsync(() -> {
+      writer.set(Thread.currentThread());
+      await().untilTrue(writing);
+      started.set(true);
+      return cache.putIfAbsent(context.firstKey(), context.absentValue());
+    }, executor);
     synchronized (node) {
-      var started = new AtomicBoolean();
-      var thread = new AtomicReference<Thread>();
-      ConcurrentTestHarness.execute(() -> {
-        thread.set(Thread.currentThread());
-        started.set(true);
-        var value = cache.putIfAbsent(context.firstKey(), context.absentValue());
-        result.set(value);
-      });
+      writing.set(true);
       await().untilTrue(started);
-      var threadState = EnumSet.of(BLOCKED, WAITING);
-      await().until(() -> threadState.contains(thread.get().getState()));
+      var thread = requireNonNull(writer.get());
+      await().untilAsserted(() -> assertThat(thread.getState()).isAnyOf(BLOCKED, WAITING));
       node.setVariableTime(context.ticker().read() + currentDuration);
     }
 
-    var expected = context.original().get(context.firstKey());
-    await().untilAtomic(result, is(expected));
+    var expected = requireNonNull(context.original().get(context.firstKey()));
+    assertThat(future).succeedsWith(expected);
     assertThat(node.getVariableTime()).isEqualTo(
         context.ticker().read() + context.expiryTime().timeNanos());
     verify(context.expiry()).expireAfterRead(context.firstKey(),
-        context.absentValue(), context.ticker().read(), currentDuration);
+        expected, context.ticker().read(), currentDuration);
     verifyNoMoreInteractions(context.expiry());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       scheduler = CacheScheduler.MOCKITO, expiryTime = Expire.ONE_MINUTE,
       mustExpireWithAnyOf = { AFTER_ACCESS, AFTER_WRITE, VARIABLE },
       expiry = { CacheExpiry.DISABLED, CacheExpiry.CREATE, CacheExpiry.WRITE, CacheExpiry.ACCESS },
       expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
       expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE})
-  public void unschedule_cleanUp(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void unschedule_cleanUp(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     Future<?> future = Mockito.mock();
     when(context.scheduler().schedule(any(), any(), anyLong(), any())).then(invocation -> future);
 
@@ -2012,25 +6712,26 @@ public final class BoundedLocalCacheTest {
       var value = cache.put(Int.valueOf(i), Int.valueOf(-i));
       assertThat(value).isNull();
     }
-    assertThat(cache.pacer().nextFireTime).isNotEqualTo(0);
-    assertThat(cache.pacer().future).isNotNull();
+    var pacer = requireNonNull(cache.pacer());
+    assertThat(pacer.nextFireTime).isNotEqualTo(0);
+    assertThat(pacer.future).isNotNull();
 
     context.ticker().advance(Duration.ofHours(1));
     cache.cleanUp();
 
     verify(future).cancel(false);
-    assertThat(cache.pacer().nextFireTime).isEqualTo(0);
-    assertThat(cache.pacer().future).isNull();
+    assertThat(pacer.nextFireTime).isEqualTo(0);
+    assertThat(pacer.future).isNull();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
       scheduler = CacheScheduler.MOCKITO, expiryTime = Expire.ONE_MINUTE,
       mustExpireWithAnyOf = { AFTER_ACCESS, AFTER_WRITE, VARIABLE },
       expiry = { CacheExpiry.DISABLED, CacheExpiry.CREATE, CacheExpiry.WRITE, CacheExpiry.ACCESS },
       expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
       expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE})
-  public void unschedule_invalidateAll(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void unschedule_invalidateAll(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     Future<?> future = Mockito.mock();
     when(context.scheduler().schedule(any(), any(), anyLong(), any())).then(invocation -> future);
 
@@ -2038,21 +6739,22 @@ public final class BoundedLocalCacheTest {
       var value = cache.put(Int.valueOf(i), Int.valueOf(-i));
       assertThat(value).isNull();
     }
-    assertThat(cache.pacer().nextFireTime).isNotEqualTo(0);
-    assertThat(cache.pacer().future).isNotNull();
+    var pacer = requireNonNull(cache.pacer());
+    assertThat(pacer.nextFireTime).isNotEqualTo(0);
+    assertThat(pacer.future).isNotNull();
 
     cache.clear();
     verify(future).cancel(false);
-    assertThat(cache.pacer().nextFireTime).isEqualTo(0);
-    assertThat(cache.pacer().future).isNull();
+    assertThat(pacer.nextFireTime).isEqualTo(0);
+    assertThat(pacer.future).isNull();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, expireAfterAccess = Expire.ONE_MINUTE,
       maximumSize = {Maximum.DISABLED, Maximum.FULL}, weigher = CacheWeigher.DISABLED)
-  public void expirationDelay_window(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    int maximum = cache.evicts() ? (int) context.maximumSize() : 100;
-    long stepSize = context.expireAfterAccess().timeNanos() / (2 * maximum);
+  void expirationDelay_window(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    int maximum = cache.evicts() ? Math.toIntExact(context.maximumSize()) : 100;
+    long stepSize = context.expireAfterAccess().timeNanos() / (2L * maximum);
     for (int i = 0; i < maximum; i++) {
       var key = intern(Int.valueOf(i));
       var value = cache.put(key, key);
@@ -2069,24 +6771,25 @@ public final class BoundedLocalCacheTest {
         node.setAccessTime(context.ticker().read());
       }
       for (var node : FluentIterable.from(cache.accessOrderProbationDeque()).skip(5).toList()) {
-        var value = cache.get(node.getKey());
-        assertThat(value).isEqualTo(node.getKey());
+        var key = requireNonNull(node.getKey());
+        var value = cache.get(key);
+        assertThat(value).isEqualTo(key);
       }
       context.ticker().advance(Duration.ofNanos(stepSize));
       cache.cleanUp();
     }
 
-    var expectedDelay = context.expireAfterAccess().timeNanos()
+    long expectedDelay = context.expireAfterAccess().timeNanos()
         - (context.ticker().read() - cache.accessOrderWindowDeque().getFirst().getAccessTime());
     assertThat(cache.getExpirationDelay(context.ticker().read())).isEqualTo(expectedDelay);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, expireAfterAccess = Expire.ONE_MINUTE,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
-  public void expirationDelay_probation(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void expirationDelay_probation(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     long stepSize = context.expireAfterAccess().timeNanos() / (2 * context.maximumSize());
-    for (int i = 0; i < (int) context.maximumSize(); i++) {
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       var key = intern(Int.valueOf(i));
       var value = cache.put(key, key);
       assertThat(value).isNull();
@@ -2101,23 +6804,24 @@ public final class BoundedLocalCacheTest {
       node.setAccessTime(context.ticker().read());
     }
     for (var node : FluentIterable.from(cache.accessOrderProbationDeque()).skip(5).toList()) {
-      var value = cache.get(node.getKey());
-      assertThat(value).isEqualTo(node.getKey());
+      var key = requireNonNull(node.getKey());
+      var value = cache.get(key);
+      assertThat(value).isEqualTo(key);
     }
     context.ticker().advance(Duration.ofNanos(stepSize));
     cache.cleanUp();
 
-    var expectedDelay = context.expireAfterAccess().timeNanos()
+    long expectedDelay = context.expireAfterAccess().timeNanos()
         - (context.ticker().read() - cache.accessOrderProbationDeque().getFirst().getAccessTime());
     assertThat(cache.getExpirationDelay(context.ticker().read())).isEqualTo(expectedDelay);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, expireAfterAccess = Expire.ONE_MINUTE,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
-  public void expirationDelay_protected(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void expirationDelay_protected(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     long stepSize = context.expireAfterAccess().timeNanos() / (2 * context.maximumSize());
-    for (int i = 0; i < (int) context.maximumSize(); i++) {
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       var key = intern(Int.valueOf(i));
       var value = cache.put(key, key);
       assertThat(value).isNull();
@@ -2126,8 +6830,9 @@ public final class BoundedLocalCacheTest {
     }
 
     for (var node : FluentIterable.from(cache.accessOrderProbationDeque()).skip(5).toList()) {
-      var value = cache.get(node.getKey());
-      assertThat(value).isEqualTo(node.getKey());
+      var key = requireNonNull(node.getKey());
+      var value = cache.get(key);
+      assertThat(value).isEqualTo(key);
     }
     context.ticker().advance(Duration.ofNanos(stepSize));
     cache.cleanUp();
@@ -2139,17 +6844,17 @@ public final class BoundedLocalCacheTest {
       node.setAccessTime(context.ticker().read());
     }
 
-    var expectedDelay = context.expireAfterAccess().timeNanos()
+    long expectedDelay = context.expireAfterAccess().timeNanos()
         - (context.ticker().read() - cache.accessOrderProtectedDeque().getFirst().getAccessTime());
     assertThat(cache.getExpirationDelay(context.ticker().read())).isEqualTo(expectedDelay);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, expireAfterWrite = Expire.ONE_MINUTE,
       maximumSize = Maximum.FULL, weigher = CacheWeigher.DISABLED)
-  public void expirationDelay_writeOrder(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void expirationDelay_writeOrder(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     long stepSize = context.expireAfterWrite().timeNanos() / (2 * context.maximumSize());
-    for (int i = 0; i < (int) context.maximumSize(); i++) {
+    for (int i = 0; i < Math.toIntExact(context.maximumSize()); i++) {
       var key = intern(Int.valueOf(i));
       var value = cache.put(key, key);
       assertThat(value).isNull();
@@ -2162,18 +6867,18 @@ public final class BoundedLocalCacheTest {
     }
     cache.cleanUp();
 
-    var expectedDelay = context.expireAfterWrite().timeNanos()
+    long expectedDelay = context.expireAfterWrite().timeNanos()
         - (context.ticker().read() - cache.writeOrderDeque().getFirst().getWriteTime());
     assertThat(cache.getExpirationDelay(context.ticker().read())).isEqualTo(expectedDelay);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, maximumSize = {Maximum.DISABLED, Maximum.FULL},
       expiry = CacheExpiry.WRITE, expiryTime = Expire.ONE_MINUTE)
-  public void expirationDelay_varTime(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void expirationDelay_varTime(BoundedLocalCache<Int, Int> cache, CacheContext context) {
     long startTime = context.ticker().read();
-    int maximum = cache.evicts() ? (int) context.maximumSize() : 100;
-    long stepSize = context.expiryTime().timeNanos() / (2 * maximum);
+    int maximum = cache.evicts() ? Math.toIntExact(context.maximumSize()) : 100;
+    long stepSize = context.expiryTime().timeNanos() / (2L * maximum);
     for (int i = 0; i < maximum; i++) {
       var key = intern(Int.valueOf(i));
       var value = cache.put(key, key);
@@ -2187,24 +6892,199 @@ public final class BoundedLocalCacheTest {
     }
     cache.cleanUp();
 
-    var expectedDelay = context.expiryTime().timeNanos() - (context.ticker().read() - startTime);
+    long expectedDelay = context.expiryTime().timeNanos() - (context.ticker().read() - startTime);
     assertThat(cache.getExpirationDelay(context.ticker().read())).isIn(
         Range.closed(expectedDelay - TimerWheel.SPANS[0], expectedDelay));
   }
 
+  @Test
+  void expirationDelay_asyncComputing_expireAfterAccess() {
+    var ticker = new FakeTicker();
+    var computing = new CompletableFuture<Integer>();
+    AsyncCache<Integer, Integer> cache = Caffeine.newBuilder()
+        .expireAfterAccess(Duration.ofMinutes(1))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .buildAsync();
+
+    // An incomplete future has accessTime set to now + ASYNC_EXPIRY (~220 years)
+    cache.put(1, computing);
+    var localCache = asBoundedLocalCache(cache);
+    localCache.maintenance(/* task= */ null);
+
+    // Async-only: delay should be the full expiration duration (upper bound), not ~220 years
+    @Var long delay = localCache.getExpirationDelay(ticker.read());
+    assertThat(delay).isEqualTo(Duration.ofMinutes(1).toNanos());
+
+    // Add a completed entry; delay should be based on the real entry, not the async one
+    cache.put(2, CompletableFuture.completedFuture(2));
+    localCache.maintenance(/* task= */ null);
+    delay = localCache.getExpirationDelay(ticker.read());
+    assertThat(delay).isAtMost(Duration.ofMinutes(2).toNanos());
+  }
+
+  @Test
+  void expirationDelay_asyncComputing_expireAfterWrite() {
+    var ticker = new FakeTicker();
+    var computing = new CompletableFuture<Integer>();
+    AsyncCache<Integer, Integer> cache = Caffeine.newBuilder()
+        .expireAfterWrite(Duration.ofMinutes(1))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .buildAsync();
+
+    cache.put(1, computing);
+    var localCache = asBoundedLocalCache(cache);
+    localCache.maintenance(/* task= */ null);
+
+    @Var long delay = localCache.getExpirationDelay(ticker.read());
+    assertThat(delay).isEqualTo(Duration.ofMinutes(1).toNanos());
+
+    cache.put(2, CompletableFuture.completedFuture(2));
+    localCache.maintenance(/* task= */ null);
+    delay = localCache.getExpirationDelay(ticker.read());
+    assertThat(delay).isAtMost(Duration.ofMinutes(2).toNanos());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = {Population.EMPTY, Population.FULL},
+      expireAfterAccess = Expire.ONE_MINUTE)
+  void repairsStaleHead_expireAfterAccess(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // A dropped read-buffer reorder by bumping the head's time forward without moving its deque
+    // position. The expiration scan must detect that the head is fresher than the tail and move it
+    // to the back so the trailing (genuinely expired) entries can be evicted.
+    assertThat(cache.put(context.absentKey(), context.absentValue())).isNull();
+    var node = cache.accessOrderWindowDeque().getLast();
+    assertThat(node.getKey()).isEqualTo(context.absentKey());
+
+    cache.accessOrderWindowDeque().moveToFront(node);
+    context.ticker().advance(Duration.ofSeconds(50));
+    node.setAccessTime(context.ticker().read());
+
+    context.ticker().advance(Duration.ofSeconds(40));
+    cache.cleanUp();
+
+    assertThat(cache).hasSize(1);
+    assertThat(cache).containsKey(context.absentKey());
+    assertThat(cache.accessOrderWindowDeque().peekLast()).isSameInstanceAs(node);
+    assertThat(context).notifications().withCause(EXPIRED)
+        .contains(context.original()).exclusively();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = {Population.EMPTY, Population.FULL}, expireAfterWrite = Expire.ONE_MINUTE)
+  void repairsStaleHead_expireAfterWrite(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.put(context.absentKey(), context.absentValue())).isNull();
+    var node = cache.writeOrderDeque().getLast();
+    assertThat(node.getKey()).isEqualTo(context.absentKey());
+
+    cache.writeOrderDeque().moveToFront(node);
+    context.ticker().advance(Duration.ofSeconds(50));
+    node.setWriteTime(context.ticker().read());
+
+    context.ticker().advance(Duration.ofSeconds(40));
+    cache.cleanUp();
+
+    assertThat(cache).hasSize(1);
+    assertThat(cache).containsKey(context.absentKey());
+    assertThat(cache.writeOrderDeque().peekLast()).isSameInstanceAs(node);
+
+    assertThat(context).notifications().withCause(EXPIRED)
+        .contains(context.original()).exclusively();
+  }
+
   /* --------------- Refresh --------------- */
 
-  @Test(dataProvider = "caches") // Issue #715
+  @Test
+  @SuppressWarnings({"CheckReturnValue", "ResultOfMethodCallIgnored"})
+  void refreshes_memoize() {
+    // The refresh map is never unset once initialized and a CAS race can cause a thread's attempt
+    // at initialization to fail so it re-reads for the current value. This asserts a non-null value
+    // for NullAway's static analysis. We can test the failed CAS scenario by resetting the field
+    // and catching the NullPointerException, thereby proving that the failed initialization falls
+    // back to a re-read. This error will not happen in practice since the field is not modified
+    // again.
+    var signal = new CompletableFuture<@Nullable Void>().orTimeout(10, TimeUnit.SECONDS);
+    var cache = new BoundedLocalCache<>(
+        Caffeine.newBuilder(), /* cacheLoader= */ null, /* isAsync= */ false) {};
+    ConcurrentTestHarness.timeTasks(10, new Runnable() {
+      @SuppressFBWarnings("DCN_NULLPOINTER_EXCEPTION")
+      @Override public void run() {
+        while (!signal.isDone()) {
+          try {
+            cache.refreshes = null;
+            cache.refreshes();
+          } catch (NullPointerException e) {
+            signal.complete(null);
+            return;
+          }
+        }
+      }
+    });
+    assertThat(signal.join()).isNull();
+  }
+
+  @Test
+  @SuppressFBWarnings("SIC_INNER_SHOULD_BE_STATIC_ANON")
+  void refreshIfNeeded_straggler_abortsWithoutReload() {
+    var ticker = new FakeTicker();
+    var loadCount = new AtomicInteger();
+    LoadingCache<Integer, Integer> cache = Caffeine.newBuilder()
+        .refreshAfterWrite(Duration.ofMinutes(1))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .build(key -> {
+          loadCount.incrementAndGet();
+          return key + 100;
+        });
+    cache.put(1, 1);
+    var localCache = asBoundedLocalCache(cache);
+    var lookupKey = localCache.nodeFactory.newLookupKey(1);
+    var node = requireNonNull(localCache.data.get(lookupKey));
+    var intercepted = new AtomicBoolean();
+    long bumpedWriteTime = node.getWriteTime() + 2;
+
+    // Simulate the straggler race: between the reader's write-time CAS and the body of its
+    // refreshes.computeIfAbsent, a concurrent refresh advances the entry's write time. The
+    // re-validation guard must observe the change and abort rather than launch a stale reload.
+    localCache.refreshes = new ConcurrentHashMap<Object, CompletableFuture<?>>() {
+      private static final long serialVersionUID = 1L;
+      @Override public CompletableFuture<?> computeIfAbsent(Object key,
+          Function<? super Object, ? extends CompletableFuture<?>> mappingFunction) {
+        intercepted.set(true);
+        node.setWriteTime(bumpedWriteTime);
+        return super.computeIfAbsent(key, mappingFunction);
+      }
+    };
+
+    ticker.advance(Duration.ofMinutes(2));
+    assertThat(cache.get(1)).isEqualTo(1);
+    assertThat(intercepted.get()).isTrue();
+    assertThat(loadCount.get()).isEqualTo(0);
+    assertThat(cache.policy().refreshes()).isEmpty();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, keys = ReferenceType.WEAK)
+  void refresh_collected(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var key = cache.nodeFactory.newReferenceKey(nullKey(), nullReferenceQueue());
+    cache.refreshes().put(key, context.absentValue().toFuture());
+    assertThat(context.cache().policy().refreshes()).isEmpty();
+    cache.refreshes().remove(key);
+  }
+
+  @CheckNoEvictions
+  @ParameterizedTest // Issue #715
   @CacheSpec(implementation = Implementation.Caffeine, population = Population.EMPTY,
       refreshAfterWrite = Expire.ONE_MINUTE, executor = CacheExecutor.THREADED,
       compute = Compute.SYNC, stats = Stats.DISABLED)
-  public void refreshIfNeeded_liveliness(CacheContext context) {
+  void refreshIfNeeded_liveliness(CacheContext context) {
     StatsCounter stats = Mockito.mock();
     context.caffeine().recordStats(() -> stats);
 
     // Capture the refresh parameters, should not be retired/dead sentinel entry
-    var refreshEntry = new AtomicReference<Map.Entry<Object, Object>>();
-    var cache = asBoundedLocalCache(context.build(new CacheLoader<Object, Object>() {
+    var refreshEntry = new AtomicReference<Map.@Nullable Entry<Object, Object>>();
+    var cache = asBoundedLocalCache(context.build(new CacheLoader<>() {
       @Override public Int load(Object key) {
         throw new AssertionError();
       }
@@ -2220,147 +7100,841 @@ public final class BoundedLocalCacheTest {
     assertThat(oldValue).isNull();
 
     // Remove the entry after the read, but before the refresh, and leave it as retired
-    var node = cache.data.get(context.absentKey());
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.absentKey())));
+    var errors = new ConcurrentLinkedDeque<Throwable>();
     doAnswer(invocation -> {
       ConcurrentTestHarness.execute(() -> {
-        var value = cache.remove(context.absentKey());
-        assertThat(value).isEqualTo(context.absentValue());
+        try {
+          var value = cache.remove(context.absentKey());
+          assertThat(value).isEqualTo(context.absentValue());
+        } catch (Throwable t) {
+          errors.addLast(t);
+        }
       });
-      await().until(() -> !cache.containsKey(context.absentKey()));
-      assertThat(node.isRetired()).isTrue();
-      return null;
+
+      try {
+        await().until(() -> !cache.containsKey(context.absentKey()));
+        assertThat(node.isRetired()).isTrue();
+        return null;
+      } catch (Throwable t) {
+        errors.addLast(t);
+        throw t;
+      }
     }).when(stats).recordHits(1);
 
     // Ensure that the refresh operation was skipped
     cache.evictionLock.lock();
     try {
       context.ticker().advance(Duration.ofMinutes(10));
-      var value = cache.getIfPresent(context.absentKey(), /* recordStats */ true);
+      var value = cache.getIfPresent(context.absentKey(), /* recordStats= */ true);
+      await().untilAsserted(() -> assertThat(cache.refreshes()).isEmpty());
       assertThat(value).isEqualTo(context.absentValue());
       assertThat(refreshEntry.get()).isNull();
+      assertThat(errors).isEmpty();
     } finally {
       cache.evictionLock.unlock();
     }
   }
 
-  @Test(dataProvider = "caches", groups = "isolated")
-  @CacheSpec(implementation = Implementation.Caffeine, population = Population.EMPTY,
-      refreshAfterWrite = Expire.ONE_MINUTE, executor = CacheExecutor.THREADED,
-      expireAfterAccess = Expire.DISABLED, expireAfterWrite = Expire.DISABLED,
-      expiry = CacheExpiry.DISABLED, maximumSize = Maximum.DISABLED, compute = Compute.SYNC,
-      removalListener = Listener.DISABLED, evictionListener = Listener.DISABLED,
-      stats = Stats.DISABLED)
-  public void refreshIfNeeded_softLock(CacheContext context) {
-    var refresh = new AtomicBoolean();
-    var reloading = new AtomicBoolean();
-    var future = new CompletableFuture<Int>();
-    var newValue = context.absentValue().add(1);
-    var cache = context.build(new CacheLoader<Int, Int>() {
-      @Override public Int load(Int key) {
-        throw new IllegalStateException();
-      }
-      @Override
-      public CompletableFuture<Int> asyncReload(Int key, Int oldValue, Executor executor) {
-        reloading.set(true);
-        await().untilTrue(refresh);
-        return future;
-      }
-    });
+  @CheckNoEvictions
+  @ParameterizedTest
+  @CacheSpec(loader = Loader.ASYNC_INCOMPLETE,
+      refreshAfterWrite = Expire.ONE_MINUTE, expireAfterWrite = Expire.FOREVER)
+  void refreshIfNeeded_slowLoad_obtrudeToNull(
+      AsyncLoadingCache<Int, Int> cache, CacheContext context) throws Exception {
+    CompletableFuture<@Nullable Int> future =
+        CompletableFuture.completedFuture(context.absentKey());
     var localCache = asBoundedLocalCache(cache);
-    cache.put(context.absentKey(), context.absentValue());
-    var lookupKey = localCache.nodeFactory.newLookupKey(context.absentKey());
-    var node = localCache.data.get(lookupKey);
-    var refreshes = localCache.refreshes();
+    cache.put(context.absentKey(), future);
 
-    context.ticker().advance(Duration.ofMinutes(2));
-    ConcurrentTestHarness.execute(() -> {
-      var value = cache.get(context.absentKey());
-      assertThat(value).isEqualTo(context.absentValue());
+    var lookupKey = localCache.nodeFactory.newLookupKey(context.absentKey());
+    var node = requireNonNull(localCache.data.get(lookupKey));
+    var task = new Future<?>[1];
+
+    localCache.refreshes().compute(node.getKeyReference(), (k, v) -> {
+      assertThat(v).isNull();
+
+      context.ticker().advance(Duration.ofHours(1));
+      var reader = new AtomicReference<@Nullable Thread>();
+      task[0] = ConcurrentTestHarness.submit(() -> {
+        reader.set(Thread.currentThread());
+        var future2 = cache.getIfPresent(context.absentKey());
+        assertThat(future2).isSameInstanceAs(future);
+        assertThat(future2).succeedsWith(null);
+      });
+
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = reader.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      future.obtrudeValue(null);
+      return null;
     });
 
-    await().untilTrue(reloading);
-    assertThat(node.getWriteTime() & 1L).isEqualTo(1);
-
-    localCache.refreshes = null;
-    var value = cache.get(context.absentKey());
-    assertThat(value).isEqualTo(context.absentValue());
-    assertThat(localCache.refreshes).isNull();
-
-    refresh.set(true);
-    await().untilAsserted(() -> assertThat(refreshes).isNotEmpty());
-    await().untilAsserted(() -> assertThat(node.getWriteTime() & 1L).isEqualTo(0));
-
-    future.complete(newValue);
-    await().untilAsserted(() -> assertThat(refreshes).isEmpty());
-    await().untilAsserted(() -> assertThat(cache).containsEntry(context.absentKey(), newValue));
+    task[0].get(1, TimeUnit.MINUTES);
+    cache.asMap().remove(context.absentKey(), future); // obtruded values are not discarded
+    await().untilAsserted(() -> assertThat(cache).containsExactlyEntriesIn(context.original()));
+    assertThat(localCache.refreshes()).isEmpty();
   }
 
-  @Test(dataProvider = "caches", groups = "isolated")
-  @CacheSpec(population = Population.EMPTY, executor = CacheExecutor.THREADED,
-      compute = Compute.ASYNC, stats = Stats.DISABLED)
-  public void refresh_startReloadBeforeLoadCompletion(CacheContext context) {
-    var beganLoadSuccess = new AtomicBoolean();
-    var endLoadSuccess = new CountDownLatch(1);
-    var beganReloading = new AtomicBoolean();
-    var beganLoading = new AtomicBoolean();
-    var endReloading = new AtomicBoolean();
-    var endLoading = new AtomicBoolean();
-    StatsCounter stats = Mockito.mock();
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MINUTE)
+  void refreshIfNeeded_skip_asyncLoad(AsyncCache<Int, Int> cache, CacheContext context) {
+    var localCache = asBoundedLocalCache(cache);
+    var node = requireNonNull(localCache.data.get(
+        localCache.nodeFactory.newLookupKey(context.firstKey())));
+    var future = new CompletableFuture<Int>();
+    node.setValue(future, localCache.valueReferenceQueue());
 
-    context.ticker().setAutoIncrementStep(Duration.ofSeconds(1));
-    context.caffeine().recordStats(() -> stats);
-    var asyncCache = context.buildAsync(new CacheLoader<Int, Int>() {
-      @Override public Int load(Int key) {
-        beganLoading.set(true);
-        await().untilTrue(endLoading);
-        return new Int(ThreadLocalRandom.current().nextInt());
-      }
-      @Override public Int reload(Int key, Int oldValue) {
-        beganReloading.set(true);
-        await().untilTrue(endReloading);
-        return new Int(ThreadLocalRandom.current().nextInt());
-      }
-    });
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(localCache.refreshIfNeeded(node, context.ticker().read())).isNull();
+    assertThat(localCache.refreshes).isNull();
+    future.complete(context.absentValue());
+  }
 
-    Answer<?> answer = invocation -> {
-      beganLoadSuccess.set(true);
-      endLoadSuccess.await();
-      return null;
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MINUTE)
+  void refreshIfNeeded_skip_scheduling(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(
+        cache.nodeFactory.newLookupKey(context.firstKey())));
+    node.setWriteTime(markRefreshing(node.getWriteTime()));
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(cache.refreshIfNeeded(node, context.ticker().read())).isNull();
+    assertThat(cache.refreshes).isNull();
+  }
+
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MINUTE)
+  void refreshIfNeeded_skip_casWriteTime(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = Mockito.spy(requireNonNull(cache.data.get(
+        cache.nodeFactory.newLookupKey(context.firstKey()))));
+    when(node.casWriteTime(anyLong(), anyLong())).thenReturn(false);
+    int executedTasks = context.executor().submitted();
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(cache.refreshIfNeeded(node, context.ticker().read())).isNull();
+    assertThat(context.executor().submitted()).isEqualTo(executedTasks);
+  }
+
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MINUTE)
+  void refreshIfNeeded_skip_notAlive(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var retired = requireNonNull(cache.data.get(
+        cache.nodeFactory.newLookupKey(context.firstKey())));
+    var dead = requireNonNull(cache.data.get(
+        cache.nodeFactory.newLookupKey(context.lastKey())));
+    int executedTasks = context.executor().submitted();
+    retired.retire();
+    dead.die();
+    retired.setValue(context.absentValue(), cache.valueReferenceQueue());
+    dead.setValue(context.absentValue(), cache.valueReferenceQueue());
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(cache.refreshIfNeeded(retired, context.ticker().read())).isNull();
+    assertThat(cache.refreshIfNeeded(dead, context.ticker().read())).isNull();
+    assertThat(context.executor().submitted()).isEqualTo(executedTasks);
+
+    // reset due to intentionally corrupting the internal state
+    requireNonNull(context.build(key -> key));
+  }
+
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MINUTE,
+      loader = Loader.IDENTITY, executor = CacheExecutor.THREADED)
+  void refreshIfNeeded_skip_discarded(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    context.executor().pause();
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(cache.refreshIfNeeded(node, context.ticker().read())).isNull();
+    var future = requireNonNull(cache.refreshes().remove(node.getKeyReference()));
+    context.executor().resume();
+
+    assertThat(future).succeedsWith(context.firstKey());
+    await().untilAsserted(() -> assertThat(context.executor().completed())
+        .isEqualTo(context.executor().submitted()));
+
+    // The rejection installs nothing, so it leaves the entry's write time alone and the entry
+    // stays refresh-eligible. Read it quietly or the check arms a second reload of its own.
+    assertThat(cache.getIfPresentQuietly(context.firstKey()))
+        .isEqualTo(context.original().get(context.firstKey()));
+    assertThat(context).removalNotifications().withCause(REPLACED)
+        .contains(context.firstKey(), context.firstKey());
+  }
+
+  @Test
+  @SuppressWarnings({"resource", "SequencedCollectionGetFirst"})
+  void refreshIfNeeded_weakKeys_preservedTokenIsDiscardable() {
+    // A weak key's retire() clears the node's own key reference, and a cleared reference is equal
+    // to no later lookup. A token registered under it would be stranded once the entry dies: the
+    // successor's own discard cannot find it, and it retains its future for the cache's lifetime.
+    var ticker = new FakeTicker();
+    var pending = new ArrayList<CompletableFuture<Object>>();
+    var loader = new CacheLoader<Object, Object>() {
+      @Override public Object load(Object key) {
+        throw new AssertionError("unexpected load");
+      }
+      @Override public CompletableFuture<Object> asyncReload(
+          Object key, Object oldValue, Executor executor) {
+        var reload = new CompletableFuture<>();
+        pending.add(reload);
+        return reload;
+      }
     };
-    doAnswer(answer).when(stats).recordLoadSuccess(anyLong());
+    LoadingCache<Object, Object> cache = Caffeine.newBuilder()
+        .refreshAfterWrite(Duration.ofMinutes(1))
+        .expireAfterWrite(Duration.ofMinutes(5))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .weakKeys()
+        .build(loader);
+    var local = asBoundedLocalCache(cache);
 
-    // Start load
-    var future1 = asyncCache.get(context.absentKey());
-    await().untilTrue(beganLoading);
+    var key = new Object();
+    cache.put(key, new Object());
 
-    // Complete load; start load callback
-    endLoading.set(true);
-    await().untilTrue(beganLoadSuccess);
+    // The first refresh registers and a write then discards it
+    ticker.advance(Duration.ofMinutes(2));
+    assertThat(cache.getIfPresent(key)).isNotNull();
+    var first = Iterables.get(pending, 0);
+    cache.put(key, new Object());
+    assertThat(local.refreshes()).isEmpty();
 
-    // Start reload
-    var refresh = asyncCache.synchronous().refresh(context.absentKey());
-    await().untilTrue(beganReloading);
+    // The successor registers against the same node
+    ticker.advance(Duration.ofMinutes(2));
+    assertThat(cache.getIfPresent(key)).isNotNull();
+    var successor = pending.get(1);
+    assertThat(local.refreshes()).hasSize(1);
 
-    // Complete load callback
-    endLoadSuccess.countDown();
-    await().untilAsserted(() -> assertThat(future1.getNumberOfDependents()).isEqualTo(0));
+    // The entry expires, so the stale completion reaps it and retires the node, leaving the
+    // successor's registration for the successor to clear
+    ticker.advance(Duration.ofMinutes(6));
+    first.complete(new Object());
+    assertThat(local.refreshes()).hasSize(1);
 
-    // Complete reload callback
-    endReloading.set(true);
-    await().untilAsserted(() -> assertThat(refresh.getNumberOfDependents()).isEqualTo(0));
+    successor.complete(new Object());
+    assertThat(local.refreshes()).isEmpty();
+  }
 
-    // Assert new value
-    await().untilAsserted(() ->
-        assertThat(asyncCache.get(context.absentKey())).succeedsWith(refresh.get()));
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MINUTE,
+      loader = Loader.IDENTITY, executor = CacheExecutor.THREADED)
+  void refreshIfNeeded_valueDiffersFromOldValue(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    context.executor().pause();
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(cache.refreshIfNeeded(node, context.ticker().read())).isNull();
+    var future = requireNonNull(cache.refreshes().get(node.getKeyReference()));
+
+    // Replace the value while the refresh is in-flight
+    assertThat(cache.put(context.firstKey(), context.absentValue()))
+        .isEqualTo(context.original().get(context.firstKey()));
+
+    context.executor().resume();
+    assertThat(future).succeedsWith(context.firstKey());
+
+    // The cache retains the explicitly put value, not the refreshed value
+    await().untilAsserted(() -> assertThat(context.cache())
+        .containsEntry(context.firstKey(), context.absentValue()));
+    assertThat(context).removalNotifications().withCause(REPLACED)
+        .contains(context.firstKey(), context.firstKey());
+  }
+
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MINUTE,
+      loader = Loader.IDENTITY, executor = CacheExecutor.THREADED)
+  void refreshIfNeeded_successful(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    context.executor().pause();
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(cache.refreshIfNeeded(node, context.ticker().read())).isNull();
+    var future = requireNonNull(cache.refreshes().get(node.getKeyReference()));
+
+    context.executor().resume();
+    assertThat(future).succeedsWith(context.firstKey());
+
+    // The cache is updated with the refreshed value
+    await().untilAsserted(() -> assertThat(context.cache())
+        .containsEntry(context.firstKey(), context.firstKey()));
+    assertThat(context).removalNotifications().withCause(REPLACED)
+        .contains(context.firstKey(), context.original().get(context.firstKey()))
+        .exclusively();
+  }
+
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MINUTE,
+      loader = Loader.IDENTITY, executor = CacheExecutor.THREADED)
+  void refreshIfNeeded_replaced(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(context.firstKey())));
+    context.executor().pause();
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    assertThat(cache.refreshIfNeeded(node, context.ticker().read())).isNull();
+    context.ticker().advance(Duration.ofMinutes(2));
+    node.setWriteTime(context.ticker().read());
+
+    var future = requireNonNull(cache.refreshes().get(node.getKeyReference()));
+    context.executor().resume();
+    assertThat(future).succeedsWith(context.firstKey());
+    assertThat(context).removalNotifications().withCause(REPLACED)
+        .contains(context.firstKey(), context.firstKey())
+        .exclusively();
+  }
+
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MILLISECOND,
+      removalListener = Listener.CONSUMING, loader = Loader.IDENTITY,
+      executor = CacheExecutor.THREADED)
+  void refreshIfNeeded_writeTimeABA_sameValueDifferentWriteTime(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // When a refresh is in-flight and the entry's write time changes (via replace without
+    // discarding the refresh), the ABA check at node.getWriteTime() != writeTime should detect
+    // this and discard the refreshed value, even though currentValue == oldValue.
+    var node = requireNonNull(cache.data.get(
+        cache.nodeFactory.newLookupKey(context.firstKey())));
+    var originalValue = requireNonNull(context.original().get(context.firstKey()));
+    context.executor().pause();
+
+    // Advance past refresh threshold and trigger the refresh
+    context.ticker().advance(Duration.ofMillis(2));
+    assertThat(cache.refreshIfNeeded(node, context.ticker().read())).isNull();
+    assertThat(cache.refreshes()).isNotEmpty();
+
+    // Replace the value with the same instance without discarding the refresh.
+    // This changes the writeTime but keeps the value reference identical.
+    context.ticker().advance(Duration.ofMillis(1));
+    assertThat(cache.replace(context.firstKey(), originalValue, originalValue,
+        /* shouldDiscardRefresh= */ false, /* quietly= */ true)).isTrue();
+
+    // Resume the loader. The ABA check should detect the write time change
+    // and discard the refreshed value.
+    var future = requireNonNull(cache.refreshes().get(node.getKeyReference()));
+    context.executor().resume();
+    assertThat(future).succeedsWith(context.firstKey());
+
+    // The original value should be preserved (refresh discarded due to ABA)
+    assertThat(cache.getIfPresent(context.firstKey(), /* recordStats= */ false))
+        .isEqualTo(originalValue);
+    assertThat(context).removalNotifications().withCause(REPLACED)
+        .contains(context.firstKey(), context.firstKey())
+        .exclusively();
+  }
+
+  @ParameterizedTest
+  @SuppressWarnings("resource")
+  @CacheSpec(population = Population.FULL, refreshAfterWrite = Expire.ONE_MILLISECOND,
+      removalListener = Listener.CONSUMING, loader = Loader.IDENTITY,
+      executor = CacheExecutor.THREADED)
+  void refreshIfNeeded_valueABA_differentValueWithoutDiscard(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // When the value is replaced with a different instance while a refresh is in-flight and
+    // the refresh token is kept alive, the refresh's compute sees removed==true but
+    // currentValue != oldValue. The ABA guard at the second AND operand must discard the
+    // refreshed value and preserve the replacement.
+    var node = requireNonNull(cache.data.get(
+        cache.nodeFactory.newLookupKey(context.firstKey())));
+    var originalValue = requireNonNull(context.original().get(context.firstKey()));
+    context.executor().pause();
+
+    context.ticker().advance(Duration.ofMillis(2));
+    assertThat(cache.refreshIfNeeded(node, context.ticker().read())).isNull();
+    assertThat(cache.refreshes()).isNotEmpty();
+
+    // Replace with a DIFFERENT value instance without discarding the refresh token.
+    context.ticker().advance(Duration.ofMillis(1));
+    assertThat(cache.replace(context.firstKey(), originalValue, context.absentValue(),
+        /* shouldDiscardRefresh= */ false, /* quietly= */ true)).isTrue();
+
+    var future = requireNonNull(cache.refreshes().get(node.getKeyReference()));
+    context.executor().resume();
+    assertThat(future).succeedsWith(context.firstKey());
+
+    // The replacement value is preserved (refresh discarded due to value ABA).
+    assertThat(cache.getIfPresent(context.firstKey(), /* recordStats= */ false))
+        .isEqualTo(context.absentValue());
+    // Two REPLACED notifications: replace(original → absent) and the discarded refresh.
+    assertThat(context).removalNotifications().withCause(REPLACED)
+        .contains(Map.entry(context.firstKey(), originalValue),
+                  Map.entry(context.firstKey(), context.firstKey()))
+        .exclusively();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL,
+      implementation = Implementation.Caffeine, compute = Compute.SYNC)
+  void remap_preserveTimestamps_newValueDiffers(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // White-box: the no-op guard checks that newValue matches oldValue. A caller that pre-sets the
+    // preserveTimestamps hint but returns a different value must NOT take the short-circuit; covers
+    // the defensive mismatch branch.
+    var key = context.firstKey();
+    var hints = new LocalCache.RemapHints();
+    hints.preserveTimestamps = true;
+    assertThat(cache.compute(key, (k, old) -> context.absentValue(), cache.expiry(),
+        /* recordLoad= */ false, /* recordLoadFailure= */ false, hints))
+        .isEqualTo(context.absentValue());
+    assertThat(cache).containsEntry(key, context.absentValue());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, implementation = Implementation.Caffeine,
+      compute = Compute.SYNC, expireAfterWrite = Expire.ONE_MINUTE,
+      mustExpireWithAnyOf = AFTER_WRITE)
+  void remap_preserveTimestamps_causeSet(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // White-box: pre-set hints.preserveTimestamps with a lambda that returns the captured old
+    // value. Expire the entry so remap sets ctx.cause=EXPIRED. The guard's cause==null check must
+    // prevent the no-op short-circuit.
+    var key = context.firstKey();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(key)));
+    var originalValue = requireNonNull(node.getValue());
+    context.ticker().advance(Duration.ofMinutes(2));
+
+    var hints = new LocalCache.RemapHints();
+    hints.preserveTimestamps = true;
+    assertThat(cache.compute(key, (k, old) -> originalValue, cache.expiry(),
+        /* recordLoad= */ false, /* recordLoadFailure= */ false, hints))
+        .isEqualTo(originalValue);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.SINGLETON,
+      maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.VALUE)
+  void remap_preserveTimestamps_newValueDiffers_publishesTheUpdate(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // The hint signals a no-op only when the lambda returns the same instance, so a hinted call
+    // that does mutate must still publish an UpdateTask. Otherwise the entry's new weight never
+    // reaches the policy and weightedSize is permanently short by the delta.
+    var key = context.firstKey();
+    var hints = new LocalCache.RemapHints();
+    hints.preserveTimestamps = true;
+    assertThat(cache.compute(key, (k, oldValue) -> context.absentValue(), cache.expiry(),
+        /* recordLoad= */ false, /* recordLoadFailure= */ false, hints))
+        .isEqualTo(context.absentValue());
+    cache.cleanUp();
+    assertThat(cache.weightedSize()).isEqualTo(context.weigher().weigh(key, context.absentValue()));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(compute = Compute.SYNC, population = Population.EMPTY,
+      maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.VALUE)
+  void remap_preserveTimestamps_absentCreate_publishesTheAddition(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // The absent branch has no no-op short-circuit at all, so a hinted create must still publish
+    // an AddTask. An unlinked node is unevictable, and removing it later subtracts a weight that
+    // was never added, which relaxes the bound by that much for the cache's lifetime.
+    var key = context.absentKey();
+    var hints = new LocalCache.RemapHints();
+    hints.preserveTimestamps = true;
+    assertThat(cache.compute(key, (k, oldValue) -> context.absentValue(), cache.expiry(),
+        /* recordLoad= */ false, /* recordLoadFailure= */ false, hints))
+        .isEqualTo(context.absentValue());
+    cache.cleanUp();
+    assertThat(cache.weightedSize()).isEqualTo(context.weigher().weigh(key, context.absentValue()));
+
+    assertThat(cache.remove(key)).isEqualTo(context.absentValue());
+    cache.cleanUp();
+    assertThat(cache.weightedSize()).isEqualTo(0);
+  }
+
+  @CheckNoEvictions
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, population = Population.SINGLETON,
+      keys = ReferenceType.STRONG, refreshAfterWrite = Expire.ONE_MINUTE,
+      compute = Compute.SYNC)
+  void remap_preserveRefresh_leavesPendingRefreshIntact(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // White-box for iss_2a0b20db: a query-style caller (e.g., putIfAbsentAsync) returns oldValue
+    // from compute's lambda to signal a no-op and sets BOTH hint flags. The L2961 no-op tail must
+    // skip discardRefresh so any in-flight refreshAfterWrite remains in cache.refreshes(). Without
+    // hints.preserveRefresh, the discardRefresh would cancel the pending reload silently.
+    var key = context.firstKey();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(key)));
+    var keyRef = node.getKeyReference();
+    var oldValue = requireNonNull(node.getValue());
+    var pendingRefresh = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, pendingRefresh);
+
+    var hints = new LocalCache.RemapHints();
+    hints.preserveTimestamps = true;
+    hints.preserveRefresh = true;
+    var result = cache.compute(key, (k, old) -> oldValue, cache.expiry(),
+        /* recordLoad= */ false, /* recordLoadFailure= */ false, hints);
+
+    assertThat(result).isEqualTo(oldValue);
+    assertThat(cache.refreshes()).containsEntry(keyRef, pendingRefresh);
+    cache.refreshes().remove(keyRef, pendingRefresh);
+  }
+
+  @CheckNoEvictions
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, population = Population.SINGLETON,
+      keys = ReferenceType.STRONG, refreshAfterWrite = Expire.ONE_MINUTE,
+      compute = Compute.SYNC)
+  void remap_preserveTimestamps_withoutPreserveRefresh_discardsPendingRefresh(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // The complement of the above: refresh-rejection callers (the existing refreshIfNeeded paths)
+    // set only preserveTimestamps and want the rejected refresh cleaned up — discardRefresh must
+    // still fire when preserveRefresh is left at its default false.
+    var key = context.firstKey();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(key)));
+    var keyRef = node.getKeyReference();
+    var oldValue = requireNonNull(node.getValue());
+    var pendingRefresh = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, pendingRefresh);
+
+    var hints = new LocalCache.RemapHints();
+    hints.preserveTimestamps = true;
+    assertThat(cache.compute(key, (k, old) -> oldValue, cache.expiry(),
+        /* recordLoad= */ false, /* recordLoadFailure= */ false, hints)).isNotNull();
+    assertThat(cache.refreshes()).doesNotContainKey(keyRef);
+  }
+
+  @CheckNoEvictions
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, population = Population.EMPTY,
+      keys = ReferenceType.STRONG, refreshAfterWrite = Expire.ONE_MINUTE,
+      compute = Compute.SYNC)
+  void remap_absentCreate_discardsPendingRefresh(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // A creation is a mutation rather than a query-style no-op, so the absent-create exit discards
+    // whatever is registered even when the caller set preserveRefresh. A completion that installs
+    // a value on an absent key owns the registration, so its finally clears its own token.
+    var key = context.absentKey();
+    var keyRef = cache.referenceKey(key);
+    var pendingRefresh = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, pendingRefresh);
+
+    var hints = new LocalCache.RemapHints();
+    hints.preserveRefresh = true;
+    assertThat(cache.compute(key, (k, old) -> context.absentValue(), cache.expiry(),
+        /* recordLoad= */ false, /* recordLoadFailure= */ false, hints)).isNotNull();
+    assertThat(cache.refreshes()).doesNotContainKey(keyRef);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(implementation = Implementation.Caffeine, population = Population.SINGLETON,
+      keys = ReferenceType.STRONG, refreshAfterWrite = Expire.ONE_MINUTE,
+      expireAfterWrite = Expire.ONE_MINUTE, compute = Compute.SYNC)
+  void remap_evictedRetire_nonCreating_discardsPendingRefresh(
+      BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    // Reaping a dead entry is a purge rather than a query, so a non-creating caller discards the
+    // registration on its way out. The exit runs before the remapping function, which is the only
+    // thing that assigns preserveRefresh, so the hint can never be set by the time it is reached.
+    var key = context.firstKey();
+    var node = requireNonNull(cache.data.get(cache.nodeFactory.newLookupKey(key)));
+    var keyRef = node.getKeyReference();
+    var pendingRefresh = new CompletableFuture<Int>();
+    cache.refreshes().put(keyRef, pendingRefresh);
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    var ctx = new BoundedLocalCache.ComputeContext<Int, Int>();
+    var result = cache.remap(key, cache.nodeFactory.newLookupKey(key),
+        (k, oldValue) -> { throw new AssertionError("Should never be called"); },
+        cache.expiry(), ctx, /* computeIfAbsent= */ false);
+
+    assertThat(result).isNull();
+    assertThat(ctx.cause).isEqualTo(RemovalCause.EXPIRED);
+    assertThat(cache.refreshes()).doesNotContainKey(keyRef);
+  }
+
+  @Test
+  @CheckMaxLogLevel(WARN)
+  @SuppressWarnings({"resource", "SequencedCollectionGetFirst"})
+  void refreshIfNeeded_completionThrows_releasesToken() {
+    // A throw before remap reaches a discard leaves the registration behind, and the containsKey
+    // guard then suppresses this key's automatic refresh for good. The completion releases its
+    // own token by identity, the same way its error branch does.
+    var ticker = new FakeTicker();
+    var broken = new AtomicBoolean();
+    var loader = new RecordingReload();
+    LoadingCache<Integer, Integer> cache = Caffeine.newBuilder()
+        .refreshAfterWrite(Duration.ofMinutes(1))
+        .ticker(brokenTicker(ticker, broken))
+        .executor(Runnable::run)
+        .maximumSize(10)
+        .build(loader);
+    var local = asBoundedLocalCache(cache);
+    cache.put(1, 1);
+
+    ticker.advance(Duration.ofMinutes(2));
+    assertThat(cache.getIfPresent(1)).isEqualTo(1);
+    assertThat(local.refreshes()).hasSize(1);
+
+    broken.set(true);
+    loader.pending.get(0).complete(2);
+    broken.set(false);
+    assertThat(local.refreshes()).isEmpty();
+
+    // The key must still be refreshable
+    ticker.advance(Duration.ofMinutes(2));
+    assertThat(cache.getIfPresent(1)).isEqualTo(1);
+    assertThat(local.refreshes()).hasSize(1);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during refresh")
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @Test
+  @CheckMaxLogLevel(WARN)
+  @SuppressWarnings({"resource", "SequencedCollectionGetFirst"})
+  void refresh_completionThrows_releasesToken() {
+    // The same release in LocalLoadingCache.refresh's completion, which shares the guard
+    var ticker = new FakeTicker();
+    var broken = new AtomicBoolean();
+    var loader = new RecordingReload();
+    LoadingCache<Integer, Integer> cache = Caffeine.newBuilder()
+        .refreshAfterWrite(Duration.ofMinutes(1))
+        .ticker(brokenTicker(ticker, broken))
+        .executor(Runnable::run)
+        .maximumSize(10)
+        .build(loader);
+    var local = asBoundedLocalCache(cache);
+    cache.put(1, 1);
+
+    var refresh = cache.refresh(1);
+    assertThat(local.refreshes()).hasSize(1);
+
+    broken.set(true);
+    loader.pending.get(0).complete(2);
+    broken.set(false);
+    assertThat(refresh).isDone();
+    assertThat(local.refreshes()).isEmpty();
+    assertThat(logEvents()
+        .withMessage("Exception thrown during refresh")
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @Test
+  @CheckMaxLogLevel(WARN)
+  @SuppressWarnings({"resource", "SequencedCollectionGetFirst"})
+  void refreshAsync_completionThrows_releasesToken() {
+    // The same release in LocalAsyncLoadingCache.tryComputeRefresh's completion
+    var ticker = new FakeTicker();
+    var broken = new AtomicBoolean();
+    var loader = new RecordingReload();
+    AsyncLoadingCache<Integer, Integer> cache = Caffeine.newBuilder()
+        .refreshAfterWrite(Duration.ofMinutes(1))
+        .ticker(brokenTicker(ticker, broken))
+        .executor(Runnable::run)
+        .maximumSize(10)
+        .buildAsync(loader);
+    var local = asBoundedLocalCache(cache);
+    cache.put(1, CompletableFuture.completedFuture(1));
+
+    var refresh = cache.synchronous().refresh(1);
+    assertThat(local.refreshes()).hasSize(1);
+
+    broken.set(true);
+    loader.pending.get(0).complete(2);
+    broken.set(false);
+    assertThat(refresh).isDone();
+    assertThat(local.refreshes()).isEmpty();
+  }
+
+  @Nested @Isolated
+  final class IsolatedRefreshTest {
+
+    @CheckNoEvictions
+    @ParameterizedTest
+    @CacheSpec(implementation = Implementation.Caffeine, population = Population.EMPTY,
+        refreshAfterWrite = Expire.ONE_MINUTE, executor = CacheExecutor.THREADED,
+        expireAfterAccess = Expire.DISABLED, expireAfterWrite = Expire.DISABLED,
+        expiry = CacheExpiry.DISABLED, maximumSize = Maximum.DISABLED, compute = Compute.SYNC,
+        removalListener = Listener.DISABLED, evictionListener = Listener.DISABLED,
+        stats = Stats.DISABLED)
+    void refreshIfNeeded_softLock(CacheContext context) {
+      var refresh = new AtomicBoolean();
+      var reloading = new AtomicBoolean();
+      var future = new CompletableFuture<Int>();
+      var newValue = context.absentValue().add(1);
+      var cache = context.build(new CacheLoader<Int, Int>() {
+        @Override public Int load(Int key) {
+          throw new IllegalStateException();
+        }
+        @Override
+        public CompletableFuture<Int> asyncReload(Int key, Int oldValue, Executor executor) {
+          reloading.set(true);
+          await().untilTrue(refresh);
+          return future;
+        }
+      });
+      var localCache = asBoundedLocalCache(cache);
+      cache.put(context.absentKey(), context.absentValue());
+      var lookupKey = localCache.nodeFactory.newLookupKey(context.absentKey());
+      var node = requireNonNull(localCache.data.get(lookupKey));
+      var refreshes = localCache.refreshes();
+
+      context.ticker().advance(Duration.ofMinutes(2));
+      var caller = CompletableFuture.supplyAsync(() -> cache.get(context.absentKey()), executor);
+
+      await().untilTrue(reloading);
+      assertThat(isRefreshing(node.getWriteTime())).isTrue();
+
+      localCache.refreshes = null;
+      var value = cache.get(context.absentKey());
+      assertThat(value).isEqualTo(context.absentValue());
+      assertThat(localCache.refreshes).isNull();
+
+      refresh.set(true);
+      assertThat(caller).succeedsWith(context.absentValue());
+      assertThat(refreshes).isNotEmpty();
+      assertThat(isRefreshing(node.getWriteTime())).isFalse();
+
+      localCache.refreshes = refreshes;
+      future.complete(newValue);
+      await().untilAsserted(() -> assertThat(refreshes).isEmpty());
+      await().untilAsserted(() -> assertThat(cache).containsEntry(context.absentKey(), newValue));
+    }
+
+    @CheckNoEvictions
+    @ParameterizedTest
+    @CacheSpec(population = Population.EMPTY, executor = CacheExecutor.THREADED,
+        compute = Compute.ASYNC, stats = Stats.DISABLED)
+    void refresh_startReloadBeforeLoadCompletion(CacheContext context) {
+      var beganLoadSuccess = new AtomicBoolean();
+      var endLoadSuccess = new CountDownLatch(1);
+      var beganReloading = new AtomicBoolean();
+      var beganLoading = new AtomicBoolean();
+      var endReloading = new AtomicBoolean();
+      var endLoading = new AtomicBoolean();
+      StatsCounter stats = Mockito.mock();
+
+      context.ticker().setAutoIncrementStep(Duration.ofSeconds(1));
+      context.caffeine().recordStats(() -> stats);
+      var asyncCache = context.buildAsync(new CacheLoader<Int, Int>() {
+        @Override public Int load(Int key) {
+          beganLoading.set(true);
+          await().untilTrue(endLoading);
+          return new Int(ThreadLocalRandom.current().nextInt());
+        }
+        @Override public Int reload(Int key, Int oldValue) {
+          beganReloading.set(true);
+          await().untilTrue(endReloading);
+          return new Int(ThreadLocalRandom.current().nextInt());
+        }
+      });
+
+      Answer<?> answer = invocation -> {
+        beganLoadSuccess.set(true);
+        endLoadSuccess.await();
+        return null;
+      };
+      doAnswer(answer).when(stats).recordLoadSuccess(anyLong());
+
+      // Start load
+      var future1 = asyncCache.get(context.absentKey());
+      await().untilTrue(beganLoading);
+
+      // Complete load; start load callback
+      endLoading.set(true);
+      await().untilTrue(beganLoadSuccess);
+
+      // Start reload
+      var refresh = asyncCache.synchronous().refresh(context.absentKey());
+      await().untilTrue(beganReloading);
+
+      // Complete load callback
+      endLoadSuccess.countDown();
+      await().untilAsserted(() -> assertThat(future1.getNumberOfDependents()).isEqualTo(0));
+
+      // Complete reload callback
+      endReloading.set(true);
+      await().untilAsserted(() -> assertThat(refresh.getNumberOfDependents()).isEqualTo(0));
+
+      // Assert new value
+      await().untilAsserted(() ->
+          assertThat(asyncCache.get(context.absentKey())).succeedsWith(refresh.get()));
+    }
+  }
+
+  @Test
+  @SuppressWarnings({"resource", "SequencedCollectionGetFirst"})
+  void refreshIfNeeded_reinsertedNode_rejectsStaleReload() {
+    // The completion's write-time guard reads the node captured when the reload started, and a
+    // dead node's write time is frozen, so a remove and reinsert of the same value instance is
+    // invisible to it. The state built below is what the discardRefresh prescreen race leaves:
+    // node A dead with its token still registered, and node B holding that same value. Without
+    // the liveness term the guard passes and commits a reload launched from the dead generation.
+    var ticker = new FakeTicker();
+    var loader = new RecordingReload();
+    LoadingCache<Integer, Integer> cache = Caffeine.newBuilder()
+        .refreshAfterWrite(Duration.ofMinutes(1))
+        .executor(Runnable::run)
+        .ticker(ticker::read)
+        .maximumSize(10)
+        .build(loader);
+    var local = asBoundedLocalCache(cache);
+    Integer value = 12_345;
+    cache.put(1, value);
+
+    ticker.advance(Duration.ofMinutes(2));
+    assertThat(cache.getIfPresent(1)).isSameInstanceAs(value);
+    var keyReference = local.referenceKey(1);
+    var stale = loader.pending.get(0);
+    assertThat(local.refreshes()).containsEntry(keyReference, stale);
+
+    cache.invalidate(1);
+    cache.put(1, value);
+    local.refreshes().put(keyReference, stale);
+
+    stale.complete(999);
+    assertThat(cache.getIfPresent(1)).isSameInstanceAs(value);
+    assertThat(local.refreshes()).isEmpty();
+  }
+
+  /** A loader that records each reload it hands out so the test can settle them by hand. */
+  private static final class RecordingReload implements CacheLoader<Integer, Integer> {
+    final List<CompletableFuture<Integer>> pending = new ArrayList<>();
+
+    @Override public Integer load(Integer key) {
+      throw new AssertionError("Should never be called");
+    }
+    @Override public CompletableFuture<Integer> asyncReload(
+        Integer key, Integer oldValue, Executor executor) {
+      var reload = new CompletableFuture<Integer>();
+      pending.add(reload);
+      return reload;
+    }
+  }
+
+  /** Returns a ticker that throws while {@code broken} is set, to fail a refresh completion. */
+  private static Ticker brokenTicker(FakeTicker ticker, AtomicBoolean broken) {
+    return () -> {
+      if (broken.get()) {
+        throw new IllegalStateException("ticker");
+      }
+      return ticker.read();
+    };
   }
 
   /* --------------- Broken Equality --------------- */
 
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
   @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG,
       maximumSize = Maximum.FULL, weigher = {CacheWeigher.DISABLED, CacheWeigher.MAX_VALUE})
-  public void brokenEquality_eviction(BoundedLocalCache<Object, Int> cache,
+  void brokenEquality_eviction(BoundedLocalCache<Object, Int> cache,
       CacheContext context, Eviction<?, ?> eviction) {
     var key = new MutableInt(context.absentKey().intValue());
     var value = cache.put(key, context.absentValue());
@@ -2368,11 +7942,12 @@ public final class BoundedLocalCacheTest {
     key.increment();
 
     eviction.setMaximum(0);
-    assertThat(Map.copyOf(cache)).isEmpty();
+    var copy = ImmutableMap.copyOf(cache);
+    assertThat(copy).isEmpty();
     assertThat(context).notifications().isEmpty();
     assertThat(cache.estimatedSize()).isEqualTo(1);
 
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
+    var event = requireNonNull(Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents()));
     assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
     checkBrokenEqualityMessage(cache, key, event.getFormattedMessage());
     assertThat(event.getLevel()).isEqualTo(ERROR);
@@ -2380,14 +7955,14 @@ public final class BoundedLocalCacheTest {
     cache.data.clear();
   }
 
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
   @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG,
       mustExpireWithAnyOf = {AFTER_ACCESS, AFTER_WRITE, VARIABLE},
       expireAfterAccess = {Expire.DISABLED, Expire.ONE_MINUTE},
       expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE},
       expiry = CacheExpiry.CREATE,  expiryTime = Expire.ONE_MINUTE)
-  public void brokenEquality_expiration(
+  void brokenEquality_expiration(
       BoundedLocalCache<Object, Int> cache, CacheContext context) {
     var key = new MutableInt(context.absentKey().intValue());
     var value = cache.put(key, context.absentValue());
@@ -2397,11 +7972,12 @@ public final class BoundedLocalCacheTest {
     context.ticker().advance(Duration.ofDays(1));
     cache.cleanUp();
 
-    assertThat(Map.copyOf(cache)).isEmpty();
+    var copy = ImmutableMap.copyOf(cache);
+    assertThat(copy).isEmpty();
     assertThat(context).notifications().isEmpty();
     assertThat(cache.estimatedSize()).isEqualTo(1);
 
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
+    var event = requireNonNull(Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents()));
     assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
     checkBrokenEqualityMessage(cache, key, event.getFormattedMessage());
     assertThat(event.getLevel()).isEqualTo(ERROR);
@@ -2409,21 +7985,22 @@ public final class BoundedLocalCacheTest {
     cache.data.clear();
   }
 
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
   @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
-  public void brokenEquality_clear(BoundedLocalCache<Object, Int> cache, CacheContext context) {
+  void brokenEquality_clear(BoundedLocalCache<Object, Int> cache, CacheContext context) {
     var key = new MutableInt(context.absentKey().intValue());
     var value = cache.put(key, context.absentValue());
     assertThat(value).isNull();
     key.increment();
 
     cache.clear();
-    assertThat(Map.copyOf(cache)).isEmpty();
+    var copy = ImmutableMap.copyOf(cache);
+    assertThat(copy).isEmpty();
     assertThat(context).notifications().isEmpty();
     assertThat(cache.estimatedSize()).isEqualTo(1);
 
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
+    var event = requireNonNull(Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents()));
     assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
     checkBrokenEqualityMessage(cache, key, event.getFormattedMessage());
     assertThat(event.getLevel()).isEqualTo(ERROR);
@@ -2431,20 +8008,20 @@ public final class BoundedLocalCacheTest {
     cache.data.clear();
   }
 
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
   @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
-  public void brokenEquality_put(BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
+  void brokenEquality_put(BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
     testForBrokenEquality(cache, context, key -> {
       var value = cache.put(key, context.absentValue());
       assertThat(value).isEqualTo(context.absentValue());
     });
   }
 
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
   @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
-  public void brokenEquality_putIfAbsent(
+  void brokenEquality_putIfAbsent(
       BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
     testForBrokenEquality(cache, context, key -> {
       var value = cache.putIfAbsent(key, context.absentValue());
@@ -2452,10 +8029,10 @@ public final class BoundedLocalCacheTest {
     });
   }
 
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
   @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
-  public void brokenEquality_replace(
+  void brokenEquality_replace(
       BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
     testForBrokenEquality(cache, context, key -> {
       var value = cache.replace(key, context.absentValue());
@@ -2463,10 +8040,10 @@ public final class BoundedLocalCacheTest {
     });
   }
 
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
   @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
-  public void brokenEquality_replaceConditionally(
+  void brokenEquality_replaceConditionally(
       BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
     testForBrokenEquality(cache, context, key -> {
       boolean replaced = cache.replace(key, context.absentValue(), context.absentValue().negate());
@@ -2474,10 +8051,10 @@ public final class BoundedLocalCacheTest {
     });
   }
 
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
   @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
-  public void brokenEquality_remove(
+  void brokenEquality_remove(
       BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
     testForBrokenEquality(cache, context, key -> {
       var value = cache.remove(key);
@@ -2485,14 +8062,47 @@ public final class BoundedLocalCacheTest {
     });
   }
 
+  @ParameterizedTest
   @CheckMaxLogLevel(ERROR)
-  @Test(dataProvider = "caches")
   @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
-  public void brokenEquality_removeConditionally(
+  void brokenEquality_removeConditionally(
       BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
     testForBrokenEquality(cache, context, key -> {
       boolean removed = cache.remove(key, context.absentValue());
       assertThat(removed).isTrue();
+    });
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
+  void brokenEquality_compute(
+      BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
+    testForBrokenEquality(cache, context, key -> {
+      var value = cache.compute(key, (k, v) -> context.absentValue().negate());
+      assertThat(value).isEqualTo(context.absentValue().negate());
+    });
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
+  void brokenEquality_computeIfAbsent(
+      BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
+    testForBrokenEquality(cache, context, key -> {
+      var value = cache.computeIfAbsent(key, k -> context.absentValue().negate());
+      assertThat(value).isEqualTo(context.absentValue().negate());
+    });
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(population = Population.EMPTY, keys = ReferenceType.STRONG)
+  void brokenEquality_merge(
+      BoundedLocalCache<MutableInt, Int> cache, CacheContext context) {
+    testForBrokenEquality(cache, context, key -> {
+      var value = cache.merge(key, context.absentValue().negate(), (a, b) -> b);
+      assertThat(value).isEqualTo(context.absentValue().negate());
     });
   }
 
@@ -2508,12 +8118,11 @@ public final class BoundedLocalCacheTest {
 
     var e = assertThrows(IllegalStateException.class, () -> task.accept(key));
     checkBrokenEqualityMessage(cache, key, e.getMessage());
-
     cache.data.clear();
   }
 
   private static void checkBrokenEqualityMessage(
-      BoundedLocalCache<?, ?> cache, Object key, String msg) {
+      BoundedLocalCache<?, ?> cache, Object key, @Nullable String msg) {
     assertThat(msg).contains("An invalid state was detected");
     assertThat(msg).contains("cache type: " + cache.getClass().getSimpleName());
     assertThat(msg).contains("node type: " + cache.nodeFactory.getClass().getSimpleName());
@@ -2524,77 +8133,97 @@ public final class BoundedLocalCacheTest {
   /* --------------- Miscellaneous --------------- */
 
   @Test
-  public void cacheFactory_null() {
-    assertThrows(NullPointerException.class,
-        () -> LocalCacheFactory.loadFactory(null));
+  @SuppressWarnings("PMD.AvoidAccessibilityAlteration")
+  void reflectivelyConstruct() throws ReflectiveOperationException {
+    var constructor = BLCHeader.class.getDeclaredConstructor();
+    constructor.setAccessible(true);
+    constructor.newInstance();
   }
 
   @Test
-  public void cacheFactory_classNotFound() {
+  void removalCause_size_wasEvicted() {
+    assertThat(RemovalCause.SIZE.wasEvicted()).isTrue();
+  }
+
+  @Test
+  void cacheFactory_null() {
+    assertThrows(NullPointerException.class, () -> LocalCacheFactory.loadFactory(nullString()));
+  }
+
+  @Test
+  void cacheFactory_classNotFound() {
     var expected = assertThrows(IllegalStateException.class, () ->
         LocalCacheFactory.loadFactory(""));
     assertThat(expected).hasCauseThat().isInstanceOf(ClassNotFoundException.class);
   }
 
   @Test
-  public void cacheFactory_noSuchMethod() {
+  void cacheFactory_noSuchMethod() {
     var expected = assertThrows(IllegalStateException.class, () ->
         LocalCacheFactory.loadFactory("BoundedLocalCacheTest$BadLocalCacheFactory"));
     assertThat(expected).hasCauseThat().isInstanceOf(NoSuchMethodException.class);
   }
 
   @Test
-  public void cacheFactory_brokenConstructor() {
-    Caffeine<Object, Object> builder = Caffeine.newBuilder();
+  void cacheFactory_brokenConstructor() {
+    var builder = Caffeine.newBuilder();
     var factory = LocalCacheFactory.loadFactory("BoundedLocalCacheTest$BadBoundedLocalCache");
-    assertThrows(IllegalStateException.class, () -> factory.newInstance(builder, null, false));
+    assertThrows(IllegalStateException.class, () -> factory.newInstance(builder,
+        /* cacheLoader= */ null, /* isAsync= */ false));
   }
 
-  @Test(groups = "isolated")
-  public void cacheFactory_exception() throws Throwable {
-    try {
-      LocalCacheFactory factory = Mockito.mock();
-      LocalCacheFactory.FACTORIES.put("WS", factory);
+  @Nested @Isolated
+  final class IsolatedCacheFactoryTest {
 
-      when(factory.newInstance(any(), any(), anyBoolean())).thenThrow(IOException.class);
-      Caffeine<Object, Object> builder = Caffeine.newBuilder().weakKeys();
-      var expected = assertThrows(IllegalStateException.class, () ->
-          LocalCacheFactory.newBoundedLocalCache(builder, /* loader */ null, false));
-      assertThat(expected).hasCauseThat().isInstanceOf(IOException.class);
-    } finally {
-      LocalCacheFactory.FACTORIES.clear();
+    @Test
+    void cacheFactory_exception() throws Throwable {
+      try {
+        LocalCacheFactory factory = Mockito.mock();
+        LocalCacheFactory.FACTORIES.put("WS", factory);
+
+        when(factory.newInstance(any(), any(), anyBoolean())).thenThrow(IOException.class);
+        Caffeine<Object, Object> builder = Caffeine.newBuilder().weakKeys();
+        var expected = assertThrows(IllegalStateException.class, () ->
+            LocalCacheFactory.newBoundedLocalCache(builder,
+                /* cacheLoader= */ null, /* isAsync= */ false));
+        assertThat(expected).hasCauseThat().isInstanceOf(IOException.class);
+      } finally {
+        LocalCacheFactory.FACTORIES.clear();
+      }
     }
-  }
 
-  @Test(groups = "isolated")
-  public void cacheFactory_error() throws Throwable {
-    try {
-      LocalCacheFactory factory = Mockito.mock();
-      LocalCacheFactory.FACTORIES.put("WS", factory);
+    @Test
+    void cacheFactory_error() throws Throwable {
+      try {
+        LocalCacheFactory factory = Mockito.mock();
+        LocalCacheFactory.FACTORIES.put("WS", factory);
 
-      Caffeine<Object, Object> builder = Caffeine.newBuilder().weakKeys();
-      when(factory.newInstance(any(), any(), anyBoolean())).thenThrow(Error.class);
-      assertThrows(Error.class, () ->
-          LocalCacheFactory.newBoundedLocalCache(builder, /* loader */ null, false));
-    } finally {
-      LocalCacheFactory.FACTORIES.clear();
+        Caffeine<Object, Object> builder = Caffeine.newBuilder().weakKeys();
+        when(factory.newInstance(any(), any(), anyBoolean())).thenThrow(Error.class);
+        assertThrows(Error.class, () -> LocalCacheFactory.newBoundedLocalCache(
+            builder, /* cacheLoader= */ null, /* isAsync= */ false));
+      } finally {
+        LocalCacheFactory.FACTORIES.clear();
+      }
     }
   }
 
   @Test
-  public void cacheFactory_noStaticFactory() throws Throwable {
+  void cacheFactory_noStaticFactory() throws Throwable {
     var factory = LocalCacheFactory.loadFactory("BoundedLocalCacheTest$CustomBoundedLocalCache");
     assertThat(factory).isInstanceOf(MethodHandleBasedFactory.class);
-    var cache = factory.newInstance(Caffeine.newBuilder(), /* loader */ null, false);
+    var cache = factory.newInstance(Caffeine.newBuilder(),
+        /* cacheLoader= */ null, /* isAsync= */ false);
     assertThat(cache).isInstanceOf(CustomBoundedLocalCache.class);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY)
-  public void cacheFactory_loadFactory(
+  void cacheFactory_loadFactory(
       BoundedLocalCache<Int, Int> cache, CacheContext context) throws Throwable {
     var factory1 = LocalCacheFactory.loadFactory(cache.getClass().getSimpleName());
-    var other = factory1.newInstance(context.caffeine(), /* cacheLoader */ null, context.isAsync());
+    var other = factory1.newInstance(context.caffeine(),
+        /* cacheLoader= */ null, context.isAsync());
     assertThat(other.getClass()).isEqualTo(cache.getClass());
     assertThat(LocalCacheFactory.FACTORIES).containsEntry(
         cache.getClass().getSimpleName(), factory1);
@@ -2603,43 +8232,42 @@ public final class BoundedLocalCacheTest {
     assertThat(factory2).isSameInstanceAs(factory1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY)
-  public void cacheFactory_byMethodHandle(
+  void cacheFactory_byMethodHandle(
       BoundedLocalCache<Int, Int> cache, CacheContext context) throws Throwable {
     var methodHandleFactory = new MethodHandleBasedFactory(cache.getClass());
     var staticFactory = LocalCacheFactory.loadFactory(cache.getClass().getSimpleName());
     assertThat(methodHandleFactory).isNotSameInstanceAs(staticFactory);
 
     var c1 = methodHandleFactory.newInstance(
-        context.caffeine(), /* cacheLoader */ null, context.isAsync());
+        context.caffeine(), /* cacheLoader= */ null, context.isAsync());
     var c2 = staticFactory.newInstance(
-        context.caffeine(), /* cacheLoader */ null, context.isAsync());
+        context.caffeine(), /* cacheLoader= */ null, context.isAsync());
     assertThat(c1.getClass()).isEqualTo(c2.getClass());
   }
 
   @Test
-  public void nodeFactory_null() {
-    assertThrows(NullPointerException.class, () -> NodeFactory.loadFactory(/* className */ null));
+  void nodeFactory_null() {
+    assertThrows(NullPointerException.class, () -> NodeFactory.loadFactory(nullString()));
   }
 
   @Test
-  public void nodeFactory_badConstructor() {
+  void nodeFactory_badConstructor() {
     assertThrows(IllegalStateException.class, () ->
         NodeFactory.loadFactory("BoundedLocalCacheTest$BadNode"));
   }
 
   @Test
-  public void nodeFactory_classNotFound() {
+  void nodeFactory_classNotFound() {
     var expected = assertThrows(IllegalStateException.class, () ->
-        NodeFactory.loadFactory(/* className */ ""));
+        NodeFactory.loadFactory(/* className= */ ""));
     assertThat(expected).hasCauseThat().isInstanceOf(ClassNotFoundException.class);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY)
-  public void nodeFactory_loadFactory(
-      BoundedLocalCache<Int, Int> cache, CacheContext context) throws Throwable {
+  void nodeFactory_loadFactory(BoundedLocalCache<Int, Int> cache) {
     var factory1 = NodeFactory.loadFactory(cache.nodeFactory.getClass().getSimpleName());
     assertThat(NodeFactory.FACTORIES).containsEntry(
         cache.nodeFactory.getClass().getSimpleName(), factory1);
@@ -2649,7 +8277,7 @@ public final class BoundedLocalCacheTest {
   }
 
   @Test
-  public void cache_unsupported() {
+  void cache_unsupported() {
     BoundedLocalCache<Object, Object> cache = Mockito.mock(CALLS_REAL_METHODS);
     var type = UnsupportedOperationException.class;
 
@@ -2666,34 +8294,26 @@ public final class BoundedLocalCacheTest {
     assertThrows(type, cache::timerWheel);
     assertThrows(type, cache::frequencySketch);
     assertThrows(type, cache::maximum);
+    assertThrows(type, cache::maximumAcquire);
     assertThrows(type, cache::windowMaximum);
     assertThrows(type, cache::mainProtectedMaximum);
     assertThrows(type, () -> cache.setMaximum(1L));
     assertThrows(type, () -> cache.setWindowMaximum(1L));
     assertThrows(type, () -> cache.setMainProtectedMaximum(1L));
     assertThrows(type, cache::weightedSize);
+    assertThrows(type, cache::weightedSizeAcquire);
     assertThrows(type, cache::windowWeightedSize);
     assertThrows(type, cache::mainProtectedWeightedSize);
     assertThrows(type, () -> cache.setWeightedSize(1L));
     assertThrows(type, () -> cache.setWindowWeightedSize(0));
     assertThrows(type, () -> cache.setMainProtectedWeightedSize(1L));
-    assertThrows(type, cache::hitsInSample);
-    assertThrows(type, cache::missesInSample);
-    assertThrows(type, cache::sampleCount);
-    assertThrows(type, cache::stepSize);
-    assertThrows(type, cache::previousSampleHitRate);
-    assertThrows(type, cache::adjustment);
-    assertThrows(type, () -> cache.setHitsInSample(1));
-    assertThrows(type, () -> cache.setMissesInSample(1));
-    assertThrows(type, () -> cache.setSampleCount(1));
-    assertThrows(type, () -> cache.setStepSize(1.0));
-    assertThrows(type, () -> cache.setPreviousSampleHitRate(1.0));
-    assertThrows(type, () -> cache.setAdjustment(1L));
+    assertThrows(type, cache::climber);
   }
 
   @Test
-  public void cleanupTask_ignore() {
-    var task = new PerformCleanupTask(null);
+  void cleanupTask_ignore() {
+    BoundedLocalCache<?, ?> cache = nullRef();
+    var task = new PerformCleanupTask(cache);
     assertThat(task.getRawResult()).isNull();
     assertThat(task.cancel(false)).isFalse();
     assertThat(task.cancel(true)).isFalse();
@@ -2702,10 +8322,10 @@ public final class BoundedLocalCacheTest {
     task.complete(null);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.SINGLETON, compute = Compute.SYNC,
       initialCapacity = {InitialCapacity.DEFAULT, InitialCapacity.FULL})
-  public void node_string(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+  void node_string(BoundedLocalCache<Int, Int> cache) {
     var node = cache.data.values().iterator().next();
     var description = node.toString();
     assertThat(description).contains("key=" + node.getKey());
@@ -2717,7 +8337,7 @@ public final class BoundedLocalCacheTest {
   }
 
   @Test
-  public void node_unsupported() {
+  void node_unsupported() {
     Node<Object, Object> node = Mockito.mock(CALLS_REAL_METHODS);
     var type = UnsupportedOperationException.class;
 
@@ -2735,15 +8355,21 @@ public final class BoundedLocalCacheTest {
   }
 
   @Test
-  public void node_ignored() {
+  void node_ignored() {
     Node<Object, Object> node = Mockito.mock(CALLS_REAL_METHODS);
+
     node.setVariableTime(1L);
+    assertThat(node.getVariableTime()).isEqualTo(0L);
+
     node.setAccessTime(1L);
+    assertThat(node.getAccessTime()).isEqualTo(0L);
+
     node.setWriteTime(1L);
+    assertThat(node.getWriteTime()).isEqualTo(0L);
   }
 
   @Test
-  public void policy_unsupported() {
+  void policy_unsupported() {
     Policy<Int, Int> policy = Mockito.mock(CALLS_REAL_METHODS);
     Eviction<Int, Int> eviction = Mockito.mock(CALLS_REAL_METHODS);
     VarExpiration<Int, Int> varExpiration = Mockito.mock(CALLS_REAL_METHODS);
@@ -2762,20 +8388,149 @@ public final class BoundedLocalCacheTest {
     assertThrows(type, () -> varExpiration.compute(Int.MAX_VALUE, (k, v) -> v, Duration.ZERO));
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = Population.SINGLETON, expiryTime = Expire.ONE_MINUTE)
-  public void expireAfterRead_disabled(BoundedLocalCache<Int, Int> cache, CacheContext context) {
-    var node = Iterables.getOnlyElement(cache.data.values());
-    long duration = cache.expireAfterRead(node, node.getKey(), node.getValue(),
-        cache.expiry(), context.ticker().read());
-    var expiresAt = cache.expiresVariable()
+  void expireAfterRead_disabled(BoundedLocalCache<Int, Int> cache, CacheContext context) {
+    var node = requireNonNull(Iterables.getOnlyElement(cache.data.values()));
+    long duration = cache.expireAfterRead(node, requireNonNull(node.getKey()),
+        requireNonNull(node.getValue()), cache.expiry(), context.ticker().read());
+    long expiresAt = cache.expiresVariable()
         ? context.ticker().read() + context.expiryTime().timeNanos()
         : 0;
     assertThat(duration).isEqualTo(expiresAt);
   }
 
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, expiry = CacheExpiry.MOCKITO)
+  void expireAfterRead_minDuration(CacheContext context) {
+    long now = context.ticker().read();
+    var cache = asBoundedLocalCache(context);
+    var node = requireNonNull(Iterables.getOnlyElement(cache.data.values()));
+    when(context.expiry().expireAfterRead(any(), any(), anyLong(), anyLong()))
+        .thenReturn(Long.MIN_VALUE);
+    long duration = cache.expireAfterRead(node, requireNonNull(node.getKey()),
+        requireNonNull(node.getValue()), cache.expiry(), now);
+    assertThat(duration).isEqualTo(now + 0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON,
+      expiry = CacheExpiry.ACCESS, expiryTime = Expire.FOREVER)
+  void expireAfterRead_maxDuration(CacheContext context) {
+    long now = context.ticker().read();
+    var cache = asBoundedLocalCache(context);
+    var node = requireNonNull(Iterables.getOnlyElement(cache.data.values()));
+    long duration = cache.expireAfterRead(node, requireNonNull(node.getKey()),
+        requireNonNull(node.getValue()), cache.expiry(), now);
+    assertThat(duration).isEqualTo(now + MAXIMUM_EXPIRY);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(mustExpireWithAnyOf = { AFTER_WRITE, VARIABLE },
+      expiry = { CacheExpiry.DISABLED, CacheExpiry.WRITE },
+      expireAfterWrite = {Expire.DISABLED, Expire.ONE_MINUTE}, expiryTime = Expire.ONE_MINUTE)
+  void expireAfterWrite_writeTime(AsyncCache<Int, Int> cache, CacheContext context) {
+    var localCache = asBoundedLocalCache(cache);
+    localCache.setDrainStatusRelease(PROCESSING_TO_REQUIRED);
+
+    var future = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), future);
+    assertThat(localCache.writeBuffer).isNotEmpty();
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    future.complete(context.absentValue());
+    assertThat(localCache.writeBuffer).isNotEmpty();
+
+    localCache.setDrainStatusRelease(REQUIRED);
+    assertThat(cache.getIfPresent(context.absentKey())).isNotNull();
+    context.ticker().advance(Duration.ofSeconds(45));
+    assertThat(cache.getIfPresent(context.absentKey())).isNotNull();
+    context.ticker().advance(Duration.ofSeconds(15));
+    assertThat(cache.getIfPresent(context.absentKey())).isNull();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.FULL, compute = Compute.SYNC,
+      expireAfterWrite = Expire.ONE_MINUTE, refreshAfterWrite = Expire.ONE_MINUTE)
+  void ageOf_masksWriteTimeTagBit(BoundedLocalCache<Int, Int> cache, CacheContext context,
+      @ExpireAfterWrite FixedExpiration<Int, Int> expireAfterWrite,
+      FixedRefresh<Int, Int> refreshAfterWrite) {
+    context.ticker().advance(Duration.ofNanos(2));
+
+    // Simulate refresh in-progress by setting the tag bit on writeTime
+    var node = requireNonNull(cache.data.get(
+        cache.nodeFactory.newLookupKey(context.firstKey())));
+    long writeTime = node.getWriteTime();
+    assertThat(node.casWriteTime(writeTime, markRefreshing(writeTime))).isTrue();
+
+    // ageOf should mask the tag bit — age should be 2ns, not 1ns or 3ns
+    assertThat(expireAfterWrite.ageOf(context.firstKey(), TimeUnit.NANOSECONDS)).hasValue(2);
+    assertThat(refreshAfterWrite.ageOf(context.firstKey(), TimeUnit.NANOSECONDS)).hasValue(2);
+
+    // Clean up corrupted state
+    assertThat(node.casWriteTime(markRefreshing(writeTime), writeTime)).isTrue();
+  }
+
   @Test
-  public void fixedExpireAfterWrite() {
+  void toWriteTime_truncatesToGranularity() {
+    assertThat(toWriteTime(0L)).isEqualTo(0L);
+    assertThat(toWriteTime(1L)).isEqualTo(0L);
+    assertThat(toWriteTime(2L)).isEqualTo(2L);
+    assertThat(toWriteTime(-1L)).isEqualTo(-2L);
+    assertThat(toWriteTime(Long.MIN_VALUE)).isEqualTo(Long.MIN_VALUE);
+    assertThat(toWriteTime(Long.MAX_VALUE)).isEqualTo(Long.MAX_VALUE - 1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, compute = Compute.SYNC,
+      expireAfterAccess = Expire.ONE_MINUTE, expireAfterWrite = Expire.ONE_MINUTE,
+      refreshAfterWrite = Expire.ONE_MINUTE)
+  void ageOf_negative(BoundedLocalCache<Int, Int> cache, CacheContext context,
+      @ExpireAfterAccess FixedExpiration<Int, Int> expireAfterAccess,
+      @ExpireAfterWrite FixedExpiration<Int, Int> expireAfterWrite,
+      FixedRefresh<Int, Int> refreshAfterWrite) {
+    var node = requireNonNull(cache.data.get(
+        cache.nodeFactory.newLookupKey(context.firstKey())));
+    long now = context.ticker().read();
+    // Model a concurrent timestamp update after the query captured its current time.
+    synchronized (node) {
+      node.setAccessTime(now + 2);
+      cache.setWriteTime(node, now + 2);
+    }
+
+    for (var unit : List.of(TimeUnit.NANOSECONDS, TimeUnit.SECONDS)) {
+      assertThat(expireAfterAccess.ageOf(context.firstKey(), unit)).isEmpty();
+      assertThat(expireAfterWrite.ageOf(context.firstKey(), unit)).isEmpty();
+      assertThat(refreshAfterWrite.ageOf(context.firstKey(), unit)).isEmpty();
+    }
+    context.ticker().advance(Duration.ofNanos(2));
+    assertThat(expireAfterAccess.ageOf(context.firstKey(), TimeUnit.NANOSECONDS)).hasValue(0);
+    assertThat(expireAfterWrite.ageOf(context.firstKey(), TimeUnit.NANOSECONDS)).hasValue(0);
+    assertThat(refreshAfterWrite.ageOf(context.firstKey(), TimeUnit.NANOSECONDS)).hasValue(0);
+  }
+
+  @Test
+  void refreshMarker_roundTrips() {
+    long writeTime = toWriteTime(100L);
+    assertThat(isRefreshing(writeTime)).isFalse();
+    assertThat(isRefreshing(markRefreshing(writeTime))).isTrue();
+    assertThat(markRefreshing(markRefreshing(writeTime))).isEqualTo(markRefreshing(writeTime));
+    assertThat(toWriteTime(markRefreshing(writeTime))).isEqualTo(writeTime);
+  }
+
+  @Test
+  void writeTimeOf_stripsTheRefreshMarker() {
+    var node = new PSW<Object, Object>();
+    node.setWriteTime(toWriteTime(100L));
+    assertThat(writeTimeOf(node)).isEqualTo(100L);
+
+    node.setWriteTime(markRefreshing(node.getWriteTime()));
+    assertThat(node.getWriteTime()).isEqualTo(101L);
+    assertThat(writeTimeOf(node)).isEqualTo(100L);
+  }
+
+  @Test
+  void fixedExpireAfterWrite() {
     int key = 1;
     int value = 2;
     long duration = TimeUnit.DAYS.toNanos(1);
@@ -2791,52 +8546,83 @@ public final class BoundedLocalCacheTest {
   }
 
   @Test
-  public void snapshotEntry() {
-    assertThat(SnapshotEntry.forEntry(1, 2)).isInstanceOf(SnapshotEntry.class);
-    assertThat(SnapshotEntry.forEntry(1, 2, 0, 1, 0, 0)).isInstanceOf(SnapshotEntry.class);
-    assertThat(SnapshotEntry.forEntry(1, 2, 0, 2, 0, 0)).isInstanceOf(WeightedEntry.class);
-    assertThat(SnapshotEntry.forEntry(1, 2, 0, 1, 3, 0)).isInstanceOf(ExpirableEntry.class);
-    assertThat(SnapshotEntry.forEntry(1, 2, 0, 2, 3, 0)).isInstanceOf(ExpirableWeightedEntry.class);
-    assertThat(SnapshotEntry.forEntry(1, 2, 0, 1, 3, 4))
-        .isInstanceOf(RefreshableExpirableEntry.class);
-    assertThat(SnapshotEntry.forEntry(1, 2, 0, 2, 3, 4)).isInstanceOf(CompleteEntry.class);
+  void snapshotEntry() {
+    assertThat(SnapshotEntry.forEntry(1, 2).getClass()).isEqualTo(SnapshotEntry.class);
+    assertThat(SnapshotEntry.forEntry(1, 2, 0, 1, 0, 0).getClass())
+        .isEqualTo(RefreshableExpirableEntry.class);
+    assertThat(SnapshotEntry.forEntry(1, 2, 0, 2, Long.MAX_VALUE, Long.MAX_VALUE).getClass())
+        .isEqualTo(WeightedEntry.class);
+    assertThat(SnapshotEntry.forEntry(1, 2, 0, 1, 3, Long.MAX_VALUE).getClass())
+        .isEqualTo(ExpirableEntry.class);
+    assertThat(SnapshotEntry.forEntry(1, 2, 0, 2, 3, Long.MAX_VALUE).getClass())
+        .isEqualTo(ExpirableWeightedEntry.class);
+    assertThat(SnapshotEntry.forEntry(1, 2, 0, 1, 3, 4).getClass())
+        .isEqualTo(RefreshableExpirableEntry.class);
+    assertThat(SnapshotEntry.forEntry(1, 2, 0, 2, 3, 4).getClass())
+        .isEqualTo(CompleteEntry.class);
   }
 
-  static <K, V> BoundedLocalCache<K, V> asBoundedLocalCache(Cache<K, V> cache) {
+  @SuppressWarnings("unchecked")
+  private static BoundedLocalCache<Object, Object> asBoundedLocalCache(CacheContext context) {
+    return (BoundedLocalCache<Object, Object>) (context.isAsync()
+        ? asBoundedLocalCache(context.asyncCache())
+        : asBoundedLocalCache(context.cache()));
+  }
+
+  private static <K, V extends @Nullable Object> BoundedLocalCache<K, V> asBoundedLocalCache(
+      Cache<K, V> cache) {
     return (BoundedLocalCache<K, V>) cache.asMap();
   }
 
-  static final class CustomBoundedLocalCache<K, V> extends BoundedLocalCache<K, V> {
-    @SuppressWarnings("unchecked")
+  @SuppressFBWarnings("PDP_POORLY_DEFINED_PARAMETER")
+  private static <K, V extends @Nullable Object> BoundedLocalCache<K, CompletableFuture<V>>
+      asBoundedLocalCache(AsyncCache<K, V> cache) {
+    var localCache = (LocalAsyncCache<K, V>) cache;
+    return (BoundedLocalCache<K, CompletableFuture<V>>) localCache.cache();
+  }
+
+  private static final class CustomBoundedLocalCache<K, V> extends BoundedLocalCache<K, V> {
+    @SuppressWarnings({"unchecked", "UnusedMethod"})
     CustomBoundedLocalCache(Caffeine<K, V> builder,
         AsyncCacheLoader<? super K, V> cacheLoader, boolean async) {
       super(builder, (AsyncCacheLoader<K, V>) cacheLoader, async);
     }
   }
-  static final class BadBoundedLocalCache<K, V> extends BoundedLocalCache<K, V> {
+
+  @SuppressWarnings("unused")
+  private static final class BadBoundedLocalCache<K, V> extends BoundedLocalCache<K, V> {
     static final LocalCacheFactory FACTORY = BadBoundedLocalCache::new;
 
     @SuppressWarnings("unchecked")
     BadBoundedLocalCache(Caffeine<K, V> builder,
-        AsyncCacheLoader<? super K, V> cacheLoader, boolean async) {
+        @Nullable AsyncCacheLoader<? super K, V> cacheLoader, boolean async) {
       super(builder, (AsyncCacheLoader<K, V>) cacheLoader, async);
       throw new IllegalStateException();
     }
   }
-  static final class BadLocalCacheFactory implements LocalCacheFactory {
+
+  @SuppressWarnings("unused")
+  private static final class BadLocalCacheFactory implements LocalCacheFactory {
     @Override public <K, V> BoundedLocalCache<K, V> newInstance(Caffeine<K, V> builder,
-        AsyncCacheLoader<? super K, V> cacheLoader, boolean async) throws Throwable {
+        @Nullable AsyncCacheLoader<? super K, V> cacheLoader, boolean async) {
       throw new IllegalStateException();
     }
   }
-  static final class BadNode extends Node<Object, Object> {
-    public BadNode() {
+
+  @NullUnmarked
+  @SuppressWarnings("UnusedNestedClass")
+  private static final class BadNode extends Node<@NonNull Object, @NonNull Object> {
+    @SuppressWarnings("unused")
+    BadNode() {
       throw new IllegalStateException();
     }
     @Override public Object getKey() {
       return null;
     }
     @Override public Object getKeyReference() {
+      return null;
+    }
+    @Override public Object getKeyReferenceOrNull() {
       return null;
     }
     @Override public Object getValue() {

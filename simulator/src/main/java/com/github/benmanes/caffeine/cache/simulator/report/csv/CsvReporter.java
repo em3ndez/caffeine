@@ -17,7 +17,8 @@ package com.github.benmanes.caffeine.cache.simulator.report.csv;
 
 import static java.util.Locale.US;
 
-import java.io.StringWriter;
+import java.io.IOException;
+import java.io.Writer;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -27,10 +28,9 @@ import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.github.benmanes.caffeine.cache.simulator.report.Metrics;
 import com.github.benmanes.caffeine.cache.simulator.report.TextReporter;
 import com.google.common.base.Stopwatch;
-import com.google.common.base.Strings;
 import com.typesafe.config.Config;
-import com.univocity.parsers.csv.CsvWriter;
-import com.univocity.parsers.csv.CsvWriterSettings;
+
+import de.siegmar.fastcsv.writer.CsvWriter;
 
 /**
  * A plain text report that prints comma-separated values.
@@ -40,36 +40,28 @@ import com.univocity.parsers.csv.CsvWriterSettings;
 public final class CsvReporter extends TextReporter {
 
   public CsvReporter(Config config, Set<Characteristic> characteristics) {
-    super(config, characteristics);
-  }
-
-  @Override
-  protected String assemble(Set<String> headers, List<PolicyStats> results) {
-    StringWriter output = new StringWriter();
-    CsvWriter writer = new CsvWriter(output, new CsvWriterSettings());
-    writer.writeHeaders(headers);
-    for (PolicyStats policyStats : results) {
-      String[] data = headers.stream()
-          .map(policyStats.metrics()::get)
-          .map(metrics()::format)
-          .map(Strings::emptyToNull)
-          .toArray(String[]::new);
-      writer.writeRow(data);
-    }
-    writer.close();
-    return output.toString();
-  }
-
-  @Override
-  protected Metrics metrics() {
-    return Metrics.builder()
+    var metrics = Metrics.builder()
         .percentFormatter(value -> String.format(US, "%.2f", 100 * value))
         .doubleFormatter(value -> String.format(US, "%.2f", value))
-        .longFormatter(value -> String.format(US, "%d", value))
-        .objectFormatter(object -> {
-          return (object instanceof Stopwatch)
-              ? Long.toString(((Stopwatch) object).elapsed(TimeUnit.MILLISECONDS))
-              : object.toString();
-        }).build();
+        .longFormatter(Long::toString)
+        .objectFormatter(object -> (object instanceof Stopwatch stopwatch)
+            ? Long.toString(stopwatch.elapsed(TimeUnit.MILLISECONDS))
+            : (object == null) ? "" : object.toString())
+        .build();
+    super(config, characteristics, metrics);
+  }
+
+  @Override
+  protected void write(Writer writer,
+      Set<String> headers, List<PolicyStats> results) throws IOException {
+    try (var csv = CsvWriter.builder().build(writer)) {
+      csv.writeRecord(headers);
+      for (PolicyStats policyStats : results) {
+        csv.writeRecord(headers.stream()
+            .map(policyStats.metrics()::get)
+            .map(metrics()::format)
+            .toList());
+      }
+    }
   }
 }

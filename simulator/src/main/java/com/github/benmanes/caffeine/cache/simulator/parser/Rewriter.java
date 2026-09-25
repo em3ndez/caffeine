@@ -15,19 +15,25 @@
  */
 package com.github.benmanes.caffeine.cache.simulator.parser;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Locale.US;
+import static org.apache.commons.lang3.StringUtils.substringBefore;
 
 import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Objects;
+
+import org.apache.commons.lang3.function.Failable;
+import org.apache.commons.lang3.mutable.MutableInt;
 
 import com.google.common.base.CaseFormat;
+import com.google.common.base.Splitter;
 import com.google.common.base.Stopwatch;
-import com.google.common.collect.Lists;
 
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -38,18 +44,17 @@ import picocli.CommandLine.Option;
  * A simple utility to rewrite traces into the format used by other simulators. This lets us run
  * multiple simulators in parallel for a quick-and-dirty analysis, rather than port their code into
  * Java.
- * <p>
- * <pre>{@code
- *   ./gradlew :simulator:rewrite -q \
- *      --inputFormat=? \
- *      --inputFiles=? \
- *      --outputFile=? \
- *      --outputFormat=?
- * }</pre>
+ * {@snippet lang="shell" :
+ * ./gradlew :simulator:rewrite -q \
+ *    --inputFormat=? \
+ *    --inputFiles=? \
+ *    --outputFile=? \
+ *    --outputFormat=?
+ * }
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@SuppressWarnings("PMD.ImmutableField")
+@SuppressWarnings({"NotNullFieldNotInitialized", "unused"})
 @Command(mixinStandardHelpOptions = true)
 public final class Rewriter implements Runnable {
   @Option(names = "--inputFiles", required = true, split = ",", description = "The trace input "
@@ -65,23 +70,21 @@ public final class Rewriter implements Runnable {
 
   @Override
   public void run() {
+    checkOutputIsNotAnInput();
     var stopwatch = Stopwatch.createStarted();
     try (var output = new BufferedOutputStream(Files.newOutputStream(outputFile));
-         var events = inputFormat.readFiles(inputFiles).events();
-         var writer = outputFormat.writer(output)) {
-      int[] tick = { 0 };
+         var reader = inputFormat.readFiles(inputFiles);
+         var writer = outputFormat.writer(output);
+         var events = reader.events()) {
       writer.writeHeader();
-      events.forEach(event -> {
-        try {
-          writer.writeEvent(tick[0], event);
-          tick[0]++;
-        } catch (IOException e) {
-          throw new UncheckedIOException(e);
-        }
-      });
+      var count = new MutableInt();
+      events.forEachOrdered(Failable.asConsumer(event -> {
+        writer.writeEvent(event);
+        count.increment();
+      }));
       writer.writeFooter();
       System.out.printf(US, "Rewrote %,d events from %,d input(s) in %s%n",
-          tick[0], inputFiles.size(), stopwatch);
+          count.intValue(), inputFiles.size(), stopwatch);
       System.out.printf(US, "Output in %s format to %s%n",
           CaseFormat.UPPER_UNDERSCORE.to(CaseFormat.LOWER_HYPHEN, outputFormat.name()), outputFile);
     } catch (IOException e) {
@@ -89,29 +92,45 @@ public final class Rewriter implements Runnable {
     }
   }
 
-  private static String[] argumentsWithDefaults(String[] args) {
-    var params = Lists.newArrayList(args);
-    if (!params.contains("--inputFormat")) {
-      boolean found = false;
-      boolean defaultFormat = true;
-      for (int i = 0; i < args.length - 1; i++) {
-        if (Objects.equals(args[i], "--inputFiles")) {
-          defaultFormat &= args[i + 1].contains(":");
-          found = true;
-        }
+  /** Fails if the output is also an input, which opening it for writing would truncate. */
+  private void checkOutputIsNotAnInput() {
+    if (!Files.exists(outputFile)) {
+      return;
+    }
+    for (var entry : inputFiles) {
+      var input = Path.of(Splitter.on(':').limit(2).splitToList(entry).getLast());
+      try {
+        checkArgument(!Files.exists(input) || !Files.isSameFile(input, outputFile),
+            "The output file is also an input file: %s", entry);
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
       }
-      if (found && defaultFormat) {
-        params.addAll(List.of("--inputFormat", TraceFormat.values()[0].name()));
+    }
+  }
+
+  @SuppressWarnings("ConstantValue")
+  private static String[] argumentsWithDefaults(String[] args) {
+    var params = new ArrayList<>(Arrays.asList(args));
+    if (params.contains("--inputFormat")) {
+      return args;
+    }
+    int index = params.indexOf("--inputFiles");
+    if ((index != -1) && (index < (args.length - 1))) {
+      var format = substringBefore(args[index + 1], ':');
+      if (format != null) {
+        params.addAll(List.of("--inputFormat", TraceFormat.named(format).name()));
       }
     }
     return params.toArray(String[]::new);
   }
 
-  public static void main(String[] args) {
-    new CommandLine(Rewriter.class)
+  @SuppressWarnings("SystemExitOutsideMain")
+  static void main(String[] args) {
+    int exitCode = new CommandLine(Rewriter.class)
         .setColorScheme(Help.defaultColorScheme(Help.Ansi.ON))
         .setCommandName(Rewriter.class.getSimpleName())
         .setCaseInsensitiveEnumValuesAllowed(true)
         .execute(argumentsWithDefaults(args));
+    System.exit(exitCode);
   }
 }

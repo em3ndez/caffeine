@@ -22,7 +22,7 @@ import java.io.Serializable;
 import java.time.Duration;
 import java.util.function.BiFunction;
 
-import org.checkerframework.checker.index.qual.NonNegative;
+import org.jspecify.annotations.NullMarked;
 
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 
@@ -31,17 +31,14 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
  * of an entry may be extended or reduced by subsequent evaluations.
  * <p>
  * Usage example:
- * <pre>{@code
- *   LoadingCache<Key, Graph> cache = Caffeine.newBuilder()
- *       .expireAfter(Expiry.creating((Key key, Graph graph) ->
- *           Duration.between(Instant.now(), graph.createdOn().plusHours(5))))
- *       .build(key -> createExpensiveGraph(key));
- * }</pre>
+ * {@snippet class=com.github.benmanes.caffeine.cache.Snippets region=expiry lang=java}
  *
  * @param <K> the type of keys
  * @param <V> the type of values
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@NullMarked
+@SuppressWarnings({"JavadocDeclaration", "JavadocReference"})
 public interface Expiry<K, V> {
 
   /**
@@ -76,7 +73,7 @@ public interface Expiry<K, V> {
    * @param currentDuration the entry's current duration, in nanoseconds
    * @return the length of time before the entry expires, in nanoseconds
    */
-  long expireAfterUpdate(K key, V value, long currentTime, @NonNegative long currentDuration);
+  long expireAfterUpdate(K key, V value, long currentTime, long currentDuration);
 
   /**
    * Specifies that the entry should be automatically removed from the cache once the duration has
@@ -94,17 +91,13 @@ public interface Expiry<K, V> {
    * @param currentDuration the entry's current duration, in nanoseconds
    * @return the length of time before the entry expires, in nanoseconds
    */
-  long expireAfterRead(K key, V value, long currentTime, @NonNegative long currentDuration);
+  long expireAfterRead(K key, V value, long currentTime, long currentDuration);
 
   /**
    * Returns an {@code Expiry} that specifies that the entry should be automatically removed from
    * the cache once the duration has elapsed after the entry's creation. The expiration time is
    * not modified when the entry is updated or read.
-   *
-   * <pre>{@code
-   * Expiry<Key, Graph> expiry = Expiry.creating((key, graph) ->
-   *     Duration.between(Instant.now(), graph.createdOn().plusHours(5)));
-   * }</pre>
+   * {@snippet class=com.github.benmanes.caffeine.cache.Snippets region=expiry_creating lang=java}
    *
    * @param <K> the key type
    * @param <V> the value type
@@ -120,11 +113,7 @@ public interface Expiry<K, V> {
    * Returns an {@code Expiry} that specifies that the entry should be automatically removed from
    * the cache once the duration has elapsed after the entry's creation or replacement of its value.
    * The expiration time is not modified when the entry is read.
-   *
-   * <pre>{@code
-   * Expiry<Key, Graph> expiry = Expiry.writing((key, graph) ->
-   *     Duration.between(Instant.now(), graph.modifiedOn().plusHours(5)));
-   * }</pre>
+   * {@snippet class=com.github.benmanes.caffeine.cache.Snippets region=expiry_writing lang=java}
    *
    * @param <K> the key type
    * @param <V> the value type
@@ -140,11 +129,7 @@ public interface Expiry<K, V> {
    * Returns an {@code Expiry} that specifies that the entry should be automatically removed from
    * the cache once the duration has elapsed after the entry's creation, replacement of its value,
    * or after it was last read.
-   *
-   * <pre>{@code
-   * Expiry<Key, Graph> expiry = Expiry.accessing((key, graph) ->
-   *     graph.isDirected() ? Duration.ofHours(1) : Duration.ofHours(3));
-   * }</pre>
+   * {@snippet class=com.github.benmanes.caffeine.cache.Snippets region=expiry_accessing lang=java}
    *
    * @param <K> the key type
    * @param <V> the value type

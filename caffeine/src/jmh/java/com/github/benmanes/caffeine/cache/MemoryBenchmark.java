@@ -15,23 +15,35 @@
  */
 package com.github.benmanes.caffeine.cache;
 
+import static com.github.freva.asciitable.AsciiTable.FANCY_ASCII;
+import static com.github.freva.asciitable.HorizontalAlign.LEFT;
+import static com.github.freva.asciitable.HorizontalAlign.RIGHT;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static java.math.RoundingMode.HALF_EVEN;
 import static java.util.Locale.US;
 import static java.util.function.Function.identity;
 
-import java.math.RoundingMode;
 import java.time.Duration;
 import java.util.Map;
+import java.util.function.ToLongFunction;
 import java.util.stream.IntStream;
 
 import org.github.jamm.MemoryMeter;
+import org.jspecify.annotations.Nullable;
+import org.openjdk.jol.info.GraphLayout;
 
+import com.github.freva.asciitable.AsciiTable;
+import com.github.freva.asciitable.Column;
 import com.google.common.base.Functions;
+import com.google.common.base.Supplier;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.math.LongMath;
-import com.jakewharton.fliptables.FlipTable;
+import com.google.errorprone.annotations.Var;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * A non-JMH benchmark to compare the memory overhead of different cache implementations. Note that
@@ -39,22 +51,30 @@ import com.jakewharton.fliptables.FlipTable;
  * references if the benchmark is executed with a heap under 32GB. This can mean that object
  * padding may or may not have a visible effect.
  * <p>
- * This benchmark requires a JavaAgent to evaluate the object sizes and can be executed using
- * <tt>gradle -q memoryOverhead</tt>.
+ * This benchmark requires a JavaAgent to evaluate the object sizes and can be executed using:
+ * {@snippet lang="shell" :
+ * ./gradlew memoryOverhead -q --rerun
+ * }
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@SuppressWarnings({"LexicographicalAnnotationAttributeListing", "PMD.MethodNamingConventions"})
+@SuppressWarnings({"IdentifierName", "LexicographicalAnnotationAttributeListing",
+    "JavadocDeclaration", "PMD.MethodNamingConventions", "SystemOut"})
 public final class MemoryBenchmark {
   // The number of entries added to minimize skew due to non-entry factors
-  static final int FUZZY_SIZE = 25_000;
+  private static final int FUZZY_SIZE = 25_000;
   // The maximum size, which is larger than the fuzzy factor due to Guava's early eviction
-  static final int MAXIMUM_SIZE = 2 * FUZZY_SIZE;
+  private static final int MAXIMUM_SIZE = 2 * FUZZY_SIZE;
   // The pre-computed entries to store into the cache when computing the per-entry overhead
-  static final ImmutableMap<Integer, Integer> workingSet = IntStream.range(0, FUZZY_SIZE)
+  private static final ImmutableMap<Integer, Integer> workingSet = IntStream.range(0, FUZZY_SIZE)
       .boxed().collect(toImmutableMap(identity(), i -> -i));
+  private static final ImmutableList<String> HEADERS = ImmutableList.of(
+      "Cache",
+      "Baseline (MemoryMeter)", "Per Entry (MemoryMeter)",
+      "Baseline (ObjectLayout)", "Per Entry (ObjectLayout)");
 
-  final MemoryMeter meter = MemoryMeter.builder().build();
+  final MemoryMeter meter = MemoryMeter.builder().measureNonStrongReferences().build();
+  final ToLongFunction<Object> layout = object -> GraphLayout.parseInstance(object).totalSize();
 
   public void run() {
     if (!MemoryMeter.hasInstrumentation()) {
@@ -77,163 +97,181 @@ public final class MemoryBenchmark {
     softValues();
   }
 
-  private Caffeine<Object, Object> builder() {
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private static Caffeine<Integer, Integer> caffeineBuilder() {
     // Avoid counting ForkJoinPool in estimates
-    return Caffeine.newBuilder().executor(Runnable::run);
+    return (Caffeine) Caffeine.newBuilder().executor(Runnable::run);
+  }
+
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private static CacheBuilder<Integer, Integer> guavaBuilder() {
+    return (CacheBuilder) CacheBuilder.newBuilder();
   }
 
   private void unbounded() {
-    Cache<Integer, Integer> caffeine = builder().build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder().build();
-    compare("Unbounded", caffeine, guava);
+    var caffeine = caffeineBuilder();
+    var guava = guavaBuilder();
+    compare("Unbounded", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void maximumSize() {
-    Cache<Integer, Integer> caffeine = builder().maximumSize(MAXIMUM_SIZE).build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
-        .maximumSize(MAXIMUM_SIZE).build();
-    compare("Maximum Size", caffeine, guava);
+    var caffeine = caffeineBuilder().maximumSize(MAXIMUM_SIZE);
+    var guava = guavaBuilder().maximumSize(MAXIMUM_SIZE);
+    compare("Maximum Size", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void maximumWeight() {
-    Cache<Integer, Integer> caffeine = builder()
-        .maximumWeight(MAXIMUM_SIZE).weigher((k, v) -> 1).build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
-        .maximumWeight(MAXIMUM_SIZE).weigher((k, v) -> 1).build();
-    compare("Maximum Weight", caffeine, guava);
+    var caffeine = caffeineBuilder().maximumWeight(MAXIMUM_SIZE).weigher((k, v) -> 1);
+    var guava = guavaBuilder().maximumWeight(MAXIMUM_SIZE).weigher((k, v) -> 1);
+    compare("Maximum Weight", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void maximumSize_expireAfterAccess() {
-    Cache<Integer, Integer> caffeine = builder()
+    var caffeine = caffeineBuilder()
         .expireAfterAccess(Duration.ofMinutes(1))
-        .maximumSize(MAXIMUM_SIZE)
-        .build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
+        .maximumSize(MAXIMUM_SIZE);
+    var guava = guavaBuilder()
         .expireAfterAccess(Duration.ofMinutes(1))
-        .maximumSize(MAXIMUM_SIZE)
-        .build();
-    compare("Maximum Size & Expire after Access", caffeine, guava);
+        .maximumSize(MAXIMUM_SIZE);
+    compare("Maximum Size & Expire after Access",
+        () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void maximumSize_expireAfterWrite() {
-    Cache<Integer, Integer> caffeine = builder()
+    var caffeine = caffeineBuilder()
         .expireAfterWrite(Duration.ofMinutes(1))
-        .maximumSize(MAXIMUM_SIZE)
-        .build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
+        .maximumSize(MAXIMUM_SIZE);
+    var guava = guavaBuilder()
         .expireAfterWrite(Duration.ofMinutes(1))
-        .maximumSize(MAXIMUM_SIZE)
-        .build();
-    compare("Maximum Size & Expire after Write", caffeine, guava);
+        .maximumSize(MAXIMUM_SIZE);
+    compare("Maximum Size & Expire after Write",
+        () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void maximumSize_refreshAfterWrite() {
-    Cache<Integer, Integer> caffeine = builder()
+    var caffeine = caffeineBuilder()
         .refreshAfterWrite(Duration.ofMinutes(1))
-        .maximumSize(MAXIMUM_SIZE)
-        .build(k -> k);
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
+        .maximumSize(MAXIMUM_SIZE);
+    var guava = guavaBuilder()
         .refreshAfterWrite(Duration.ofMinutes(1))
-        .maximumSize(MAXIMUM_SIZE)
-        .build(CacheLoader.from(Functions.identity()));
-    compare("Maximum Size & Refresh after Write", caffeine, guava);
+        .maximumSize(MAXIMUM_SIZE);
+    compare("Maximum Size & Refresh after Write", () -> caffeine.build(k -> k).asMap(),
+        () -> guava.build(CacheLoader.from(Functions.identity())).asMap());
   }
 
   private void expireAfterAccess() {
-    Cache<Integer, Integer> caffeine = builder()
-        .expireAfterAccess(Duration.ofMinutes(1)).build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
-        .expireAfterAccess(Duration.ofMinutes(1)).build();
-    compare("Expire after Access", caffeine, guava);
+    var caffeine = caffeineBuilder().expireAfterAccess(Duration.ofMinutes(1));
+    var guava = guavaBuilder().expireAfterAccess(Duration.ofMinutes(1));
+    compare("Expire after Access", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void expireAfterWrite() {
-    Cache<Integer, Integer> caffeine = builder()
-        .expireAfterWrite(Duration.ofMinutes(1)).build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
-        .expireAfterWrite(Duration.ofMinutes(1)).build();
-    compare("Expire after Write", caffeine, guava);
+    var caffeine = caffeineBuilder().expireAfterWrite(Duration.ofMinutes(1));
+    var guava = guavaBuilder().expireAfterWrite(Duration.ofMinutes(1));
+    compare("Expire after Write", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void expireAfterAccess_expireAfterWrite() {
-    Cache<Integer, Integer> caffeine = builder()
+    var caffeine = caffeineBuilder()
         .expireAfterAccess(Duration.ofMinutes(1))
-        .expireAfterWrite(Duration.ofMinutes(1))
-        .build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
+        .expireAfterWrite(Duration.ofMinutes(1));
+    var guava = guavaBuilder()
         .expireAfterAccess(Duration.ofMinutes(1))
-        .expireAfterWrite(Duration.ofMinutes(1))
-        .build();
-    compare("Expire after Access & after Write", caffeine, guava);
+        .expireAfterWrite(Duration.ofMinutes(1));
+    compare("Expire after Access & after Write",
+        () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void weakKeys() {
-    Cache<Integer, Integer> caffeine = builder().weakKeys().build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
-        .weakKeys().build();
-    compare("Weak Keys", caffeine, guava);
+    var caffeine = caffeineBuilder().weakKeys();
+    var guava = guavaBuilder().weakKeys();
+    compare("Weak Keys", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void weakValues() {
-    Cache<Integer, Integer> caffeine = builder().weakValues().build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
-        .weakValues().build();
-    compare("Weak Values", caffeine, guava);
+    var caffeine = caffeineBuilder().weakValues();
+    var guava = guavaBuilder().weakValues();
+    compare("Weak Values", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void weakKeys_weakValues() {
-    Cache<Integer, Integer> caffeine = builder().weakKeys().weakValues().build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
-        .weakKeys().weakValues().build();
-    compare("Weak Keys & Weak Values", caffeine, guava);
+    var caffeine = caffeineBuilder().weakKeys().weakValues();
+    var guava = guavaBuilder().weakKeys().weakValues();
+    compare("Weak Keys & Weak Values", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void weakKeys_softValues() {
-    Cache<Integer, Integer> caffeine = builder().weakKeys().softValues().build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
-        .weakKeys().softValues().build();
-    compare("Weak Keys & Soft Values", caffeine, guava);
+    var caffeine = caffeineBuilder().weakKeys().softValues();
+    var guava = guavaBuilder().weakKeys().softValues();
+    compare("Weak Keys & Soft Values", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
   private void softValues() {
-    Cache<Integer, Integer> caffeine = builder().softValues().build();
-    com.google.common.cache.Cache<Integer, Integer> guava = CacheBuilder.newBuilder()
-        .softValues().build();
-    compare("Soft Values", caffeine, guava);
+    var caffeine = caffeineBuilder().softValues();
+    var guava = guavaBuilder().softValues();
+    compare("Soft Values", () -> caffeine.build().asMap(), () -> guava.build().asMap());
   }
 
-  private void compare(String label, Cache<Integer, Integer> caffeine,
-      com.google.common.cache.Cache<Integer, Integer> guava) {
-    caffeine.cleanUp();
-    guava.cleanUp();
-
-    int leftPadded = Math.max((36 - label.length()) / 2 - 1, 1);
-    System.out.printf(US, " %2$-" + leftPadded + "s %s%n", label, " ");
-    String result = FlipTable.of(new String[] { "Cache", "Baseline", "Per Entry" }, new String[][] {
-        evaluate("Caffeine", caffeine.asMap()),
-        evaluate("Guava", guava.asMap())
+  @SuppressFBWarnings("FORMAT_STRING_MANIPULATION")
+  private void compare(String label,
+      Supplier<Map<Integer, Integer>> caffeine, Supplier<Map<Integer, Integer>> guava) {
+    var columns = HEADERS.stream()
+        .map(header -> new Column()
+            .header(header)
+            .dataAlign(header.equals("Cache") ? LEFT : RIGHT))
+        .toArray(Column[]::new);
+    var result = AsciiTable.getTable(FANCY_ASCII, columns, new @Nullable String[][] {
+      formatRow("Caffeine", evaluate(caffeine, meter::measureDeep), evaluate(caffeine, layout)),
+      formatRow("Guava", evaluate(guava, meter::measureDeep), evaluate(guava, layout))
     });
+    int leftPadded = Math.max((116 - label.length()) / 2 - 1, 1);
+    System.out.printf(US, " %2$-" + leftPadded + "s %s%n", label, " ");
     System.out.println(result);
   }
 
-  private String[] evaluate(String label, Map<Integer, Integer> map) {
-    long base = meter.measureDeep(map);
-    map.putAll(workingSet);
+  private static Evaluation evaluate(Supplier<Map<Integer, Integer>> supplier,
+      ToLongFunction<Object> evaluator) {
+    var map = supplier.get();
+    long initial = evaluator.applyAsLong(map);
 
-    long populated = meter.measureDeep(map);
-    long entryOverhead = 2 * FUZZY_SIZE * meter.measureDeep(workingSet.keySet().iterator().next());
-    long perEntry = LongMath.divide(populated - entryOverhead - base,
-        FUZZY_SIZE, RoundingMode.HALF_EVEN);
+    map.putAll(workingSet);
+    long populated = evaluator.applyAsLong(map);
+
+    map.clear();
+    long base = evaluator.applyAsLong(map);
+
+    long entryOverhead = 2 * FUZZY_SIZE
+        * evaluator.applyAsLong(workingSet.keySet().iterator().next());
+    @Var long perEntry = LongMath.divide(populated - entryOverhead - base, FUZZY_SIZE, HALF_EVEN);
     perEntry += ((perEntry & 1) == 0) ? 0 : 1;
     long aligned = ((perEntry % 8) == 0) ? perEntry : ((1 + perEntry / 8) * 8);
+
+    return new Evaluation(initial, perEntry, aligned);
+  }
+
+  private static String[] formatRow(String label, Evaluation memoryMeter, Evaluation layout) {
     return new String[] {
         label,
-        String.format(US, "%,d bytes", base),
-        String.format(US, "%,d bytes (%,d aligned)", perEntry, aligned)
+        String.format(US, "%,d bytes", memoryMeter.base),
+        String.format(US, "%,d bytes (%,d aligned)", memoryMeter.perEntry, memoryMeter.aligned),
+        String.format(US, "%,d bytes", layout.base),
+        String.format(US, "%,d bytes (%,d aligned)", layout.perEntry, layout.aligned)
     };
   }
 
   public static void main(String[] args) {
     new MemoryBenchmark().run();
+  }
+
+  private static final class Evaluation {
+    final long perEntry;
+    final long aligned;
+    final long base;
+
+    Evaluation(long base, long perEntry, long aligned) {
+      this.perEntry = perEntry;
+      this.aligned = aligned;
+      this.base = base;
+    }
   }
 }

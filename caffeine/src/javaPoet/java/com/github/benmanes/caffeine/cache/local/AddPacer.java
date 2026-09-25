@@ -20,26 +20,28 @@ import static com.github.benmanes.caffeine.cache.Specifications.PACER;
 import javax.lang.model.element.Modifier;
 
 import com.github.benmanes.caffeine.cache.Feature;
-import com.squareup.javapoet.FieldSpec;
-import com.squareup.javapoet.MethodSpec;
+import com.github.benmanes.caffeine.cache.Rule;
+import com.palantir.javapoet.FieldSpec;
+import com.palantir.javapoet.MethodSpec;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class AddPacer extends LocalCacheRule {
+public final class AddPacer implements Rule<LocalCacheContext> {
 
   @Override
-  protected boolean applies() {
-    return !(Feature.usesExpiration(context.parentFeatures)
-        || !Feature.usesExpiration(context.generateFeatures));
+  public boolean applies(LocalCacheContext context) {
+    return !Feature.usesExpiration(context.parentFeatures)
+        && Feature.usesExpiration(context.generateFeatures);
   }
 
   @Override
-  protected void execute() {
-    context.constructor.addStatement("this.pacer = ($1L == $2L)\n? null\n: new Pacer($1L)",
-        "builder.getScheduler()", "Scheduler.disabledScheduler()");
-    context.cache.addField(FieldSpec.builder(PACER, "pacer", Modifier.FINAL).build());
-    context.cache.addMethod(MethodSpec.methodBuilder("pacer")
+  public void execute(LocalCacheContext context) {
+    context.constructor.addStatement("Scheduler scheduler = builder.getScheduler()");
+    context.constructor.addStatement("this.pacer = (scheduler == Scheduler.disabledScheduler())"
+        + "\n? null\n: new Pacer(scheduler)");
+    context.classSpec.addField(FieldSpec.builder(PACER, "pacer", Modifier.FINAL).build());
+    context.classSpec.addMethod(MethodSpec.methodBuilder("pacer")
         .addModifiers(context.publicFinalModifiers())
         .addStatement("return pacer")
         .returns(PACER)

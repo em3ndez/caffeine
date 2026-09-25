@@ -16,24 +16,26 @@
 package com.github.benmanes.caffeine.cache;
 
 import static com.github.benmanes.caffeine.cache.Caffeine.calculateHashMapCapacity;
-import static com.github.benmanes.caffeine.cache.LocalAsyncCache.composeResult; // NOPMD
+import static com.github.benmanes.caffeine.cache.Caffeine.hasMethodOverride;
+import static com.github.benmanes.caffeine.cache.Caffeine.toUnchecked;
+import static com.github.benmanes.caffeine.cache.LocalAsyncCache.composeResult;
+import static com.github.benmanes.caffeine.cache.LocalCache.nullRef;
 import static java.util.Objects.requireNonNull;
 
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.lang.reflect.Method;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
-import java.util.function.Function;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
+
+import com.google.errorprone.annotations.Var;
 
 /**
  * This class provides a skeletal implementation of the {@link AsyncLoadingCache} interface to
@@ -61,18 +63,16 @@ abstract class LocalAsyncLoadingCache<K, V>
   }
 
   /** Returns a mapping function that adapts to {@link AsyncCacheLoader#asyncLoad}. */
-  BiFunction<? super K, ? super Executor, ? extends CompletableFuture<? extends V>> newMappingFunction(
-      AsyncCacheLoader<? super K, V> cacheLoader) {
+  BiFunction<
+      ? super K,
+      ? super Executor,
+      ? extends CompletableFuture<? extends V>> newMappingFunction(
+          AsyncCacheLoader<? super K, V> cacheLoader) {
     return (key, executor) -> {
       try {
         return cacheLoader.asyncLoad(key, executor);
-      } catch (RuntimeException e) {
-        throw e;
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new CompletionException(e);
       } catch (Exception e) {
-        throw new CompletionException(e);
+        throw toUnchecked(e);
       }
     };
   }
@@ -81,9 +81,8 @@ abstract class LocalAsyncLoadingCache<K, V>
    * Returns a mapping function that adapts to {@link AsyncCacheLoader#asyncLoadAll}, if
    * implemented.
    */
-  @Nullable
-  BiFunction<Set<? extends K>, Executor, CompletableFuture<Map<K, V>>> newBulkMappingFunction(
-      AsyncCacheLoader<? super K, V> cacheLoader) {
+  @Nullable BiFunction<Set<? extends K>, Executor, CompletableFuture<Map<K, V>>>
+      newBulkMappingFunction(AsyncCacheLoader<? super K, V> cacheLoader) {
     if (!canBulkLoad(cacheLoader)) {
       return null;
     }
@@ -92,40 +91,23 @@ abstract class LocalAsyncLoadingCache<K, V>
         @SuppressWarnings("unchecked")
         var loaded = (CompletableFuture<Map<K, V>>) cacheLoader.asyncLoadAll(keysToLoad, executor);
         return loaded;
-      } catch (RuntimeException e) {
-        throw e;
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new CompletionException(e);
       } catch (Exception e) {
-        throw new CompletionException(e);
+        throw toUnchecked(e);
       }
     };
   }
 
   /** Returns whether the supplied cache loader has bulk load functionality. */
   boolean canBulkLoad(AsyncCacheLoader<?, ?> loader) {
-    try {
-      Class<?> defaultLoaderClass = AsyncCacheLoader.class;
-      if (loader instanceof CacheLoader<?, ?>) {
-        defaultLoaderClass = CacheLoader.class;
-
-        Method classLoadAll = loader.getClass().getMethod("loadAll", Set.class);
-        Method defaultLoadAll = CacheLoader.class.getMethod("loadAll", Set.class);
-        if (!classLoadAll.equals(defaultLoadAll)) {
-          return true;
-        }
+    @Var Class<?> defaultLoaderClass = AsyncCacheLoader.class;
+    if (loader instanceof CacheLoader<?, ?>) {
+      defaultLoaderClass = CacheLoader.class;
+      if (hasMethodOverride(defaultLoaderClass, loader, "loadAll", Set.class)) {
+        return true;
       }
-
-      Method classAsyncLoadAll = loader.getClass().getMethod(
-          "asyncLoadAll", Set.class, Executor.class);
-      Method defaultAsyncLoadAll = defaultLoaderClass.getMethod(
-          "asyncLoadAll", Set.class, Executor.class);
-      return !classAsyncLoadAll.equals(defaultAsyncLoadAll);
-    } catch (NoSuchMethodException | SecurityException e) {
-      logger.log(Level.WARNING, "Cannot determine if CacheLoader can bulk load", e);
-      return false;
     }
+    return hasMethodOverride(defaultLoaderClass,
+        loader, "asyncLoadAll", Set.class, Executor.class);
   }
 
   @Override
@@ -139,18 +121,26 @@ abstract class LocalAsyncLoadingCache<K, V>
       return getAll(keys, bulkMappingFunction);
     }
 
-    Function<K, CompletableFuture<V>> mappingFunction = this::get;
-    var result = new LinkedHashMap<K, CompletableFuture<V>>(calculateHashMapCapacity(keys));
+    int initialCapacity = calculateHashMapCapacity(keys);
+    var result = new LinkedHashMap<K, @Nullable CompletableFuture<@Nullable V>>(initialCapacity);
     for (K key : keys) {
-      var future = result.computeIfAbsent(key, mappingFunction);
-      requireNonNull(future);
+      result.put(requireNonNull(key), null);
     }
-    return composeResult(result);
+    for (var entry : result.entrySet()) {
+      @SuppressWarnings("NullAway")
+      CompletableFuture<@Nullable V> castedFuture = get(entry.getKey());
+      entry.setValue(castedFuture);
+    }
+
+    @SuppressWarnings("NullAway")
+    Map<K, CompletableFuture<@Nullable V>> results = result;
+    return composeResult(results);
   }
 
   @Override
   public LoadingCache<K, V> synchronous() {
-    return (cacheView == null) ? (cacheView = new LoadingCacheView<>(this)) : cacheView;
+    var cv = cacheView;
+    return (cv == null) ? (cacheView = new LoadingCacheView<>(this)) : cv;
   }
 
   /* --------------- Synchronous views --------------- */
@@ -172,13 +162,11 @@ abstract class LocalAsyncLoadingCache<K, V>
     }
 
     @Override
-    @SuppressWarnings("PMD.PreserveStackTrace")
     public V get(K key) {
       return resolve(asyncCache.get(key));
     }
 
     @Override
-    @SuppressWarnings("PMD.PreserveStackTrace")
     public Map<K, V> getAll(Iterable<? extends K> keys) {
       return resolve(asyncCache.getAll(keys));
     }
@@ -189,7 +177,7 @@ abstract class LocalAsyncLoadingCache<K, V>
 
       Object keyReference = asyncCache.cache().referenceKey(key);
       for (;;) {
-        var future = tryOptimisticRefresh(key, keyReference);
+        @Var var future = tryOptimisticRefresh(key, keyReference);
         if (future == null) {
           future = tryComputeRefresh(key, keyReference);
         }
@@ -201,11 +189,14 @@ abstract class LocalAsyncLoadingCache<K, V>
 
     @Override
     public CompletableFuture<Map<K, V>> refreshAll(Iterable<? extends K> keys) {
-      var result = new LinkedHashMap<K, CompletableFuture<V>>(calculateHashMapCapacity(keys));
+      var result = new LinkedHashMap<K, CompletableFuture<V>>(
+          calculateHashMapCapacity(keys));
       for (K key : keys) {
         result.computeIfAbsent(key, this::refresh);
       }
-      return composeResult(result);
+      @SuppressWarnings("NullAway")
+      Map<K, CompletableFuture<@Nullable V>> futures = result;
+      return composeResult(futures);
     }
 
     /** Attempts to avoid a reload if the entry is absent, or a load or reload is in-flight. */
@@ -223,20 +214,23 @@ abstract class LocalAsyncLoadingCache<K, V>
         }
       }
 
-      // If the entry is absent then perform a new load, else if in-flight then return it
+      // If the entry is absent then perform a new load, else if in-flight then return it. A
+      // completed future holding no value is a mapping whose removal has not been applied yet and
+      // the slow path cannot act on it, so it is treated as absent.
       var oldValueFuture = asyncCache.cache().getIfPresentQuietly(key);
-      if ((oldValueFuture == null)
-          || (oldValueFuture.isDone() && oldValueFuture.isCompletedExceptionally())) {
+      if ((oldValueFuture == null) || (oldValueFuture.isDone() && !Async.isReady(oldValueFuture))) {
         if (oldValueFuture != null) {
           asyncCache.cache().remove(key, oldValueFuture);
         }
-        var future = asyncCache.get(key, asyncCache.mappingFunction, /* recordStats */ false);
+        var future = asyncCache.get(key, asyncCache.mappingFunction, /* recordStats= */ false);
         @SuppressWarnings("unchecked")
         var prior = (CompletableFuture<V>) asyncCache.cache()
             .refreshes().putIfAbsent(keyReference, future);
-        var result = (prior == null) ? future : prior;
-        result.whenComplete((r, e) -> asyncCache.cache().refreshes().remove(keyReference, result));
-        return result;
+        if (prior != null) {
+          return prior;
+        }
+        future.whenComplete((r, e) -> asyncCache.cache().refreshes().remove(keyReference, future));
+        return future;
       } else if (!oldValueFuture.isDone()) {
         // no-op if load is pending
         return oldValueFuture;
@@ -249,15 +243,15 @@ abstract class LocalAsyncLoadingCache<K, V>
     /** Begins a refresh if the entry has materialized and no reload is in-flight. */
     @SuppressWarnings("FutureReturnValueIgnored")
     private @Nullable CompletableFuture<V> tryComputeRefresh(K key, Object keyReference) {
-      long[] startTime = new long[1];
-      boolean[] refreshed = new boolean[1];
+      var startTime = new long[1];
+      var refreshed = new boolean[1];
       @SuppressWarnings({"rawtypes", "unchecked"})
-      CompletableFuture<V>[] oldValueFuture = new CompletableFuture[1];
+      @Nullable CompletableFuture<V>[] oldValueFuture = new CompletableFuture[1];
       var future = asyncCache.cache().refreshes().computeIfAbsent(keyReference, k -> {
         oldValueFuture[0] = asyncCache.cache().getIfPresentQuietly(key);
         V oldValue = Async.getIfReady(oldValueFuture[0]);
         if (oldValue == null) {
-          return null;
+          return nullRef();
         }
 
         refreshed[0] = true;
@@ -266,13 +260,8 @@ abstract class LocalAsyncLoadingCache<K, V>
           var reloadFuture = asyncCache.cacheLoader.asyncReload(
               key, oldValue, asyncCache.cache().executor());
           return requireNonNull(reloadFuture, "Null future");
-        } catch (RuntimeException e) {
-          throw e;
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new CompletionException(e);
         } catch (Exception e) {
-          throw new CompletionException(e);
+          throw toUnchecked(e);
         }
       });
 
@@ -295,36 +284,41 @@ abstract class LocalAsyncLoadingCache<K, V>
             return;
           }
 
-          boolean[] discard = new boolean[1];
-          var value = asyncCache.cache().compute(key, (ignored, currentValue) -> {
-            var successful = asyncCache.cache().refreshes().remove(keyReference, castedFuture);
-            if (successful && (currentValue == oldValueFuture[0])) {
-              if (currentValue == null) {
-                // If the entry is absent then discard the refresh and maybe notifying the listener
-                discard[0] = (newValue != null);
-                return null;
-              } else if ((currentValue == newValue) || (currentValue == castedFuture)) {
-                // If the reloaded value is the same instance then no-op
-                return currentValue;
-              } else if (newValue == Async.getIfReady((CompletableFuture<?>) currentValue)) {
-                // If the completed futures hold the same value instance then no-op
-                return currentValue;
+          try {
+            var discard = new boolean[1];
+            var hints = new LocalCache.RemapHints();
+            var value = asyncCache.cache().compute(key, (ignored, currentValue) -> {
+              // Keep the refresh registered until the write clears it to avoid refreshAfterWrite
+              // readers from prematurely scheduling another reload
+              boolean successful =
+                  (asyncCache.cache().refreshes().get(keyReference) == castedFuture);
+              if (successful && (currentValue == oldValueFuture[0])) {
+                return (newValue == null) ? null : castedFuture;
               }
-              return (newValue == null) ? null : castedFuture;
-            }
-            // Otherwise, a write invalidated the refresh so discard it and notify the listener
-            discard[0] = true;
-            return currentValue;
-          }, asyncCache.cache().expiry(), /* recordLoad */ false, /* recordLoadFailure */ true);
+              // Otherwise, a write invalidated the refresh so discard it. If a successor refresh
+              // owns the registration, leave it intact so this stale completion's by-key discard
+              // cannot steal the successor's token (its fresh value would then be discarded).
+              hints.preserveTimestamps = true;
+              hints.preserveRefresh = !successful;
+              discard[0] = (newValue != Async.getIfReady((CompletableFuture<?>) currentValue));
+              return currentValue;
+            }, asyncCache.cache().expiry(), /* recordLoad= */ false,
+                /* recordLoadFailure= */ true, hints);
 
-          if (discard[0] && (newValue != null)) {
-            var cause = (value == null) ? RemovalCause.EXPLICIT : RemovalCause.REPLACED;
-            asyncCache.cache().notifyRemoval(key, castedFuture, cause);
-          }
-          if (newValue == null) {
+            if (discard[0] && (newValue != null)) {
+              var cause = (value == null) ? RemovalCause.EXPLICIT : RemovalCause.REPLACED;
+              asyncCache.cache().notifyRemoval(key, castedFuture, cause);
+            }
+            if (newValue == null) {
+              asyncCache.cache().statsCounter().recordLoadFailure(loadTime);
+            } else {
+              asyncCache.cache().statsCounter().recordLoadSuccess(loadTime);
+            }
+          } catch (Throwable t) {
+            logger.log(Level.WARNING, "Exception thrown during refresh", t);
+            asyncCache.cache().refreshes().remove(keyReference, castedFuture);
             asyncCache.cache().statsCounter().recordLoadFailure(loadTime);
-          } else {
-            asyncCache.cache().statsCounter().recordLoadSuccess(loadTime);
+            asyncCache.cache().remove(key, castedFuture);
           }
         });
       }

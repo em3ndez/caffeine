@@ -16,14 +16,18 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.linked;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Objects.requireNonNull;
 
 import java.util.Arrays;
+
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
@@ -62,7 +66,7 @@ public final class MultiQueuePolicy implements KeyOnlyPolicy {
   private long currentTime;
 
   public MultiQueuePolicy(Config config) {
-    MultiQueueSettings settings = new MultiQueueSettings(config);
+    var settings = new MultiQueueSettings(config);
     maximumSize = Math.toIntExact(settings.maximumSize());
     threshold = new long[settings.numberOfQueues()];
     headQ = new Node[settings.numberOfQueues()];
@@ -78,8 +82,8 @@ public final class MultiQueuePolicy implements KeyOnlyPolicy {
 
   @Override
   public void record(long key) {
+    @Var var node = data.get(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
     if (node == null) {
       policyStats.recordMiss();
       node = out.remove(key);
@@ -105,8 +109,11 @@ public final class MultiQueuePolicy implements KeyOnlyPolicy {
   private void adjust() {
     currentTime++;
     for (int i = 1; i < headQ.length; i++) {
-      Node node = headQ[i].next;
-      if (node.next.expireTime < currentTime) {
+      Node node = requireNonNull(headQ[i].next);
+      if (node == headQ[i]) {
+        continue;
+      }
+      if (node.expireTime < currentTime) {
         node.remove();
         node.queueIndex = (i - 1);
         node.appendToTail(headQ[node.queueIndex]);
@@ -125,7 +132,7 @@ public final class MultiQueuePolicy implements KeyOnlyPolicy {
   }
 
   private void evict() {
-    Node victim = null;
+    @Var Node victim = null;
     for (Node head : headQ) {
       if (head.next != head) {
         victim = head.next;
@@ -152,9 +159,10 @@ public final class MultiQueuePolicy implements KeyOnlyPolicy {
   static final class Node {
     final long key;
 
-    Node prev;
-    Node next;
-    int reference;
+    @Nullable Node prev;
+    @Nullable Node next;
+
+    long reference;
     int queueIndex;
     long expireTime;
 
@@ -163,7 +171,7 @@ public final class MultiQueuePolicy implements KeyOnlyPolicy {
     }
 
     static Node sentinel(int queueIndex) {
-      Node node = new Node(Long.MIN_VALUE);
+      var node = new Node(Long.MIN_VALUE);
       node.expireTime = Long.MAX_VALUE;
       node.queueIndex = queueIndex;
       node.prev = node;
@@ -173,7 +181,7 @@ public final class MultiQueuePolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void appendToTail(Node head) {
-      Node tail = head.prev;
+      Node tail = requireNonNull(head.prev);
       head.prev = this;
       tail.next = this;
       next = head;
@@ -182,6 +190,9 @@ public final class MultiQueuePolicy implements KeyOnlyPolicy {
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       queueIndex = -1;
       prev.next = next;
       next.prev = prev;

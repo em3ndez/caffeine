@@ -17,15 +17,17 @@ package com.github.benmanes.caffeine.cache.simulator.policy.linked;
 
 import static com.github.benmanes.caffeine.cache.simulator.policy.Policy.Characteristic.WEIGHTED;
 import static java.util.Locale.US;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.admission.Admission;
-import com.github.benmanes.caffeine.cache.simulator.admission.Admittor;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admitter;
 import com.github.benmanes.caffeine.cache.simulator.policy.AccessEvent;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
@@ -47,7 +49,7 @@ public final class LinkedPolicy implements Policy {
   final Long2ObjectMap<Node> data;
   final PolicyStats policyStats;
   final EvictionPolicy policy;
-  final Admittor admittor;
+  final Admitter admitter;
   final long maximumSize;
   final boolean weighted;
   final Node sentinel;
@@ -57,10 +59,10 @@ public final class LinkedPolicy implements Policy {
   public LinkedPolicy(Config config, Set<Characteristic> characteristics,
       Admission admission, EvictionPolicy policy) {
     this.policyStats = new PolicyStats(admission.format(policy.label()));
-    this.admittor = admission.from(config, policyStats);
+    this.admitter = admission.from(config, policyStats);
     this.weighted = characteristics.contains(WEIGHTED);
 
-    BasicSettings settings = new BasicSettings(config);
+    var settings = new BasicSettings(config);
     this.data = new Long2ObjectOpenHashMap<>();
     this.maximumSize = settings.maximumSize();
     this.sentinel = new Node();
@@ -70,7 +72,7 @@ public final class LinkedPolicy implements Policy {
   /** Returns all variations of this policy based on the configuration parameters. */
   public static Set<Policy> policies(Config config,
       Set<Characteristic> characteristics, EvictionPolicy policy) {
-    BasicSettings settings = new BasicSettings(config);
+    var settings = new BasicSettings(config);
     return settings.admission().stream().map(admission ->
       new LinkedPolicy(config, characteristics, admission, policy)
     ).collect(toUnmodifiableSet());
@@ -83,17 +85,17 @@ public final class LinkedPolicy implements Policy {
 
   @Override
   public void record(AccessEvent event) {
-    final int weight = weighted ? event.weight() : 1;
-    final long key = event.key();
-    Node old = data.get(key);
-    admittor.record(key);
+    int weight = weighted ? event.weight() : 1;
+    long key = event.key();
+    var old = data.get(key);
+    admitter.record(key);
     if (old == null) {
       policyStats.recordWeightedMiss(weight);
       if (weight > maximumSize) {
         policyStats.recordOperation();
         return;
       }
-      Node node = new Node(key, weight, sentinel);
+      var node = new Node(key, weight, sentinel);
       data.put(key, node);
       currentSize += node.weight;
       node.appendToTail();
@@ -118,7 +120,7 @@ public final class LinkedPolicy implements Policy {
         }
 
         Node victim = policy.findVictim(sentinel, policyStats);
-        boolean admit = admittor.admit(candidate.key, victim.key);
+        boolean admit = admitter.admit(candidate.key, victim.key);
         if (admit) {
           evictEntry(victim);
         } else {
@@ -148,7 +150,7 @@ public final class LinkedPolicy implements Policy {
       }
       @Override Node findVictim(Node sentinel, PolicyStats policyStats) {
         policyStats.recordOperation();
-        return sentinel.next;
+        return requireNonNull(sentinel.next);
       }
     },
 
@@ -164,7 +166,7 @@ public final class LinkedPolicy implements Policy {
       @Override Node findVictim(Node sentinel, PolicyStats policyStats) {
         for (;;) {
           policyStats.recordOperation();
-          Node node = sentinel.next;
+          Node node = requireNonNull(sentinel.next);
           if (node.marked) {
             node.moveToTail();
             node.marked = false;
@@ -184,7 +186,7 @@ public final class LinkedPolicy implements Policy {
       @Override Node findVictim(Node sentinel, PolicyStats policyStats) {
         policyStats.recordOperation();
         // Skip over the added entry
-        return sentinel.prev.prev;
+        return requireNonNull(requireNonNull(sentinel.prev).prev);
       }
     },
 
@@ -196,7 +198,7 @@ public final class LinkedPolicy implements Policy {
       }
       @Override Node findVictim(Node sentinel, PolicyStats policyStats) {
         policyStats.recordOperation();
-        return sentinel.next;
+        return requireNonNull(sentinel.next);
       }
     };
 
@@ -215,11 +217,12 @@ public final class LinkedPolicy implements Policy {
   static final class Node {
     final Node sentinel;
 
-    boolean marked;
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
+
     long key;
     int weight;
+    boolean marked;
 
     /** Creates a new sentinel node. */
     public Node() {
@@ -232,13 +235,13 @@ public final class LinkedPolicy implements Policy {
     /** Creates a new, unlinked node. */
     public Node(long key, int weight, Node sentinel) {
       this.sentinel = sentinel;
-      this.key = key;
       this.weight = weight;
+      this.key = key;
     }
 
     /** Appends the node to the tail of the list. */
     public void appendToTail() {
-      Node tail = sentinel.prev;
+      Node tail = requireNonNull(sentinel.prev);
       sentinel.prev = this;
       tail.next = this;
       next = sentinel;
@@ -247,6 +250,9 @@ public final class LinkedPolicy implements Policy {
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       prev.next = next;
       next.prev = prev;
       prev = next = null;
@@ -255,13 +261,16 @@ public final class LinkedPolicy implements Policy {
 
     /** Moves the node to the tail. */
     public void moveToTail() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       // unlink
       prev.next = next;
       next.prev = prev;
 
       // link
       next = sentinel;
-      prev = sentinel.prev;
+      prev = requireNonNull(sentinel.prev);
       sentinel.prev = this;
       prev.next = this;
     }

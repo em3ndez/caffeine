@@ -15,7 +15,7 @@
  */
 package com.github.benmanes.caffeine.cache.simulator.parser;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -23,6 +23,8 @@ import java.io.InputStreamReader;
 import java.util.stream.Stream;
 
 import com.google.common.io.Closeables;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * A skeletal implementation that reads the trace file line by line as textual data.
@@ -36,10 +38,11 @@ public abstract class TextTraceReader extends AbstractTraceReader {
   }
 
   /** Returns a stream of each line in the trace file. */
+  @SuppressFBWarnings("OS_OPEN_STREAM")
   @SuppressWarnings("PMD.CloseResource")
   protected Stream<String> lines() {
     InputStream input = readFile();
-    var reader = new BufferedReader(new InputStreamReader(input, UTF_8));
+    var reader = new BufferedReader(new InputStreamReader(input, ISO_8859_1));
     return reader.lines().map(String::trim).onClose(() -> Closeables.closeQuietly(reader));
   }
 }

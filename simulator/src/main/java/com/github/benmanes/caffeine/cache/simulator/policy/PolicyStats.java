@@ -23,20 +23,24 @@ import static java.util.Locale.US;
 import static java.util.Objects.requireNonNull;
 import static org.apache.commons.lang3.builder.ToStringStyle.MULTI_LINE_STYLE;
 
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 import org.apache.commons.lang3.builder.ToStringBuilder;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.Characteristic;
-import com.google.auto.value.AutoValue;
-import com.google.auto.value.AutoValue.CopyAnnotations;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * Statistics gathered by a policy execution. A policy can extend this class as a convenient way to
@@ -44,6 +48,7 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@SuppressWarnings("unused")
 public class PolicyStats {
   private final Map<String, Metric> metrics;
   private final Stopwatch stopwatch;
@@ -61,64 +66,65 @@ public class PolicyStats {
   private long operationCount;
   private double percentAdaption;
 
+  @SuppressFBWarnings("FORMAT_STRING_MANIPULATION")
   @SuppressWarnings({"AnnotateFormatMethod", "this-escape"})
   public PolicyStats(String format, Object... args) {
     this.stopwatch = Stopwatch.createUnstarted();
     this.name = String.format(US, format, args);
     this.metrics = new LinkedHashMap<>();
 
-    addMetric(Metric.of("Policy", (Supplier<String>) this::name, OBJECT, true));
-    addMetric(Metric.of("Hit Rate", (DoubleSupplier) this::hitRate, PERCENT, true));
-    addMetric(Metric.of("Miss Rate", (DoubleSupplier) this::missRate, PERCENT, true));
-    addMetric(Metric.of("Hits", (LongSupplier) this::hitCount, NUMBER, true));
-    addMetric(Metric.of("Misses", (LongSupplier) this::missCount, NUMBER, true));
-    addMetric(Metric.of("Requests", (LongSupplier) this::requestCount, NUMBER, true));
-    addMetric(Metric.of("Evictions", (LongSupplier) this::evictionCount, NUMBER, true));
+    addMetric(new Metric.Builder()
+        .name("Policy").value(this::name).type(OBJECT).required(true));
+    addMetric(new Metric.Builder()
+        .name("Hit Rate").value(this::hitRate).type(PERCENT).required(true));
+    addMetric(new Metric.Builder()
+        .name("Miss Rate").value(this::missRate).type(PERCENT).required(true));
+    addMetric(new Metric.Builder()
+        .name("Hits").value(this::hitCount).type(NUMBER).required(true));
+    addMetric(new Metric.Builder()
+        .name("Misses").value(this::missCount).type(NUMBER).required(true));
+    addMetric(new Metric.Builder()
+        .name("Requests").value(this::requestCount).type(NUMBER).required(true));
+    addMetric(new Metric.Builder()
+        .name("Evictions").value(this::evictionCount).type(NUMBER).required(true));
+
     addPercentMetric("Admit rate",
         () -> (admittedCount + rejectedCount) == 0 ? 0 : admissionRate());
-    addMetric(Metric.builder()
-        .value((LongSupplier) this::requestsWeight)
-        .addCharacteristic(WEIGHTED)
-        .name("Requests Weight")
-        .type(NUMBER)
-        .build());
-    addMetric(Metric.builder()
-        .value((DoubleSupplier) this::weightedHitRate)
-        .addCharacteristic(WEIGHTED)
-        .name("Weighted Hit Rate")
-        .type(PERCENT)
-        .build());
-    addMetric(Metric.builder()
-        .value((DoubleSupplier) this::weightedMissRate)
-        .addCharacteristic(WEIGHTED)
-        .name("Weighted Miss Rate")
-        .type(PERCENT)
-        .build());
+    addMetric(new Metric.Builder()
+        .name("Requests Weight").value(this::requestsWeight)
+        .type(NUMBER).characteristic(WEIGHTED));
+    addMetric(new Metric.Builder()
+        .name("Weighted Hit Rate").value(this::weightedHitRate)
+        .characteristic(WEIGHTED).type(PERCENT));
+    addMetric(new Metric.Builder()
+        .name("Weighted Miss Rate").value(this::weightedMissRate)
+        .type(PERCENT).characteristic(WEIGHTED));
     addPercentMetric("Adaption", this::percentAdaption);
     addMetric("Average Miss Penalty", this::averageMissPenalty);
-    addMetric("Average Penalty", this::avergePenalty);
+    addMetric("Average Penalty", this::averagePenalty);
     addMetric("Steps", this::operationCount);
     addMetric("Time", this::stopwatch);
   }
 
-  public void addMetric(Metric metric) {
+  public void addMetric(Metric.Builder metricBuilder) {
+    var metric = metricBuilder.build();
     metrics.put(metric.name(), requireNonNull(metric));
   }
 
   public void addMetric(String name, Supplier<?> supplier) {
-    addMetric(Metric.builder().name(name).value(supplier).type(OBJECT).build());
+    addMetric(new Metric.Builder().name(name).value(supplier).type(OBJECT));
   }
 
   public void addMetric(String name, LongSupplier supplier) {
-    addMetric(Metric.builder().name(name).value(supplier).type(NUMBER).build());
+    addMetric(new Metric.Builder().name(name).value(supplier).type(NUMBER));
   }
 
   public void addMetric(String name, DoubleSupplier supplier) {
-    addMetric(Metric.builder().name(name).value(supplier).type(NUMBER).build());
+    addMetric(new Metric.Builder().name(name).value(supplier).type(NUMBER));
   }
 
   public void addPercentMetric(String name, DoubleSupplier supplier) {
-    addMetric(Metric.builder().name(name).value(supplier).type(PERCENT).build());
+    addMetric(new Metric.Builder().name(name).value(supplier).type(PERCENT));
   }
 
   public Map<String, Metric> metrics() {
@@ -220,7 +226,7 @@ public class PolicyStats {
   }
 
   public long requestsWeight() {
-    return hitsWeight + missesWeight;
+    return Math.addExact(hitsWeight, missesWeight);
   }
 
   public long admissionCount() {
@@ -268,7 +274,7 @@ public class PolicyStats {
 
   public double weightedMissRate() {
     long requestsWeight = requestsWeight();
-    return (requestsWeight == 0) ? 1.0 : (double) missesWeight / requestsWeight;
+    return (requestsWeight == 0) ? 0.0 : (double) missesWeight / requestsWeight;
   }
 
   public double admissionRate() {
@@ -281,12 +287,12 @@ public class PolicyStats {
     return (requestCount == 0) ? 0.0 : (double) operationCount / requestCount;
   }
 
-  public double avergePenalty() {
+  public double averagePenalty() {
     long requestCount = requestCount();
     return (requestCount == 0) ? 0.0 : totalPenalty() / requestCount;
   }
 
-  public double avergeHitPenalty() {
+  public double averageHitPenalty() {
     return (hitCount == 0) ? 0.0 : hitPenalty / hitCount;
   }
 
@@ -299,36 +305,70 @@ public class PolicyStats {
     return ToStringBuilder.reflectionToString(this, MULTI_LINE_STYLE);
   }
 
-  @AutoValue
-  public abstract static class Metric {
+  public record Metric(String name, Object value, MetricType type,
+      ImmutableSet<Characteristic> characteristics, boolean required) {
     public enum MetricType { NUMBER, PERCENT, OBJECT }
 
-    public abstract String name();
-    public abstract Object value();
-    public abstract MetricType type();
-    public abstract boolean required();
-    public abstract ImmutableSet<Characteristic> characteristics();
-
-    public static Metric of(String name, Object value, MetricType type, boolean required) {
-      return builder().name(name).value(value).type(type).required(required).build();
-    }
-    public static Metric.Builder builder() {
-      return new AutoValue_PolicyStats_Metric.Builder().required(false);
+    public Metric {
+      requireNonNull(type);
+      requireNonNull(name);
+      requireNonNull(value);
+      requireNonNull(characteristics);
     }
 
-    @AutoValue.Builder @CopyAnnotations
-    public abstract static class Builder {
-      public abstract Builder name(String name);
-      public abstract Builder value(Object value);
-      public abstract Builder type(MetricType type);
-      public abstract Builder required(boolean required);
-      public abstract ImmutableSet.Builder<Characteristic> characteristicsBuilder();
-      public abstract Metric build();
+    public static final class Builder {
+      private final Set<Characteristic> characteristics;
 
+      private @Nullable MetricType type;
+      private @Nullable Object value;
+      private @Nullable String name;
+      private boolean required;
+
+      public Builder() {
+        characteristics = EnumSet.noneOf(Characteristic.class);
+      }
       @CanIgnoreReturnValue
-      public final Builder addCharacteristic(Characteristic characteristic) {
-        characteristicsBuilder().add(characteristic);
+      public Builder characteristic(Characteristic characteristic) {
+        characteristics.add(characteristic);
         return this;
+      }
+      @CanIgnoreReturnValue
+      public Builder name(String name) {
+        this.name = requireNonNull(name);
+        return this;
+      }
+      @CanIgnoreReturnValue
+      public Builder value(Object value) {
+        this.value = requireNonNull(value);
+        return this;
+      }
+      @CanIgnoreReturnValue
+      public Builder value(Supplier<?> value) {
+        return value((Object) value);
+      }
+      @CanIgnoreReturnValue
+      public Builder value(LongSupplier value) {
+        return value((Object) value);
+      }
+      @CanIgnoreReturnValue
+      public Builder value(DoubleSupplier value) {
+        return value((Object) value);
+      }
+      @CanIgnoreReturnValue
+      public Builder type(MetricType type) {
+        this.type = requireNonNull(type);
+        return this;
+      }
+      @CanIgnoreReturnValue
+      public Builder required(boolean required) {
+        this.required = required;
+        return this;
+      }
+      public Metric build() {
+        requireNonNull(type);
+        requireNonNull(name);
+        requireNonNull(value);
+        return new Metric(name, value, type, Sets.immutableEnumSet(characteristics), required);
       }
     }
   }

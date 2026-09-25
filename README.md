@@ -1,11 +1,10 @@
-[![Build Status](https://github.com/ben-manes/caffeine/workflows/build/badge.svg)](https://github.com/ben-manes/caffeine/actions?query=workflow%3Abuild+branch%3Amaster)
+[![Build Status](https://github.com/ben-manes/caffeine/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/ben-manes/caffeine/actions?query=workflow%3Abuild+branch%3Amaster)
 [![Test Count](https://gist.githubusercontent.com/ben-manes/c20eb418f0e0bd6dfe1c25beb35faae4/raw/badge.svg)](https://github.com/ben-manes/caffeine/actions?query=workflow%3Abuild+branch%3Amaster)
-[![Coverage Status](https://img.shields.io/coveralls/ben-manes/caffeine.svg)](https://coveralls.io/r/ben-manes/caffeine?branch=master)
-[![Maven Central](https://maven-badges.herokuapp.com/maven-central/com.github.ben-manes.caffeine/caffeine/badge.svg)](https://maven-badges.herokuapp.com/maven-central/com.github.ben-manes.caffeine/caffeine)
-[![JavaDoc](https://www.javadoc.io/badge/com.github.ben-manes.caffeine/caffeine.svg)](http://www.javadoc.io/doc/com.github.ben-manes.caffeine/caffeine)
-[![License](https://img.shields.io/:license-apache-brightgreen.svg)](http://www.apache.org/licenses/LICENSE-2.0.html)
-[![Stack Overflow](https://img.shields.io/:stack%20overflow-caffeine-brightgreen.svg)](http://stackoverflow.com/questions/tagged/caffeine)
-[![Revved up by Develocity](https://img.shields.io/badge/Revved%20up%20by-Develocity-06A0CE?logo=Gradle&labelColor=02303A)](https://caffeine.gradle-enterprise.cloud/scans)
+[![Coverage Status](https://coveralls.io/repos/github/ben-manes/caffeine/badge.svg?branch=master)](https://coveralls.io/github/ben-manes/caffeine?branch=master)
+[![Maven Central](https://img.shields.io/maven-central/v/com.github.ben-manes.caffeine/caffeine?color=31c653&label=maven%20central)](https://central.sonatype.com/artifact/com.github.ben-manes.caffeine/caffeine)
+[![JavaDoc](https://www.javadoc.io/badge/com.github.ben-manes.caffeine/caffeine.svg?color=31c653)](https://www.javadoc.io/doc/com.github.ben-manes.caffeine/caffeine)
+[![License](https://img.shields.io/:license-apache-31c653.svg)](https://www.apache.org/licenses/LICENSE-2.0.html)
+[![Revved up by Develocity](https://img.shields.io/badge/Revved%20up%20by-Develocity-06A0CE?logo=Gradle&labelColor=02303A)](https://caffeine.develocity.cloud/scans)
 <a href="https://github.com/ben-manes/caffeine/wiki">
 <img align="right" height="90px" src="https://raw.githubusercontent.com/ben-manes/caffeine/master/wiki/logo.png">
 </a>
@@ -50,15 +49,14 @@ In addition, Caffeine offers the following extensions:
 
 Use Caffeine in a community provided integration:
 
+* [Spring Cache][spring]: Simple, modern, productive Java
 * [Play Framework][play]: High velocity web framework
 * [Micronaut][micronaut]: A modern, full-stack framework
-* [Spring Cache][spring]: As of Spring 4.3 & Boot 1.4
 * [Coroutines][caffeine-coroutines]: Kotlin Coroutines extension
 * [Bootique][bootique]: A fast, simple Java platform
 * [Quarkus][quarkus]: Supersonic Subatomic Java
 * [Camel][camel]: Routing and mediation engine
 * [Scaffeine][scaffeine]: Scala wrapper for Caffeine
-* [ScalaCache][scala-cache]: Simple caching in Scala
 * [JHipster][jhipster]: Generate, develop, deploy
 * [Aedile][aedile]: Kotlin wrapper for Caffeine
 
@@ -85,6 +83,7 @@ Powering infrastructure near you:
 * An in-depth description of Caffeine's architecture.
   * [Design of a Modern Cache: part #1][modern-cache-1], [part #2][modern-cache-2]
     ([slides][modern-cache-slides]) at [HighScalability][]
+  * [The Adaptive Window, From the Ground Up][adaptive-window] on optimizing shifting workloads
 * Caffeine is presented as part of research papers evaluating its novel eviction policy.
   * [TinyLFU: A Highly Efficient Cache Admission Policy][tinylfu]
     by Gil Einziger, Roy Friedman, Ben Manes
@@ -98,11 +97,11 @@ Powering infrastructure near you:
 Download from [Maven Central][maven] or depend via Gradle:
 
 ```gradle
-implementation("com.github.ben-manes.caffeine:caffeine:3.1.8")
+implementation("com.github.ben-manes.caffeine:caffeine:3.3.0")
 
 // Optional extensions
-implementation("com.github.ben-manes.caffeine:guava:3.1.8")
-implementation("com.github.ben-manes.caffeine:jcache:3.1.8")
+implementation("com.github.ben-manes.caffeine:guava:3.3.0")
+implementation("com.github.ben-manes.caffeine:jcache:3.3.0")
 ```
 
 For Java 11 or above, use `3.x` otherwise use `2.x`.
@@ -114,7 +113,7 @@ Snapshots of the development version are available in
 
 [benchmarks]: https://github.com/ben-manes/caffeine/wiki/Benchmarks
 [users-guide]: https://github.com/ben-manes/caffeine/wiki
-[javadoc]: http://www.javadoc.io/doc/com.github.ben-manes.caffeine/caffeine
+[javadoc]: https://www.javadoc.io/doc/com.github.ben-manes.caffeine/caffeine
 [guava-cache]: https://github.com/google/guava/wiki/CachesExplained
 [clhm]: https://github.com/ben-manes/concurrentlinkedhashmap
 [population]: https://github.com/ben-manes/caffeine/wiki/Population
@@ -128,23 +127,22 @@ Snapshots of the development version are available in
 [simulator]: https://github.com/ben-manes/caffeine/wiki/Simulator
 [guava-adapter]: https://github.com/ben-manes/caffeine/wiki/Guava
 [jsr107]: https://github.com/ben-manes/caffeine/wiki/JCache
-[maven]: https://maven-badges.herokuapp.com/maven-central/com.github.ben-manes.caffeine/caffeine
+[maven]: https://central.sonatype.com/artifact/com.github.ben-manes.caffeine/caffeine
 [releases]: https://github.com/ben-manes/caffeine/releases
-[snapshots]: https://oss.sonatype.org/content/repositories/snapshots/com/github/ben-manes/caffeine/
+[snapshots]: https://central.sonatype.org/publish/publish-portal-snapshots/#consuming-snapshot-releases-for-your-project
 [efficiency]: https://github.com/ben-manes/caffeine/wiki/Efficiency
 [tinylfu]: https://dl.acm.org/doi/10.1145/3149371?cid=99659224047
 [adaptive-tinylfu]: https://dl.acm.org/doi/10.1145/3274808.3274816?cid=99659224047
 [size-tinylfu]: https://dl.acm.org/doi/10.1145/3507920?cid=99659224047
-[modern-cache-1]: http://highscalability.com/blog/2016/1/25/design-of-a-modern-cache.html
-[modern-cache-2]: http://highscalability.com/blog/2019/2/25/design-of-a-modern-cachepart-deux.html
+[modern-cache-1]: https://highscalability.com/blog/2016/1/25/design-of-a-modern-cache.html
+[modern-cache-2]: https://highscalability.com/blog/2019/2/25/design-of-a-modern-cachepart-deux.html
 [modern-cache-slides]: https://docs.google.com/presentation/d/1NlDxyXsUG1qlVHMl4vsUUBQfAJ2c2NsFPNPr2qymIBs
-[HighScalability]: http://highscalability.com
-[spring]: https://docs.spring.io/spring/docs/current/spring-framework-reference/integration.html#cache-store-configuration-caffeine
-[scala-cache]: https://github.com/cb372/scalacache
+[HighScalability]: https://highscalability.com
+[spring]: https://docs.spring.io/spring-framework/reference/integration/cache/store-configuration.html#cache-store-configuration-caffeine
 [scaffeine]: https://github.com/blemale/scaffeine
 [kafka]: https://kafka.apache.org
 [hbase]: https://hbase.apache.org
-[cassandra]: http://cassandra.apache.org
+[cassandra]: https://cassandra.apache.org
 [solr]: https://solr.apache.org/
 [infinispan]: https://infinispan.org
 [neo4j]: https://github.com/neo4j/neo4j
@@ -165,3 +163,4 @@ Snapshots of the development version are available in
 [aedile]: https://github.com/sksamuel/aedile
 [bootique]: https://bootique.io/
 [caffeine-coroutines]: https://github.com/be-hase/caffeine-coroutines
+[adaptive-window]: https://ben-manes.github.io/caffeine/wiki/adaptive-window.html

@@ -17,8 +17,8 @@ package com.github.benmanes.caffeine.cache.stats;
 
 import java.util.Objects;
 
-import org.checkerframework.checker.index.qual.NonNegative;
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.LoadingCache;
@@ -30,17 +30,17 @@ import com.google.errorprone.annotations.Immutable;
  * Cache statistics are incremented according to the following rules:
  * <ul>
  *   <li>When a cache lookup encounters an existing cache entry {@code hitCount} is incremented.
- *   <li>When a cache lookup first encounters a missing cache entry, a new entry is loaded.
+ *   <li>When a cache lookup finds no entry without loading one, {@code missCount} is incremented.
+ *   <li>When a cache lookup attempts to load a new entry:
  *   <ul>
  *     <li>After successfully loading an entry {@code missCount} and {@code loadSuccessCount} are
  *         incremented, and the total loading time, in nanoseconds, is added to
  *         {@code totalLoadTime}.
- *     <li>When an exception is thrown while loading an entry or if the loaded value is {code null},
+ *     <li>When an exception is thrown while loading an entry or if the loaded value is {@code null},
  *         {@code missCount} and {@code loadFailureCount} are incremented, and the total loading
  *         time, in nanoseconds, is added to {@code totalLoadTime}.
- *     <li>Cache lookups that encounter a missing cache entry that is still loading will wait
- *         for loading to complete (whether successful or not) and then increment {@code missCount}.
  *   </ul>
+ *   <li>Cache lookups that reuse a value loaded by a concurrent lookup increment {@code hitCount}.
  *   <li>When an entry is computed through the {@linkplain Cache#asMap asMap} the
  *       {@code loadSuccessCount} or {@code loadFailureCount} is incremented.
  *   <li>When an entry is evicted from the cache, {@code evictionCount} is incremented and the
@@ -50,8 +50,9 @@ import com.google.errorprone.annotations.Immutable;
  *       {@linkplain Cache#asMap asMap} view of the cache.
  * </ul>
  * <p>
- * A lookup is specifically defined as an invocation of one of the methods
- * {@link LoadingCache#get(Object)}, {@link Cache#get(Object, java.util.function.Function)}, or
+ * Lookups include calls to {@link Cache#getIfPresent(Object)},
+ * {@link Cache#getAllPresent(Iterable)}, {@link Cache#get(Object, java.util.function.Function)},
+ * {@link Cache#getAll(Iterable, java.util.function.Function)}, {@link LoadingCache#get(Object)}, and
  * {@link LoadingCache#getAll(Iterable)}.
  * <p>
  * This is a <em>value-based</em> class; use of identity-sensitive operations (including reference
@@ -61,6 +62,7 @@ import com.google.errorprone.annotations.Immutable;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @Immutable
+@NullMarked
 public final class CacheStats {
   private static final CacheStats EMPTY_STATS = CacheStats.of(0L, 0L, 0L, 0L, 0L, 0L, 0L);
 
@@ -72,10 +74,8 @@ public final class CacheStats {
   private final long evictionCount;
   private final long evictionWeight;
 
-  private CacheStats(@NonNegative long hitCount, @NonNegative long missCount,
-      @NonNegative long loadSuccessCount, @NonNegative long loadFailureCount,
-      @NonNegative long totalLoadTime, @NonNegative long evictionCount,
-      @NonNegative long evictionWeight) {
+  private CacheStats(long hitCount, long missCount, long loadSuccessCount, long loadFailureCount,
+      long totalLoadTime, long evictionCount, long evictionWeight) {
     if ((hitCount < 0) || (missCount < 0) || (loadSuccessCount < 0) || (loadFailureCount < 0)
         || (totalLoadTime < 0) || (evictionCount < 0) || (evictionWeight < 0)) {
       throw new IllegalArgumentException();
@@ -100,11 +100,10 @@ public final class CacheStats {
    * @param evictionCount the number of entries evicted from the cache
    * @param evictionWeight the sum of weights of entries evicted from the cache
    * @return a {@code CacheStats} representing the specified statistics
+   * @throws IllegalArgumentException if the metric is negative
    */
-  public static CacheStats of(@NonNegative long hitCount, @NonNegative long missCount,
-      @NonNegative long loadSuccessCount, @NonNegative long loadFailureCount,
-      @NonNegative long totalLoadTime, @NonNegative long evictionCount,
-      @NonNegative long evictionWeight) {
+  public static CacheStats of(long hitCount, long missCount, long loadSuccessCount,
+      long loadFailureCount, long totalLoadTime, long evictionCount, long evictionWeight) {
     // Many parameters of the same type in a row is a bad thing, but this class is not constructed
     // by end users and is too fine-grained for a builder.
     return new CacheStats(hitCount, missCount, loadSuccessCount,
@@ -130,7 +129,7 @@ public final class CacheStats {
    *
    * @return the {@code hitCount + missCount}
    */
-  public @NonNegative long requestCount() {
+  public long requestCount() {
     return saturatedAdd(hitCount, missCount);
   }
 
@@ -139,7 +138,7 @@ public final class CacheStats {
    *
    * @return the number of times {@link Cache} lookup methods have returned a cached value
    */
-  public @NonNegative long hitCount() {
+  public long hitCount() {
     return hitCount;
   }
 
@@ -150,21 +149,19 @@ public final class CacheStats {
    *
    * @return the ratio of cache requests which were hits
    */
-  public @NonNegative double hitRate() {
+  public double hitRate() {
     long requestCount = requestCount();
     return (requestCount == 0) ? 1.0 : (double) hitCount / requestCount;
   }
 
   /**
    * Returns the number of times {@link Cache} lookup methods have returned an uncached (newly
-   * loaded) value, or null. Multiple concurrent calls to {@link Cache} lookup methods on an absent
-   * value can result in multiple misses, all returning the results of a single cache load
-   * operation.
+   * loaded) value, or null.
    *
    * @return the number of times {@link Cache} lookup methods have returned an uncached (newly
    *         loaded) value, or null
    */
-  public @NonNegative long missCount() {
+  public long missCount() {
     return missCount;
   }
 
@@ -173,20 +170,18 @@ public final class CacheStats {
    * {@code missCount / requestCount}, or {@code 0.0} when {@code requestCount == 0}.
    * Note that {@code hitRate + missRate =~ 1.0}. Cache misses include all requests which
    * weren't cache hits, including requests which resulted in either successful or failed loading
-   * attempts, and requests which waited for other threads to finish loading. It is thus the case
-   * that {@code missCount >= loadSuccessCount + loadFailureCount}. Multiple
-   * concurrent misses for the same key will result in a single load operation.
+   * attempts. It is thus the case that {@code missCount >= loadSuccessCount + loadFailureCount}.
    *
    * @return the ratio of cache requests which were misses
    */
-  public @NonNegative double missRate() {
+  public double missRate() {
     long requestCount = requestCount();
     return (requestCount == 0) ? 0.0 : (double) missCount / requestCount;
   }
 
   /**
    * Returns the total number of times that {@link Cache} lookup methods attempted to load new
-   * values. This includes both successful load operations, as well as those that threw exceptions.
+   * values. This includes both successful load operations and those that threw exceptions.
    * This is defined as {@code loadSuccessCount + loadFailureCount}.
    * <p>
    * <b>Note:</b> the values of the metrics are undefined in case of overflow (though it is
@@ -195,7 +190,7 @@ public final class CacheStats {
    *
    * @return the {@code loadSuccessCount + loadFailureCount}
    */
-  public @NonNegative long loadCount() {
+  public long loadCount() {
     return saturatedAdd(loadSuccessCount, loadFailureCount);
   }
 
@@ -203,12 +198,11 @@ public final class CacheStats {
    * Returns the number of times {@link Cache} lookup methods have successfully loaded a new value.
    * This is always incremented in conjunction with {@link #missCount}, though {@code missCount}
    * is also incremented when an exception is encountered during cache loading (see
-   * {@link #loadFailureCount}). Multiple concurrent misses for the same key will result in a
-   * single load operation.
+   * {@link #loadFailureCount}). A load shared by multiple concurrent lookups is counted only once.
    *
    * @return the number of times {@link Cache} lookup methods have successfully loaded a new value
    */
-  public @NonNegative long loadSuccessCount() {
+  public long loadSuccessCount() {
     return loadSuccessCount;
   }
 
@@ -216,12 +210,12 @@ public final class CacheStats {
    * Returns the number of times {@link Cache} lookup methods failed to load a new value, either
    * because no value was found or an exception was thrown while loading. This is always incremented
    * in conjunction with {@code missCount}, though {@code missCount} is also incremented when cache
-   * loading completes successfully (see {@link #loadSuccessCount}). Multiple concurrent misses for
-   * the same key will result in a single load operation.
+   * loading completes successfully (see {@link #loadSuccessCount}). A load shared by multiple
+   * concurrent lookups is counted only once.
    *
    * @return the number of times {@link Cache} lookup methods failed to load a new value
    */
-  public @NonNegative long loadFailureCount() {
+  public long loadFailureCount() {
     return loadFailureCount;
   }
 
@@ -236,7 +230,7 @@ public final class CacheStats {
    *
    * @return the ratio of cache loading attempts which threw exceptions
    */
-  public @NonNegative double loadFailureRate() {
+  public double loadFailureRate() {
     long totalLoadCount = saturatedAdd(loadSuccessCount, loadFailureCount);
     return (totalLoadCount == 0) ? 0.0 : (double) loadFailureCount / totalLoadCount;
   }
@@ -248,7 +242,7 @@ public final class CacheStats {
    *
    * @return the total number of nanoseconds the cache has spent loading new values
    */
-  public @NonNegative long totalLoadTime() {
+  public long totalLoadTime() {
     return totalLoadTime;
   }
 
@@ -262,7 +256,7 @@ public final class CacheStats {
    *
    * @return the average number of nanoseconds spent loading new values
    */
-  public @NonNegative double averageLoadPenalty() {
+  public double averageLoadPenalty() {
     long totalLoadCount = saturatedAdd(loadSuccessCount, loadFailureCount);
     return (totalLoadCount == 0) ? 0.0 : (double) totalLoadTime / totalLoadCount;
   }
@@ -273,7 +267,7 @@ public final class CacheStats {
    *
    * @return the number of times an entry has been evicted
    */
-  public @NonNegative long evictionCount() {
+  public long evictionCount() {
     return evictionCount;
   }
 
@@ -283,7 +277,7 @@ public final class CacheStats {
    *
    * @return the sum of weights of evicted entities
    */
-  public @NonNegative long evictionWeight() {
+  public long evictionWeight() {
     return evictionWeight;
   }
 
@@ -333,7 +327,7 @@ public final class CacheStats {
    * {@code Long.MAX_VALUE} or {@code Long.MIN_VALUE} is returned, respectively.
    */
   @SuppressWarnings("ShortCircuitBoolean")
-  private static long saturatedAdd(long a, long b) {
+  static long saturatedAdd(long a, long b) {
     long naiveSum = a + b;
     if (((a ^ b) < 0) | ((a ^ naiveSum) >= 0)) {
       // If a and b have different signs or a has the same sign as the result then there was no
@@ -357,7 +351,7 @@ public final class CacheStats {
     } else if (!(o instanceof CacheStats)) {
       return false;
     }
-    CacheStats other = (CacheStats) o;
+    var other = (CacheStats) o;
     return hitCount == other.hitCount
         && missCount == other.missCount
         && loadSuccessCount == other.loadSuccessCount

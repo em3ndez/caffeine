@@ -15,7 +15,9 @@
  */
 package com.github.benmanes.caffeine.jcache.management;
 
-import static org.junit.Assert.assertThrows;
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.nullRef;
+import static com.google.common.truth.Truth.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.when;
@@ -31,17 +33,19 @@ import javax.management.MBeanServer;
 import javax.management.NotCompliantMBeanException;
 import javax.management.ObjectName;
 
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class JmxRegistrationTest {
+final class JmxRegistrationTest {
 
-  @Test(dataProvider = "registerExceptions")
-  public void register_error(Class<? extends Throwable> throwableType) throws JMException {
+  @ParameterizedTest
+  @ValueSource(classes = {MBeanRegistrationException.class, NotCompliantMBeanException.class})
+  void register_error(Class<? extends Throwable> throwableType) throws JMException {
     var name = new ObjectName("");
     var bean = new JCacheStatisticsMXBean();
     MBeanServer server = Mockito.mock();
@@ -49,8 +53,21 @@ public final class JmxRegistrationTest {
     assertThrows(CacheException.class, () -> JmxRegistration.register(server, name, bean));
   }
 
-  @Test(dataProvider = "unegisterExceptions")
-  public void unregister_error(Class<? extends Throwable> throwableType) throws JMException {
+  @Test
+  void register_registeredConcurrently() throws JMException {
+    // a same-named bean registered between the check and the registration is skipped, as it is when
+    // the check sees it; the public API cannot schedule that interleaving deterministically
+    var name = new ObjectName("");
+    var bean = new JCacheStatisticsMXBean();
+    MBeanServer server = Mockito.mock();
+    when(server.registerMBean(bean, name)).thenThrow(InstanceAlreadyExistsException.class);
+    JmxRegistration.register(server, name, bean);
+    Mockito.verify(server).registerMBean(bean, name);
+  }
+
+  @ParameterizedTest
+  @ValueSource(classes = {InstanceNotFoundException.class, MBeanRegistrationException.class})
+  void unregister_error(Class<? extends Throwable> throwableType) throws JMException {
     var name = new ObjectName("");
     MBeanServer server = Mockito.mock();
     when(server.queryNames(any(), any())).thenReturn(Set.of(name));
@@ -59,24 +76,20 @@ public final class JmxRegistrationTest {
   }
 
   @Test
-  public void newObjectName_malformed() {
+  void newObjectName_malformed() {
     assertThrows(CacheException.class, () -> JmxRegistration.newObjectName("a=b"));
   }
 
-  @DataProvider(name = "registerExceptions")
-  public Object[] providesRegisterExceptions() {
-    return new Object[] {
-        InstanceAlreadyExistsException.class,
-        MBeanRegistrationException.class,
-        NotCompliantMBeanException.class,
-    };
-  }
-
-  @DataProvider(name = "unegisterExceptions")
-  public Object[] providesUnregisterExceptions() {
-    return new Object[] {
-        MBeanRegistrationException.class,
-        InstanceNotFoundException.class,
-    };
+  @Test
+  void sanitize() {
+    assertThat(JmxRegistration.sanitize(nullRef())).isEmpty();
+    assertThat(JmxRegistration.sanitize("a.b")).isEqualTo("a.b");
+    assertThat(JmxRegistration.sanitize("a,b")).isEqualTo("a.b");
+    assertThat(JmxRegistration.sanitize("a:b")).isEqualTo("a.b");
+    assertThat(JmxRegistration.sanitize("a=b")).isEqualTo("a.b");
+    assertThat(JmxRegistration.sanitize("a\nb")).isEqualTo("a.b");
+    assertThat(JmxRegistration.sanitize("a*b")).isEqualTo("a.b");
+    assertThat(JmxRegistration.sanitize("a?b")).isEqualTo("a.b");
+    assertThat(JmxRegistration.sanitize("a\"b")).isEqualTo("a.b");
   }
 }

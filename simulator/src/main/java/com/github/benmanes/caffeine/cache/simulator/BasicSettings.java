@@ -15,6 +15,7 @@
  */
 package com.github.benmanes.caffeine.cache.simulator;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Sets.toImmutableEnumSet;
@@ -26,7 +27,7 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.simulator.admission.Admission;
 import com.github.benmanes.caffeine.cache.simulator.membership.FilterType;
@@ -101,12 +102,14 @@ public class BasicSettings {
 
   /** Gets the quoted integer at the given path, ignoring comma and underscore separators */
   protected int getFormattedInt(String path) {
-    return parseFormattedNumber(path, config()::getInt, Ints::tryParse);
+    Function<String, @Nullable Integer> tryParse = Ints::tryParse;
+    return parseFormattedNumber(path, config()::getInt, tryParse);
   }
 
   /** Gets the quoted long at the given path, ignoring comma and underscore separators */
   protected long getFormattedLong(String path) {
-    return parseFormattedNumber(path, config()::getLong, Longs::tryParse);
+    Function<String, @Nullable Long> tryParse = Longs::tryParse;
+    return parseFormattedNumber(path, config()::getLong, tryParse);
   }
 
   private <T extends Number> T parseFormattedNumber(String path,
@@ -125,7 +128,9 @@ public class BasicSettings {
 
   public final class ActorSettings {
     public int mailboxSize() {
-      return config().getInt("actor.mailbox-size");
+      int mailboxSize = config().getInt("actor.mailbox-size");
+      checkArgument(mailboxSize > 0, "mailbox size %s must be positive", mailboxSize);
+      return mailboxSize;
     }
     public int batchSize() {
       return config().getInt("actor.batch-size");
@@ -264,8 +269,8 @@ public class BasicSettings {
     public String distribution() {
       return config().getString("synthetic.distribution");
     }
-    public int events() {
-      return config().getInt("synthetic.events");
+    public long events() {
+      return config().getLong("synthetic.events");
     }
     public CounterSettings counter() {
       return new CounterSettings();
@@ -287,21 +292,21 @@ public class BasicSettings {
     }
 
     public final class CounterSettings {
-      public int start() {
-        return config().getInt("synthetic.counter.start");
+      public long start() {
+        return config().getLong("synthetic.counter.start");
       }
     }
     public final class RepeatSettings {
-      public int items() {
-        return config().getInt("synthetic.repeating.items");
+      public long items() {
+        return config().getLong("synthetic.repeating.items");
       }
     }
     public final class UniformSettings {
-      public int lowerBound() {
-        return config().getInt("synthetic.uniform.lower-bound");
+      public long lowerBound() {
+        return config().getLong("synthetic.uniform.lower-bound");
       }
-      public int upperBound() {
-        return config().getInt("synthetic.uniform.upper-bound");
+      public long upperBound() {
+        return config().getLong("synthetic.uniform.upper-bound");
       }
     }
     public final class ExponentialSettings {
@@ -310,11 +315,11 @@ public class BasicSettings {
       }
     }
     public final class HotspotSettings {
-      public int lowerBound() {
-        return config().getInt("synthetic.hotspot.lower-bound");
+      public long lowerBound() {
+        return config().getLong("synthetic.hotspot.lower-bound");
       }
-      public int upperBound() {
-        return config().getInt("synthetic.hotspot.upper-bound");
+      public long upperBound() {
+        return config().getLong("synthetic.hotspot.upper-bound");
       }
       public double hotsetFraction() {
         return config().getDouble("synthetic.hotspot.hotset-fraction");
@@ -324,8 +329,8 @@ public class BasicSettings {
       }
     }
     public final class ZipfianSettings {
-      public int items() {
-        return config().getInt("synthetic.zipfian.items");
+      public long items() {
+        return config().getLong("synthetic.zipfian.items");
       }
       public double constant() {
         return config().getDouble("synthetic.zipfian.constant");

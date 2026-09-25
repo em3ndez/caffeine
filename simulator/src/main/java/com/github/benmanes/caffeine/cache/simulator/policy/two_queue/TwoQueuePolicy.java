@@ -15,11 +15,17 @@
  */
 package com.github.benmanes.caffeine.cache.simulator.policy.two_queue;
 
+import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
+
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -32,7 +38,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
  * recommending 20% and 50% of the maximum size, respectively.
  * <p>
  * This implementation is based on the pseudocode provided by the authors in their paper
- * <a href="http://www.vldb.org/conf/1994/P439.PDF">2Q: A Low Overhead High Performance Buffer
+ * <a href="https://www.vldb.org/conf/1994/P439.PDF">2Q: A Low Overhead High Performance Buffer
  * Management Replacement Algorithm</a>. For consistency with other policies, this version places
  * the next item to be removed at the head and most recently added at the tail of the queue.
  *
@@ -58,7 +64,7 @@ public final class TwoQueuePolicy implements KeyOnlyPolicy {
   final Node headMain;
 
   public TwoQueuePolicy(Config config) {
-    TwoQueueSettings settings = new TwoQueueSettings(config);
+    var settings = new TwoQueueSettings(config);
 
     this.headIn = new Node();
     this.headOut = new Node();
@@ -68,55 +74,55 @@ public final class TwoQueuePolicy implements KeyOnlyPolicy {
     this.maximumSize = Math.toIntExact(settings.maximumSize());
     this.maxIn = (int) (maximumSize * settings.percentIn());
     this.maxOut = (int) (maximumSize * settings.percentOut());
+    checkState(maxIn < maximumSize,
+        "The in-queue must be smaller than the maximum size %s", maximumSize);
   }
 
   @Override
-  @SuppressWarnings("PMD.ConfusingTernary")
   public void record(long key) {
     // On accessing a page X :
     //   if X is in Am then
     //     move X to the head of Am
     //   else if (X is in Alout) then
-    //     reclaimfor(X)
+    //     reclaimFor(X)
     //     add X to the head of Am
     //   else if (X is in Alin)
     //     // do nothing
     //   else // X is in no queue
-    //     reclaimfor(X)
+    //     reclaimFor(X)
     //     add X to the head of Alin
     //   end if
 
+    @Var var node = data.get(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
     if (node != null) {
+      requireNonNull(node.type);
       switch (node.type) {
-        case MAIN:
+        case MAIN -> {
           node.moveToTail(headMain);
           policyStats.recordHit();
-          return;
-        case OUT:
+        }
+        case OUT -> {
           node.remove();
           sizeOut--;
 
-          reclaimfor(node);
+          reclaimFor(node);
 
           node.appendToTail(headMain);
           node.type = QueueType.MAIN;
           sizeMain++;
 
           policyStats.recordMiss();
-          return;
-        case IN:
+        }
+        case IN ->
           // do nothing
           policyStats.recordHit();
-          return;
       }
-      throw new IllegalStateException("Unknown type: " + node.type);
     } else {
       node = new Node(key);
       node.type = QueueType.IN;
 
-      reclaimfor(node);
+      reclaimFor(node);
       node.appendToTail(headIn);
       sizeIn++;
 
@@ -124,7 +130,7 @@ public final class TwoQueuePolicy implements KeyOnlyPolicy {
     }
   }
 
-  private void reclaimfor(Node node) {
+  private void reclaimFor(Node node) {
     // if there are free page slots then
     //   put X into a free page slot
     // else if (size(Alin) > Kin)
@@ -143,7 +149,8 @@ public final class TwoQueuePolicy implements KeyOnlyPolicy {
     if ((sizeMain + sizeIn) < maximumSize) {
       data.put(node.key, node);
     } else if (sizeIn > maxIn) {
-      // IN is full, move to OUT
+      // IN is full, page out its tail to the non-resident OUT queue
+      policyStats.recordEviction();
       Node n = headIn.next;
       n.remove();
       sizeIn--;
@@ -152,8 +159,7 @@ public final class TwoQueuePolicy implements KeyOnlyPolicy {
       sizeOut++;
 
       if (sizeOut > maxOut) {
-        // OUT is full, drop oldest
-        policyStats.recordEviction();
+        // OUT is full, drop the oldest non-resident identifier
         Node victim = headOut.next;
         data.remove(victim.key);
         victim.remove();
@@ -187,7 +193,7 @@ public final class TwoQueuePolicy implements KeyOnlyPolicy {
 
     Node prev;
     Node next;
-    QueueType type;
+    @Nullable QueueType type;
 
     Node() {
       this.key = Long.MIN_VALUE;
@@ -240,15 +246,12 @@ public final class TwoQueuePolicy implements KeyOnlyPolicy {
   }
 
   static final class TwoQueueSettings extends BasicSettings {
-
     public TwoQueueSettings(Config config) {
       super(config);
     }
-
     public double percentIn() {
       return config().getDouble("two-queue.percent-in");
     }
-
     public double percentOut() {
       return config().getDouble("two-queue.percent-out");
     }

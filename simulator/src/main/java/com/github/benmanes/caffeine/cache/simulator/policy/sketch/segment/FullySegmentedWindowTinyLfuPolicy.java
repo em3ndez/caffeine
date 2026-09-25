@@ -16,14 +16,17 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.sketch.segment;
 
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
 import java.util.List;
 import java.util.Set;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
-import com.github.benmanes.caffeine.cache.simulator.admission.Admittor;
-import com.github.benmanes.caffeine.cache.simulator.admission.TinyLfu;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admission;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admitter;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
@@ -45,7 +48,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
   private final Long2ObjectMap<Node> data;
   private final PolicyStats policyStats;
-  private final Admittor admittor;
+  private final Admitter admitter;
   private final int maximumSize;
 
   private final Node headWindowProbation;
@@ -61,6 +64,7 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
   private int sizeWindowProtected;
   private int sizeMainProtected;
 
+  @SuppressWarnings("Varifier")
   public FullySegmentedWindowTinyLfuPolicy(
       double percentMain, FullySegmentedWindowTinyLfuSettings settings) {
     this.policyStats = new PolicyStats(name() + " (%.0f%%)", 100 * (1.0d - percentMain));
@@ -69,7 +73,7 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
     this.maxWindow = maximumSize - maxMain;
     this.maxMainProtected = (int) (maxMain * settings.percentMainProtected());
     this.maxWindowProtected = (int) (maxWindow * settings.percentWindowProtected());
-    this.admittor = new TinyLfu(settings.config(), policyStats);
+    this.admitter = Admission.TINYLFU.from(settings.config(), policyStats);
     this.data = new Long2ObjectOpenHashMap<>();
     this.headWindowProbation = new Node();
     this.headWindowProtected = new Node();
@@ -79,7 +83,7 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   /** Returns all variations of this policy based on the configuration parameters. */
   public static Set<Policy> policies(Config config) {
-    FullySegmentedWindowTinyLfuSettings settings = new FullySegmentedWindowTinyLfuSettings(config);
+    var settings = new FullySegmentedWindowTinyLfuSettings(config);
     return settings.percentMain().stream()
         .map(percentMain -> new FullySegmentedWindowTinyLfuPolicy(percentMain, settings))
         .collect(toUnmodifiableSet());
@@ -92,9 +96,9 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   @Override
   public void record(long key) {
+    var node = data.get(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
-    admittor.record(key);
+    admitter.record(key);
 
     if (node == null) {
       onMiss(key);
@@ -118,7 +122,7 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   /** Adds the entry to the admission window, evicting if necessary. */
   private void onMiss(long key) {
-    Node node = new Node(key, Status.WINDOW_PROBATION);
+    var node = new Node(key, Status.WINDOW_PROBATION);
     node.appendToTail(headWindowProbation);
     data.put(key, node);
     sizeWindow++;
@@ -133,7 +137,7 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     sizeWindowProtected++;
     if (sizeWindowProtected > maxWindowProtected) {
-      Node demote = headWindowProtected.next;
+      Node demote = requireNonNull(headWindowProtected.next);
       demote.remove();
       demote.status = Status.WINDOW_PROBATION;
       demote.appendToTail(headWindowProbation);
@@ -154,7 +158,7 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     sizeMainProtected++;
     if (sizeMainProtected > maxMainProtected) {
-      Node demote = headMainProtected.next;
+      Node demote = requireNonNull(headMainProtected.next);
       demote.remove();
       demote.status = Status.MAIN_PROBATION;
       demote.appendToTail(headMainProbation);
@@ -176,7 +180,7 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
       return;
     }
 
-    Node candidate = headWindowProbation.next;
+    Node candidate = requireNonNull(headWindowProbation.next);
 
     sizeWindow--;
     candidate.remove();
@@ -184,8 +188,8 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
     candidate.appendToTail(headMainProbation);
 
     if (data.size() > maximumSize) {
-      Node victim = headMainProbation.next;
-      Node evict = admittor.admit(candidate.key, victim.key) ? victim : candidate;
+      Node victim = requireNonNull(headMainProbation.next);
+      Node evict = admitter.admit(candidate.key, victim.key) ? victim : candidate;
       data.remove(evict.key);
       evict.remove();
 
@@ -219,9 +223,9 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
   static final class Node {
     final long key;
 
-    Status status;
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
+    @Nullable Status status;
 
     /** Creates a new sentinel node. */
     public Node() {
@@ -243,6 +247,7 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void appendToTail(Node head) {
+      requireNonNull(head.prev);
       Node tail = head.prev;
       head.prev = this;
       tail.next = this;
@@ -252,6 +257,9 @@ public final class FullySegmentedWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       prev.next = next;
       next.prev = prev;
       next = prev = null;

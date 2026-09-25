@@ -15,17 +15,18 @@
  */
 package com.github.benmanes.caffeine.cache;
 
-import static com.github.benmanes.caffeine.cache.Caffeine.UNSET_INT;
 import static com.github.benmanes.caffeine.cache.Caffeine.requireArgument;
 import static com.github.benmanes.caffeine.cache.Caffeine.requireState;
 import static java.util.Locale.US;
 import static java.util.Objects.requireNonNull;
 
 import java.time.Duration;
+import java.time.format.DateTimeParseException;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.Caffeine.Strength;
 
@@ -70,25 +71,31 @@ import com.github.benmanes.caffeine.cache.Caffeine.Strength;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@NullMarked
 public final class CaffeineSpec {
   static final String SPLIT_OPTIONS = ",";
   static final String SPLIT_KEY_VALUE = "=";
 
   final String specification;
 
-  int initialCapacity = UNSET_INT;
-  long maximumWeight = UNSET_INT;
-  long maximumSize = UNSET_INT;
   boolean recordStats;
-
+  @Nullable Long maximumSize;
+  @Nullable Long maximumWeight;
   @Nullable Strength keyStrength;
   @Nullable Strength valueStrength;
+  @Nullable Integer initialCapacity;
   @Nullable Duration expireAfterWrite;
   @Nullable Duration expireAfterAccess;
   @Nullable Duration refreshAfterWrite;
 
   private CaffeineSpec(String specification) {
     this.specification = requireNonNull(specification);
+
+    @SuppressWarnings("StringSplitter")
+    var options = specification.split(SPLIT_OPTIONS);
+    for (String option : options) {
+      parseOption(option.strip());
+    }
   }
 
   /**
@@ -97,14 +104,14 @@ public final class CaffeineSpec {
    * @return a builder configured to the specification
    */
   Caffeine<Object, Object> toBuilder() {
-    Caffeine<Object, Object> builder = Caffeine.newBuilder();
-    if (initialCapacity != UNSET_INT) {
+    var builder = Caffeine.newBuilder();
+    if (initialCapacity != null) {
       builder.initialCapacity(initialCapacity);
     }
-    if (maximumSize != UNSET_INT) {
+    if (maximumSize != null) {
       builder.maximumSize(maximumSize);
     }
-    if (maximumWeight != UNSET_INT) {
+    if (maximumWeight != null) {
       builder.maximumWeight(maximumWeight);
     }
     if (keyStrength != null) {
@@ -114,7 +121,7 @@ public final class CaffeineSpec {
     if (valueStrength != null) {
       if (valueStrength == Strength.WEAK) {
         builder.weakValues();
-      } else if (valueStrength == Strength.SOFT) {
+      } else {
         builder.softValues();
       }
     }
@@ -139,13 +146,8 @@ public final class CaffeineSpec {
    * @param specification the string form
    * @return the parsed specification
    */
-  @SuppressWarnings("StringSplitter")
   public static CaffeineSpec parse(String specification) {
-    CaffeineSpec spec = new CaffeineSpec(specification);
-    for (String option : specification.split(SPLIT_OPTIONS)) {
-      spec.parseOption(option.trim());
-    }
-    return spec;
+    return new CaffeineSpec(specification);
   }
 
   /** Parses and applies the configuration option. */
@@ -156,12 +158,11 @@ public final class CaffeineSpec {
 
     @SuppressWarnings("StringSplitter")
     String[] keyAndValue = option.split(SPLIT_KEY_VALUE, 3);
-    requireArgument(keyAndValue.length >= 1, "blank key-value pair");
     requireArgument(keyAndValue.length <= 2,
         "key-value pair %s with more than one equals sign", option);
 
-    String key = keyAndValue[0].trim();
-    String value = (keyAndValue.length == 1) ? null : keyAndValue[1].trim();
+    String key = keyAndValue[0].strip();
+    String value = (keyAndValue.length == 1) ? null : keyAndValue[1].strip();
 
     configure(option, key, value);
   }
@@ -206,25 +207,25 @@ public final class CaffeineSpec {
 
   /** Configures the initial capacity. */
   void initialCapacity(String key, @Nullable String value) {
-    requireArgument(initialCapacity == UNSET_INT,
+    requireArgument(initialCapacity == null,
         "initial capacity was already set to %,d", initialCapacity);
     initialCapacity = parseInt(key, value);
   }
 
   /** Configures the maximum size. */
   void maximumSize(String key, @Nullable String value) {
-    requireArgument(maximumSize == UNSET_INT,
+    requireArgument(maximumSize == null,
         "maximum size was already set to %,d", maximumSize);
-    requireArgument(maximumWeight == UNSET_INT,
+    requireArgument(maximumWeight == null,
         "maximum weight was already set to %,d", maximumWeight);
     maximumSize = parseLong(key, value);
   }
 
-  /** Configures the maximum size. */
+  /** Configures the maximum weight. */
   void maximumWeight(String key, @Nullable String value) {
-    requireArgument(maximumWeight == UNSET_INT,
+    requireArgument(maximumWeight == null,
         "maximum weight was already set to %,d", maximumWeight);
-    requireArgument(maximumSize == UNSET_INT,
+    requireArgument(maximumSize == null,
         "maximum size was already set to %,d", maximumSize);
     maximumWeight = parseLong(key, value);
   }
@@ -271,8 +272,9 @@ public final class CaffeineSpec {
   /** Returns a parsed int value. */
   static int parseInt(String key, @Nullable String value) {
     requireArgument((value != null) && !value.isEmpty(), "value of key %s was omitted", key);
+    requireNonNull(value);
     try {
-      return Integer.parseInt(value);
+      return Integer.parseInt(normalizeNumericLiteral(value));
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(String.format(US,
           "key %s value was set to %s, must be an integer", key, value), e);
@@ -282,37 +284,58 @@ public final class CaffeineSpec {
   /** Returns a parsed long value. */
   static long parseLong(String key, @Nullable String value) {
     requireArgument((value != null) && !value.isEmpty(), "value of key %s was omitted", key);
+    requireNonNull(value);
     try {
-      return Long.parseLong(value);
+      return Long.parseLong(normalizeNumericLiteral(value));
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException(String.format(US,
           "key %s value was set to %s, must be a long", key, value), e);
     }
   }
 
+  /** Returns the value after adjusting for underscores in a numeric literal. */
+  static String normalizeNumericLiteral(String value) {
+    boolean invalid = value.startsWith("+_") || value.startsWith("-_")
+        || value.startsWith("_") || value.endsWith("_");
+    return invalid ? value : value.replace("_", "");
+  }
+
   /** Returns a parsed duration value. */
   static Duration parseDuration(String key, @Nullable String value) {
     requireArgument((value != null) && !value.isEmpty(), "value of key %s omitted", key);
+    requireNonNull(value);
 
-    @SuppressWarnings("NullAway")
     boolean isIsoFormat = value.contains("p") || value.contains("P");
-    if (isIsoFormat) {
-      Duration duration = Duration.parse(value);
-      requireArgument(!duration.isNegative(),
-          "key %s invalid format; was %s, but the duration cannot be negative", key, value);
-      return duration;
-    }
+    Duration duration = isIsoFormat
+        ? parseIsoDuration(key, value)
+        : parseSimpleDuration(key, value);
+    requireArgument(!duration.isNegative(),
+        "key %s invalid format; was %s, but the duration cannot be negative", key, value);
+    return duration;
+  }
 
-    @SuppressWarnings("NullAway")
+  /** Returns a parsed duration using the ISO-8601 format. */
+  static Duration parseIsoDuration(String key, String value) {
+    try {
+      return Duration.parse(value);
+    } catch (DateTimeParseException e) {
+      throw new IllegalArgumentException(String.format(US,
+          "key %s invalid format; was %s, but the duration cannot be parsed", key, value), e);
+    }
+  }
+
+  /** Returns a parsed duration using the simple time unit format. */
+  static Duration parseSimpleDuration(String key, String value) {
     long duration = parseLong(key, value.substring(0, value.length() - 1));
     TimeUnit unit = parseTimeUnit(key, value);
     return Duration.ofNanos(unit.toNanos(duration));
   }
 
   /** Returns a parsed {@link TimeUnit} value. */
-  static TimeUnit parseTimeUnit(String key, @Nullable String value) {
+  @SuppressWarnings({"ConstantValue", "StatementSwitchToExpressionSwitch"})
+  static TimeUnit parseTimeUnit(String key, String value) {
     requireArgument((value != null) && !value.isEmpty(), "value of key %s omitted", key);
-    @SuppressWarnings("NullAway")
+    @SuppressWarnings("null")
     char lastChar = Character.toLowerCase(value.charAt(value.length() - 1));
     switch (lastChar) {
       case 'd':
@@ -336,22 +359,21 @@ public final class CaffeineSpec {
     } else if (!(o instanceof CaffeineSpec)) {
       return false;
     }
-    CaffeineSpec spec = (CaffeineSpec) o;
+    var spec = (CaffeineSpec) o;
     return Objects.equals(refreshAfterWrite, spec.refreshAfterWrite)
         && Objects.equals(expireAfterAccess, spec.expireAfterAccess)
         && Objects.equals(expireAfterWrite, spec.expireAfterWrite)
-        && (initialCapacity == spec.initialCapacity)
-        && (maximumWeight == spec.maximumWeight)
+        && Objects.equals(initialCapacity, spec.initialCapacity)
+        && Objects.equals(maximumWeight, spec.maximumWeight)
+        && Objects.equals(maximumSize, spec.maximumSize)
         && (valueStrength == spec.valueStrength)
         && (keyStrength == spec.keyStrength)
-        && (maximumSize == spec.maximumSize)
         && (recordStats == spec.recordStats);
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(
-        initialCapacity, maximumSize, maximumWeight, keyStrength, valueStrength,
+    return Objects.hash(initialCapacity, maximumSize, maximumWeight, keyStrength, valueStrength,
         recordStats, expireAfterWrite, expireAfterAccess, refreshAfterWrite);
   }
 

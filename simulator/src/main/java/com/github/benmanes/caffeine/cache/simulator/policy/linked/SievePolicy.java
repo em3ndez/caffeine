@@ -18,12 +18,15 @@ package com.github.benmanes.caffeine.cache.simulator.policy.linked;
 import static com.github.benmanes.caffeine.cache.simulator.policy.Policy.Characteristic.WEIGHTED;
 import static com.google.common.base.Preconditions.checkState;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.AccessEvent;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -48,9 +51,10 @@ public final class SievePolicy implements Policy {
   final PolicyStats policyStats;
   final long maximumSize;
 
-  Node head;
-  Node tail;
-  Node hand;
+  @Nullable Node head;
+  @Nullable Node tail;
+  @Nullable Node hand;
+
   long size;
 
   public SievePolicy(Config config) {
@@ -62,8 +66,8 @@ public final class SievePolicy implements Policy {
 
   @Override
   public void record(AccessEvent event) {
+    var node = data.get(event.key());
     policyStats.recordOperation();
-    Node node = data.get(event.key());
     if (node == null) {
       onMiss(event);
     } else {
@@ -87,7 +91,7 @@ public final class SievePolicy implements Policy {
       policyStats.recordWeightedMiss(event.weight());
       return;
     }
-    while ((size + event.weight()) >= maximumSize) {
+    while ((size + event.weight()) > maximumSize) {
       evict();
     }
     policyStats.recordWeightedMiss(event.weight());
@@ -98,7 +102,7 @@ public final class SievePolicy implements Policy {
   }
 
   private void evict() {
-    var victim = (hand == null) ? tail : hand;
+    @Var var victim = (hand == null) ? tail : hand;
     while ((victim != null) && victim.visited) {
       victim.visited = false;
       victim = (victim.prev == null) ? tail : victim.prev;
@@ -155,8 +159,9 @@ public final class SievePolicy implements Policy {
   static final class Node {
     final long key;
 
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
+
     int weight;
     boolean visited;
 

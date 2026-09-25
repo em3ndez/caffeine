@@ -15,73 +15,116 @@
  */
 package com.github.benmanes.caffeine.cache.node;
 
+import static com.github.benmanes.caffeine.cache.RuleContext.varHandleName;
+import static com.github.benmanes.caffeine.cache.Specifications.NODE_FACTORY;
 import static com.github.benmanes.caffeine.cache.Specifications.kTypeVar;
 import static com.github.benmanes.caffeine.cache.Specifications.referenceType;
 
-import java.util.List;
-
 import javax.lang.model.element.Modifier;
 
-import com.squareup.javapoet.ClassName;
-import com.squareup.javapoet.FieldSpec;
-import com.squareup.javapoet.MethodSpec;
+import org.jspecify.annotations.Nullable;
+
+import com.github.benmanes.caffeine.cache.Rule;
+import com.github.benmanes.caffeine.cache.node.NodeContext.Strength;
+import com.github.benmanes.caffeine.cache.node.NodeContext.FieldAccess;
+import com.palantir.javapoet.AnnotationSpec;
+import com.palantir.javapoet.ClassName;
+import com.palantir.javapoet.FieldSpec;
+import com.palantir.javapoet.MethodSpec;
+import com.palantir.javapoet.TypeName;
 
 /**
  * Adds the key to the node.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@SuppressWarnings("PMD.AvoidDuplicateLiterals")
-public final class AddKey extends NodeRule {
+public final class AddKey implements Rule<NodeContext> {
 
   @Override
-  protected boolean applies() {
-    return isBaseClass();
+  public boolean applies(NodeContext context) {
+    return context.isBaseClass();
   }
 
   @Override
-  protected void execute() {
-    if (isStrongValues()) {
-      addIfStrongValue();
+  public void execute(NodeContext context) {
+    if (context.isStrongValues()) {
+      addIfStrongValue(context);
     } else {
-      addIfCollectedValue();
+      addIfCollectedValue(context);
     }
   }
 
-  private void addIfStrongValue() {
-    var fieldSpec = isStrongKeys()
+  private static void addIfStrongValue(NodeContext context) {
+    var fieldSpec = context.isStrongKeys()
         ? FieldSpec.builder(kTypeVar, "key", Modifier.VOLATILE)
-        : FieldSpec.builder(keyReferenceType(), "key", Modifier.VOLATILE);
-    context.nodeSubtype
+        : FieldSpec.builder(context.keyReferenceType(), "key", Modifier.VOLATILE);
+    context.classSpec
         .addField(fieldSpec.build())
-        .addMethod(newGetter(keyStrength(), kTypeVar, "key", Visibility.PLAIN))
-        .addMethod(newGetRef("key"));
-    addVarHandle("key", isStrongKeys()
+        .addMethod(context.newGetter(context.keyStrength(), kTypeVar, "key",
+            (context.keyStrength() == Strength.STRONG) ? FieldAccess.OPAQUE : FieldAccess.PLAIN))
+        .addMethod(MethodSpec.methodBuilder("getKeyReference")
+            .addModifiers(context.publicFinalModifiers())
+            .addStatement("return $L.getOpaque(this)", varHandleName("key"))
+            .returns(Object.class)
+            .build());
+    var getKeyReferenceOrNull = MethodSpec.methodBuilder("getKeyReferenceOrNull")
+        .addModifiers(context.publicFinalModifiers());
+    if (context.isStrongKeys()) {
+      getKeyReferenceOrNull
+          .addStatement("return $L.getOpaque(this)", varHandleName("key"))
+          .returns(Object.class);
+    } else {
+      getKeyReferenceOrNull
+          .addStatement("$1T keyRef = ($1T) $2L.getOpaque(this)",
+              referenceType, varHandleName("key"))
+          .addStatement("return (keyRef.get() == null) ? null : keyRef")
+          .returns(TypeName.get(Object.class)
+              .annotated(AnnotationSpec.builder(Nullable.class).build()));
+    }
+    context.classSpec.addMethod(getKeyReferenceOrNull.build());
+    context.addVarHandle(NODE_FACTORY.rawType(), "key", context.isStrongKeys()
         ? ClassName.get(Object.class)
-        : keyReferenceType().rawType);
+        : context.keyReferenceType().rawType());
   }
 
-  private void addIfCollectedValue() {
-    context.nodeSubtype.addMethod(MethodSpec.methodBuilder("getKeyReference")
-        .addModifiers(context.publicFinalModifiers())
-        .returns(Object.class)
-        .addStatement("$1T valueRef = ($1T) $2L.get(this)",
-            valueReferenceType(), varHandleName("value"))
-        .addStatement("return valueRef.getKeyReference()")
-        .build());
+  private static void addIfCollectedValue(NodeContext context) {
+    context.classSpec
+        .addMethod(MethodSpec.methodBuilder("getKeyReference")
+            .addModifiers(context.publicFinalModifiers())
+            .addStatement("$1T valueRef = ($1T) $2L.getAcquire(this)",
+                context.valueReferenceType(), varHandleName("value"))
+            .addStatement("return valueRef.getKeyReference()")
+            .returns(Object.class)
+            .build());
+    var getKeyReferenceOrNull = MethodSpec.methodBuilder("getKeyReferenceOrNull")
+            .addModifiers(context.publicFinalModifiers())
+            .addStatement("$1T valueRef = ($1T) $2L.getAcquire(this)",
+                context.valueReferenceType(), varHandleName("value"));
+    if (context.isStrongKeys()) {
+      getKeyReferenceOrNull
+          .addStatement("return valueRef.getKeyReference()")
+          .returns(Object.class);
+    } else {
+      getKeyReferenceOrNull
+          .addStatement("$1T keyRef = ($1T) valueRef.getKeyReference()", referenceType)
+          .addStatement("return (keyRef.get() == null) ? null : keyRef")
+          .returns(TypeName.get(Object.class)
+              .annotated(AnnotationSpec.builder(Nullable.class).build()));
+    }
+    context.classSpec.addMethod(getKeyReferenceOrNull.build());
 
     var getKey = MethodSpec.methodBuilder("getKey")
         .addModifiers(context.publicFinalModifiers())
         .returns(kTypeVar)
-        .addStatement("$1T valueRef = ($1T) $2L.get(this)",
-            valueReferenceType(), varHandleName("value"));
-    if (isStrongKeys()) {
+        .addStatement("$1T valueRef = ($1T) $2L.getAcquire(this)",
+            context.valueReferenceType(), varHandleName("value"));
+    if (context.isStrongKeys()) {
       getKey.addStatement("return ($T) valueRef.getKeyReference()", kTypeVar);
     } else {
       getKey.addStatement("$1T keyRef = ($1T) valueRef.getKeyReference()", referenceType);
       getKey.addStatement("return keyRef.get()");
     }
-    context.nodeSubtype.addMethod(getKey.build());
-    context.suppressedWarnings.addAll(List.of("NullAway", "unchecked"));
+    context.classSpec.addMethod(getKey.build());
+    context.suppressedWarnings.add("unchecked");
   }
 }

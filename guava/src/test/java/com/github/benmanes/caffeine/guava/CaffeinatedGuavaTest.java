@@ -15,13 +15,33 @@
  */
 package com.github.benmanes.caffeine.guava;
 
+import static com.github.benmanes.caffeine.guava.CaffeinatedGuava.caffeinate;
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
+import static java.util.Objects.requireNonNull;
+import static java.util.Spliterator.CONCURRENT;
+import static java.util.Spliterator.DISTINCT;
+import static java.util.Spliterator.NONNULL;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.IOException;
+import java.io.Serializable;
 import java.lang.reflect.Constructor;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.stream.Stream;
+
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.guava.CaffeinatedGuavaLoadingCache.CaffeinatedLoader;
@@ -29,10 +49,14 @@ import com.github.benmanes.caffeine.guava.CaffeinatedGuavaLoadingCache.ExternalB
 import com.github.benmanes.caffeine.guava.CaffeinatedGuavaLoadingCache.ExternalSingleLoader;
 import com.github.benmanes.caffeine.guava.CaffeinatedGuavaLoadingCache.InternalBulkLoader;
 import com.github.benmanes.caffeine.guava.CaffeinatedGuavaLoadingCache.InternalSingleLoader;
-import com.github.benmanes.caffeine.guava.compatibility.TestingCacheLoaders;
+import com.google.common.base.Function;
+import com.google.common.base.Throwables;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.CacheLoader.InvalidCacheLoadException;
 import com.google.common.cache.LoadingCache;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
@@ -41,37 +65,320 @@ import com.google.common.testing.SerializableTester;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 
-import junit.framework.TestCase;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class CaffeinatedGuavaTest extends TestCase {
+final class CaffeinatedGuavaTest {
 
-  public void testSerializable() {
+  @Test
+  void serializable() {
     SerializableTester.reserialize(CaffeinatedGuava.build(Caffeine.newBuilder()));
     SerializableTester.reserialize(CaffeinatedGuava.build(
         Caffeine.newBuilder(), IdentityLoader.INSTANCE));
-    SerializableTester.reserialize(CaffeinatedGuava.build(
-        Caffeine.newBuilder(), TestingCacheLoaders.identityLoader()));
+    SerializableTester.reserialize(CaffeinatedGuava.build(Caffeine.newBuilder(),
+        CacheLoader.from((Function<Object, Object> & Serializable) key -> key)));
   }
 
-  public void testReflectivelyConstruct() throws ReflectiveOperationException {
+  @Test
+  @SuppressWarnings("PMD.AvoidAccessibilityAlteration")
+  void reflectivelyConstruct() throws ReflectiveOperationException {
     Constructor<?> constructor = CaffeinatedGuava.class.getDeclaredConstructor();
     constructor.setAccessible(true);
     constructor.newInstance();
   }
 
-  public void testHasMethod_notFound() {
-    assertFalse(CaffeinatedGuava.hasMethod(TestingCacheLoaders.identityLoader(), "abc"));
+  @Test
+  @SuppressWarnings({"DataFlowIssue", "NullAway"})
+  void nativeLoader_nullValue() {
+    com.github.benmanes.caffeine.cache.CacheLoader<Integer, Integer> loader = key -> null;
+    var cache = CaffeinatedGuava.build(Caffeine.newBuilder(), loader);
+    assertThrows(InvalidCacheLoadException.class, () -> cache.get(1));
+    assertThrows(InvalidCacheLoadException.class, () -> cache.getUnchecked(1));
   }
 
-  public void testReload_interrupted() {
+  @Test
+  void hasMethod_notFound() {
+    assertThat(CaffeinatedGuava.hasMethod(CacheLoader.from(k -> k), "abc")).isFalse();
+  }
+
+  @ParameterizedTest
+  @MethodSource("caches")
+  @SuppressFBWarnings("NP_NONNULL_PARAM_VIOLATION")
+  void asMap_get_null(Cache<Integer, Integer> cache) {
+    cache.put(1, 2);
+
+    assertThat(cache.asMap().get(null)).isNull();
+    assertThat(cache.asMap().containsKey(null)).isFalse();
+    assertThat(cache.asMap().containsValue(null)).isFalse();
+    assertThat(cache.asMap().remove(null)).isNull();
+    assertThat(cache.asMap().remove(null, 2)).isFalse();
+    assertThat(cache.asMap().remove(1, null)).isFalse();
+    assertThat(cache.asMap().replace(1, nullRef(), 3)).isFalse();
+    assertThat(cache.asMap().keySet().contains(null)).isFalse();
+    assertThat(cache.asMap().values().contains(null)).isFalse();
+    assertThat(cache.asMap()).containsExactly(1, 2);
+  }
+
+  @ParameterizedTest
+  @MethodSource("caches")
+  void asMap_replace_null(Cache<Integer, Integer> cache) {
+    cache.put(1, 2);
+
+    // Guava checks the key and new value for null before the old-value guard, so a null key or
+    // new value throws rather than silently returning false
+    assertThrows(NullPointerException.class, () -> cache.asMap().replace(nullRef(), nullRef(), 3));
+    assertThrows(NullPointerException.class, () -> cache.asMap().replace(1, nullRef(), nullRef()));
+  }
+
+  @ParameterizedTest
+  @MethodSource("caches")
+  void asMap_entrySet_removeIf_setValue(Cache<String, String> cache) {
+    cache.put("a", "1");
+
+    // The view delegates to the cache's removeIf, which (like ConcurrentHashMap and Guava,
+    // JDK-8078726) passes the predicate an immutable snapshot, so setValue is unsupported
+    assertThrows(UnsupportedOperationException.class, () ->
+        cache.asMap().entrySet().removeIf(entry -> {
+          entry.setValue("2");
+          return false;
+        }));
+    assertThat(cache.asMap()).containsExactly("a", "1");
+  }
+
+  @Test
+  void asMap_spliterator_concurrent() {
+    // The views delegate to the cache so the spliterators report CONCURRENT rather than the
+    // SIZED default that the forwarding views would otherwise inherit
+    Cache<String, String> cache = CaffeinatedGuava.build(Caffeine.newBuilder());
+    cache.put("a", "1");
+
+    assertThat(cache.asMap().keySet().spliterator().characteristics())
+        .isEqualTo(DISTINCT | NONNULL | CONCURRENT);
+    assertThat(cache.asMap().values().spliterator().characteristics())
+        .isEqualTo(NONNULL | CONCURRENT);
+    assertThat(cache.asMap().entrySet().spliterator().characteristics())
+        .isEqualTo(DISTINCT | NONNULL | CONCURRENT);
+  }
+
+  @ParameterizedTest
+  @MethodSource("caches")
+  void getAllPresent_nullKey(Cache<Integer, Integer> cache) {
+    cache.put(1, 2);
+
+    assertThat(cache.getAllPresent(Arrays.asList(1, nullRef(), 3))).containsExactly(1, 2);
+  }
+
+  @ParameterizedTest
+  @MethodSource("caches")
+  void invalidateAll_nullKey(Cache<Integer, Integer> cache) {
+    cache.put(1, 2);
+    cache.put(3, 4);
+
+    // A null element is skipped (as in Guava), not an NPE that leaves a partial removal
+    cache.invalidateAll(Arrays.asList(1, nullRef(), 3));
+    assertThat(cache.asMap()).isEmpty();
+  }
+
+  @ParameterizedTest
+  @MethodSource("caches")
+  @SuppressFBWarnings("LUI_VACUOUS_ADDALL")
+  void entrySet_addAll_empty(Cache<Integer, Integer> cache) {
+    // Guava's AbstractCollection.addAll returns false for an empty collection rather than throwing
+    assertThat(cache.asMap().entrySet().addAll(Set.<Map.Entry<Integer, Integer>>of())).isFalse();
+  }
+
+  @Test
+  void bulkLoad() throws ReflectiveOperationException, ExecutionException {
+    var cache = CaffeinatedGuava.build(Caffeine.newBuilder(), new CacheLoader<Integer, Integer>() {
+      @Override public Integer load(Integer key) {
+        throw new IllegalStateException();
+      }
+      @Override public ImmutableMap<Integer, Integer> loadAll(Iterable<? extends Integer> keys) {
+        return Maps.toMap(ImmutableSet.copyOf(keys), key -> -key);
+      }
+    });
+    var nullBulkLoad = getNullBulkLoad(cache);
+    assertThat(nullBulkLoad.get()).isNull();
+    assertThat(cache.getAll(ImmutableList.of(1, 2, 3)))
+        .isEqualTo(ImmutableMap.of(1, -1, 2, -2, 3, -3));
+    assertThat(nullBulkLoad.get()).isNull();
+  }
+
+  @Test
+  void bulkLoad_nullKey() throws ReflectiveOperationException {
+    var cache = CaffeinatedGuava.build(Caffeine.newBuilder(), new CacheLoader<Integer, Integer>() {
+      @Override public Integer load(Integer key) {
+        throw new IllegalStateException();
+      }
+      @Override public Map<Integer, Integer> loadAll(Iterable<? extends Integer> keys) {
+        var result = new HashMap<Integer, Integer>();
+        for (var key : keys) {
+          result.put(nullRef(), -key);
+        }
+        return result;
+      }
+    });
+    var nullBulkLoad = getNullBulkLoad(cache);
+    assertThat(nullBulkLoad.get()).isNull();
+    assertThrows(InvalidCacheLoadException.class, () -> cache.getAll(ImmutableList.of(1, 2, 3)));
+    assertThat(nullBulkLoad.get()).isNull();
+  }
+
+  @Test
+  void bulkLoad_nullValue() throws ReflectiveOperationException {
+    var cache = CaffeinatedGuava.build(Caffeine.newBuilder(), new CacheLoader<Integer, Integer>() {
+      @Override public Integer load(Integer key) {
+        throw new IllegalStateException();
+      }
+      @Override public Map<Integer, Integer> loadAll(Iterable<? extends Integer> keys) {
+        var result = new HashMap<Integer, Integer>();
+        for (var key : keys) {
+          result.put(key, nullRef());
+        }
+        return result;
+      }
+    });
+    var nullBulkLoad = getNullBulkLoad(cache);
+    assertThat(nullBulkLoad.get()).isNull();
+    assertThrows(InvalidCacheLoadException.class, () -> cache.getAll(ImmutableList.of(1, 2, 3)));
+    assertThat(nullBulkLoad.get()).isNull();
+  }
+
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void bulkLoad_freshKeys(
+      Function<CacheLoader<Key, Integer>, LoadingCache<Key, Integer>> factory)
+      throws ExecutionException {
+    var loader = new CacheLoader<Key, Integer>() {
+      @Override public Integer load(Key key) {
+        throw new IllegalStateException();
+      }
+      @Override public Map<Key, Integer> loadAll(Iterable<? extends Key> keys) {
+        var loaded = new HashMap<Key, Integer>();
+        for (var key : keys) {
+          loaded.put(new Key(key.name), key.name.length());
+        }
+        return loaded;
+      }
+    };
+    var cache = factory.apply(loader);
+    assertThat(cache.getAll(ImmutableList.of(new Key("ab")))).containsExactly(new Key("ab"), 2);
+  }
+
+  @Test
+  void bulkLoad_equalExtras() throws ExecutionException {
+    // Guava stores each returned entry, so distinct extras that are equal are both cached
+    var extra1 = new Key("x");
+    var extra2 = new Key("x");
+    var cache = CaffeinatedGuava.build(Caffeine.newBuilder().weakKeys(),
+        new CacheLoader<Key, Integer>() {
+          @Override public Integer load(Key key) {
+            throw new IllegalStateException();
+          }
+          @Override public Map<Key, Integer> loadAll(Iterable<? extends Key> keys) {
+            var loaded = new IdentityHashMap<Key, Integer>();
+            for (var key : keys) {
+              loaded.put(key, key.name.length());
+            }
+            loaded.put(extra1, 1);
+            loaded.put(extra2, 2);
+            return loaded;
+          }
+        });
+    var key = new Key("ab");
+    assertThat(cache.getAll(ImmutableList.of(key))).containsExactly(key, 2);
+    assertThat(cache.getIfPresent(extra1)).isEqualTo(1);
+    assertThat(cache.getIfPresent(extra2)).isEqualTo(2);
+  }
+
+  @Test
+  void bulkLoad_nested() {
+    var loader = new CacheLoader<Integer, Integer>() {
+      @Override public Integer load(Integer key) {
+        throw new IllegalStateException();
+      }
+      @Override public Map<Integer, Integer> loadAll(Iterable<? extends Integer> keys) {
+        var loaded = new HashMap<Integer, Integer>();
+        loaded.put(1, -1);
+        loaded.put(3, -3);
+        loaded.put(nullRef(), -2);
+        return loaded;
+      }
+    };
+    var nested = CaffeinatedGuava.build(Caffeine.newBuilder(),
+        new CacheLoader<Integer, Integer>() {
+          @Override public Integer load(Integer key) {
+            return -key;
+          }
+        });
+    LoadingCache<Integer, Integer> guava = CacheBuilder.newBuilder()
+        .maximumWeight(Integer.MAX_VALUE)
+        .<Integer, Integer>weigher((key, value) -> loadNested(nested))
+        .build(loader);
+    LoadingCache<Integer, Integer> caffeine = CaffeinatedGuava.build(Caffeine.newBuilder()
+        .maximumWeight(Integer.MAX_VALUE)
+        .<Integer, Integer>weigher((key, value) -> loadNested(nested)), loader);
+    for (var cache : ImmutableList.of(guava, caffeine)) {
+      cache.put(3, 0);
+      assertThrows(InvalidCacheLoadException.class, () -> cache.getAll(ImmutableList.of(1)));
+    }
+  }
+
+  /**
+   * Performs a bulk load from within the enclosing one's write, discarding its outcome so that only
+   * the enclosing load's result is asserted.
+   */
+  @SuppressWarnings("CatchingUnchecked")
+  @SuppressFBWarnings("MRC_METHOD_RETURNS_CONSTANT")
+  private static int loadNested(LoadingCache<Integer, Integer> cache) {
+    try {
+      cache.getAll(ImmutableList.of());
+    } catch (Exception expected) { /* ignored */ }
+    return 1;
+  }
+
+  @Test
+  void bulkLoad_asyncReloading() throws ExecutionException {
+    var cache = CaffeinatedGuava.build(Caffeine.newBuilder(),
+        CacheLoader.asyncReloading(new CacheLoader<Integer, Integer>() {
+          @Override public Integer load(Integer key) {
+            return -key;
+          }
+        }, Runnable::run));
+    assertThat(cache.getAll(ImmutableList.of(1, 2, 3)))
+        .isEqualTo(ImmutableMap.of(1, -1, 2, -2, 3, -3));
+  }
+
+  @Test
+  void bulkLoad_asyncReloading_caffeinate() {
+    var cache = Caffeine.newBuilder().build(
+        caffeinate(CacheLoader.asyncReloading(new CacheLoader<Integer, Integer>() {
+          @Override public Integer load(Integer key) {
+            return -key;
+          }
+        }, Runnable::run)));
+    assertThat(cache.getAll(ImmutableList.of(1, 2, 3)))
+        .isEqualTo(Map.of(1, -1, 2, -2, 3, -3));
+  }
+
+  @SuppressWarnings("PMD.AvoidAccessibilityAlteration")
+  private static ThreadLocal<?> getNullBulkLoad(LoadingCache<Integer, Integer> cache)
+      throws NoSuchFieldException, IllegalAccessException {
+    var field = cache.getClass().getDeclaredField("nullBulkLoad");
+    field.setAccessible(true);
+    return (ThreadLocal<?>) requireNonNull(field.get(cache));
+  }
+
+  @Test
+  void reload_interrupted() {
     LoadingCache<Integer, Integer> cache = CaffeinatedGuava.build(
         Caffeine.newBuilder().executor(MoreExecutors.directExecutor()),
-        new CacheLoader<Integer, Integer>() {
+        new CacheLoader<>() {
           @Override public Integer load(Integer key) throws InterruptedException {
             throw new InterruptedException();
           }
@@ -82,12 +389,28 @@ public final class CaffeinatedGuavaTest extends TestCase {
     cache.refresh(1);
   }
 
-  public void testReload_throwable() {
+  @Test
+  void asyncReload_interrupted_restoresInterruptStatus() throws Exception {
+    var loader = CaffeinatedGuava.caffeinate(new CacheLoader<Integer, Integer>() {
+      @Override public Integer load(Integer key) throws InterruptedException {
+        throw new InterruptedException();
+      }
+    });
+
+    var future = loader.asyncReload(1, 2, Runnable::run);
+    assertThat(future.isCompletedExceptionally()).isTrue();
+    // Matching the synchronous load path and Guava, the interrupt status is restored (and cleared
+    // here so it does not leak to other tests)
+    assertThat(Thread.interrupted()).isTrue();
+  }
+
+  @Test
+  void reload_throwable() {
     LoadingCache<Integer, Integer> cache = CaffeinatedGuava.build(
         Caffeine.newBuilder().executor(MoreExecutors.directExecutor()),
-        new CacheLoader<Integer, Integer>() {
+        new CacheLoader<>() {
           @Override public Integer load(Integer key) throws Exception {
-            throw new Exception();
+            throw new IllegalStateException();
           }
         });
     cache.put(1, 1);
@@ -96,13 +419,14 @@ public final class CaffeinatedGuavaTest extends TestCase {
     cache.refresh(1);
   }
 
-  public void testCacheLoader_null() throws Exception {
-    assertThrows(NullPointerException.class, () -> CaffeinatedGuava.caffeinate(null));
+  @Test
+  void cacheLoader_null() {
+    assertThrows(NullPointerException.class, () -> CaffeinatedGuava.caffeinate(nullRef()));
 
-    var caffeine1 = CaffeinatedGuava.caffeinate(CacheLoader.from(key -> null));
+    var caffeine1 = CaffeinatedGuava.caffeinate(CacheLoader.from(key -> nullRef()));
     assertThrows(InvalidCacheLoadException.class, () -> caffeine1.load(1));
 
-    var caffeine2 = CaffeinatedGuava.caffeinate(CacheLoader.from(key -> null));
+    var caffeine2 = CaffeinatedGuava.caffeinate(CacheLoader.from(key -> nullRef()));
     var e1 = assertThrows(CompletionException.class, () ->
         caffeine2.asyncReload(1, 2, Runnable::run).join());
     assertThat(e1).hasCauseThat().isInstanceOf(InvalidCacheLoadException.class);
@@ -111,9 +435,8 @@ public final class CaffeinatedGuavaTest extends TestCase {
       @Override public Integer load(Integer key) {
         throw new UnsupportedOperationException();
       }
-      @Override
-      public ListenableFuture<Integer> reload(Integer key, Integer oldValue) {
-        return null;
+      @Override public ListenableFuture<Integer> reload(Integer key, Integer oldValue) {
+        return nullRef();
       }
     });
     var e2 = assertThrows(CompletionException.class, () ->
@@ -121,13 +444,35 @@ public final class CaffeinatedGuavaTest extends TestCase {
     assertThat(e2).hasCauseThat().isInstanceOf(InvalidCacheLoadException.class);
   }
 
-  public void testCacheLoader_exception() throws Exception {
+  @Test
+  void cacheLoader_bulkLoad_null() {
+    // The caffeinate direction must reject a null key as well as a null value, as the Guava loader
+    // may return either and neither can be stored
+    for (boolean nullKey : new boolean[] { true, false }) {
+      var caffeine = CaffeinatedGuava.caffeinate(new CacheLoader<Integer, Integer>() {
+        @Override public Integer load(Integer key) {
+          throw new UnsupportedOperationException();
+        }
+        @Override public Map<Integer, Integer> loadAll(Iterable<? extends Integer> keys) {
+          var result = new HashMap<Integer, Integer>();
+          for (var key : keys) {
+            result.put(nullKey ? nullRef() : key, nullKey ? key : nullRef());
+          }
+          return result;
+        }
+      });
+      assertThrows(InvalidCacheLoadException.class, () -> caffeine.loadAll(Set.of(1, 2, 3)));
+    }
+  }
+
+  @Test
+  void cacheLoader_exception() {
     runCacheLoaderExceptionTest(new InterruptedException());
     runCacheLoaderExceptionTest(new RuntimeException());
     runCacheLoaderExceptionTest(new Exception());
   }
 
-  public void runCacheLoaderExceptionTest(Exception error) throws Exception {
+  private static void runCacheLoaderExceptionTest(Exception error) {
     var guava = new CacheLoader<Integer, Integer>() {
       @Override public Integer load(Integer key) throws Exception {
         throw error;
@@ -149,7 +494,116 @@ public final class CaffeinatedGuavaTest extends TestCase {
     assertThat(e3).hasCauseThat().isSameInstanceAs(error);
   }
 
-  public void testCacheLoader_single() throws Exception {
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void getUnchecked_loaderNullPointerException(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var npe = new NullPointerException("loader bug");
+    var cache = factory.apply(new CacheLoader<>() {
+      @SuppressWarnings("PMD.AvoidThrowingNullPointerException")
+      @Override public Integer load(Integer key) {
+        throw npe;
+      }
+    });
+    var e = assertThrows(UncheckedExecutionException.class, () -> cache.getUnchecked(1));
+    assertThat(e).hasCauseThat().isSameInstanceAs(npe);
+  }
+
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void getUnchecked_nullKey(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var cache = factory.apply(CacheLoader.from(key -> key));
+    assertThrows(NullPointerException.class, () -> cache.getUnchecked(nullRef()));
+  }
+
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void getAll_loaderNullPointerException(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var npe = new NullPointerException("loader bug");
+    var cache = factory.apply(new CacheLoader<>() {
+      @SuppressWarnings("PMD.AvoidThrowingNullPointerException")
+      @Override public Integer load(Integer key) {
+        throw npe;
+      }
+    });
+    var e = assertThrows(UncheckedExecutionException.class,
+        () -> cache.getAll(ImmutableList.of(1, 2)));
+    assertThat(e).hasCauseThat().isSameInstanceAs(npe);
+  }
+
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void getAll_bulkLoaderNullPointerException(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var npe = new NullPointerException("bulk loader bug");
+    var cache = factory.apply(new CacheLoader<>() {
+      @Override public Integer load(Integer key) {
+        throw new UnsupportedOperationException();
+      }
+      @SuppressWarnings("PMD.AvoidThrowingNullPointerException")
+      @Override public Map<Integer, Integer> loadAll(Iterable<? extends Integer> keys) {
+        throw npe;
+      }
+    });
+    var e = assertThrows(UncheckedExecutionException.class,
+        () -> cache.getAll(ImmutableList.of(1, 2)));
+    assertThat(e).hasCauseThat().isSameInstanceAs(npe);
+  }
+
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void getAll_nullKeys(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var cache = factory.apply(CacheLoader.from(key -> key));
+    assertThrows(NullPointerException.class, () -> cache.getAll(nullRef()));
+  }
+
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void apply_loaderNullPointerException(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var npe = new NullPointerException("loader bug");
+    var cache = factory.apply(new CacheLoader<>() {
+      @SuppressWarnings("PMD.AvoidThrowingNullPointerException")
+      @Override public Integer load(Integer key) {
+        throw npe;
+      }
+    });
+    @SuppressWarnings("deprecation")
+    var e = assertThrows(UncheckedExecutionException.class, () -> cache.apply(1));
+    assertThat(e).hasCauseThat().isSameInstanceAs(npe);
+  }
+
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void apply_loaderCheckedException(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var error = new IOException("checked");
+    var cache = factory.apply(new CacheLoader<>() {
+      @Override public Integer load(Integer key) throws Exception {
+        throw error;
+      }
+    });
+    @SuppressWarnings("deprecation")
+    var e = assertThrows(UncheckedExecutionException.class, () -> cache.apply(1));
+    // The caffeinate(loader) path adds a CompletionException wrap from Caffeine's mapping
+    // function; pure Guava and the Caffeine wrapper with a Guava loader unwrap to the cause.
+    assertThat(Throwables.getRootCause(e)).isSameInstanceAs(error);
+  }
+
+  @ParameterizedTest
+  @SuppressWarnings("deprecation")
+  @MethodSource("bulkLoadingCaches")
+  void apply_nullKey(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var cache = factory.apply(CacheLoader.from(key -> key));
+    assertThrows(NullPointerException.class, () -> cache.apply(nullRef()));
+  }
+
+  @Test
+  void cacheLoader_single() throws Exception {
     var error = new Exception();
     var guava = new CacheLoader<Integer, Integer>() {
       @Override public Integer load(Integer key) throws Exception {
@@ -164,7 +618,8 @@ public final class CaffeinatedGuavaTest extends TestCase {
     checkSingleLoader(error, guava, caffeine);
   }
 
-  public void testCacheLoader_bulk() throws Exception {
+  @Test
+  void cacheLoader_bulk() throws Exception {
     var error = new Exception();
     var guava = new CacheLoader<Integer, Integer>() {
       @Override public Integer load(Integer key) throws Exception {
@@ -186,15 +641,48 @@ public final class CaffeinatedGuavaTest extends TestCase {
     checkBulkLoader(error, caffeine);
   }
 
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void cacheLoader_bulk_nullValue(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var cache = factory.apply(new CacheLoader<>() {
+      @Override public Integer load(Integer key) {
+        throw new UnsupportedOperationException();
+      }
+      @Override public Map<Integer, Integer> loadAll(Iterable<? extends Integer> keys) {
+        var result = new HashMap<Integer, Integer>();
+        for (var key : keys) {
+          result.put(key, nullRef());
+        }
+        return result;
+      }
+    });
+    assertThrows(InvalidCacheLoadException.class, () -> cache.getAll(ImmutableList.of(1, 2, 3)));
+  }
 
-  public void testCacheLoader_reload() throws Exception {
-    SettableFuture<Integer> reloader = SettableFuture.create();
+  @ParameterizedTest
+  @MethodSource("bulkLoadingCaches")
+  void cacheLoader_bulk_nullMap(
+      Function<CacheLoader<Integer, Integer>, LoadingCache<Integer, Integer>> factory) {
+    var cache = factory.apply(new CacheLoader<>() {
+      @Override public Integer load(Integer key) {
+        throw new UnsupportedOperationException();
+      }
+      @Override public Map<Integer, Integer> loadAll(Iterable<? extends Integer> keys) {
+        return nullRef();
+      }
+    });
+    assertThrows(InvalidCacheLoadException.class, () -> cache.getAll(ImmutableList.of(1, 2, 3)));
+  }
+
+  @Test
+  void cacheLoader_reload() throws Exception {
+    var reloader = SettableFuture.<Integer>create();
     var caffeine = CaffeinatedGuava.caffeinate(new CacheLoader<Integer, Integer>() {
       @Override public Integer load(Integer key) {
         throw new UnsupportedOperationException();
       }
-      @Override
-      public ListenableFuture<Integer> reload(Integer key, Integer oldValue) {
+      @Override public ListenableFuture<Integer> reload(Integer key, Integer oldValue) {
         return reloader;
       }
     });
@@ -206,14 +694,14 @@ public final class CaffeinatedGuavaTest extends TestCase {
     assertThat(future.join()).isEqualTo(3);
   }
 
-  public void testCacheLoader_reloadFailure() throws Exception {
-    SettableFuture<Integer> reloader = SettableFuture.create();
+  @Test
+  void cacheLoader_reloadFailure() throws Exception {
+    var reloader = SettableFuture.<Integer>create();
     var caffeine = CaffeinatedGuava.caffeinate(new CacheLoader<Integer, Integer>() {
       @Override public Integer load(Integer key) {
         throw new UnsupportedOperationException();
       }
-      @Override
-      public ListenableFuture<Integer> reload(Integer key, Integer oldValue) {
+      @Override public ListenableFuture<Integer> reload(Integer key, Integer oldValue) {
         return reloader;
       }
     });
@@ -228,6 +716,19 @@ public final class CaffeinatedGuavaTest extends TestCase {
     assertThat(e).hasCauseThat().isSameInstanceAs(error);
   }
 
+  static Stream<Cache<String, String>> caches() {
+    return Stream.of(CacheBuilder.newBuilder().build(),
+        CaffeinatedGuava.build(Caffeine.newBuilder()));
+  }
+
+  static Stream<Function<CacheLoader<?, ?>, LoadingCache<?, ?>>> bulkLoadingCaches() {
+    return Stream.of(
+        loader -> CacheBuilder.newBuilder().build(loader),
+        loader -> CaffeinatedGuava.build(Caffeine.newBuilder(), loader),
+        loader -> CaffeinatedGuava.build(Caffeine.newBuilder(), caffeinate(loader)));
+  }
+
+  @SuppressWarnings("PMD.SignatureDeclareThrowsException")
   private static void checkSingleLoader(Exception error, CacheLoader<Integer, Integer> guava,
       com.github.benmanes.caffeine.cache.CacheLoader<Integer, Integer> caffeine) throws Exception {
     assertThat(caffeine).isInstanceOf(ExternalSingleLoader.class);
@@ -245,12 +746,38 @@ public final class CaffeinatedGuavaTest extends TestCase {
     assertThat(e2).hasCauseThat().isSameInstanceAs(error);
   }
 
+  @SuppressWarnings("PMD.SignatureDeclareThrowsException")
   private static void checkBulkLoader(Exception error,
       com.github.benmanes.caffeine.cache.CacheLoader<Integer, Integer> caffeine) throws Exception {
     assertThat(caffeine).isInstanceOf(ExternalBulkLoader.class);
     assertThat(caffeine.loadAll(Set.of(1, 2, 3))).isEqualTo(Map.of(1, -1, 2, -2, 3, -3));
     var e = assertThrows(error.getClass(), () -> caffeine.loadAll(Set.of(1, -1)));
     assertThat(e).isSameInstanceAs(error);
+  }
+
+  /** Returns {@code null} for use when testing null checks while satisfying null analysis tools. */
+  @SuppressFBWarnings({"AI_ANNOTATION_ISSUES_NEEDS_NULLABLE", "NP_NONNULL_RETURN_VIOLATION"})
+  @SuppressWarnings({"DataFlowIssue", "NullableProblems",
+      "NullAway", "TypeParameterUnusedInFormals"})
+  private static <T> @NonNull T nullRef() {
+    return null;
+  }
+
+  static final class Key {
+    final String name;
+
+    Key(String name) {
+      this.name = name;
+    }
+    @Override public boolean equals(@Nullable Object o) {
+      return (o instanceof Key) && name.equals(((Key) o).name);
+    }
+    @Override public int hashCode() {
+      return name.hashCode();
+    }
+    @Override public String toString() {
+      return "Key(" + name + ")";
+    }
   }
 
   enum IdentityLoader implements com.github.benmanes.caffeine.cache.CacheLoader<Object, Object> {

@@ -22,7 +22,7 @@ import java.util.function.Supplier;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@SuppressWarnings("ImmutableEnumChecker")
+@SuppressWarnings({"IdentifierName", "ImmutableEnumChecker"})
 public enum BufferType {
   Ticket(TicketBuffer::new),
   FastFlow(FastFlowBuffer::new),

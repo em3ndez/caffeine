@@ -1,18 +1,38 @@
+@file:Suppress("UnstableApiUsage")
 pluginManagement {
   includeBuild("gradle/plugins")
+  repositories {
+    if (providers.environmentVariable("CI").isPresent) {
+      maven {
+        name = "googleMavenCentralMirror"
+        url = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+        mavenContent { releasesOnly() }
+      }
+    }
+    gradlePluginPortal()
+  }
 }
 plugins {
-  id("com.gradle.develocity") version "3.17.2"
-  id("com.gradle.common-custom-user-data-gradle-plugin") version "2.0.1"
-  id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0"
+  id("com.gradle.develocity") version "4.5.1"
+  id("io.github.ben-manes.versions.settings") version "0.64.0"
+  id("com.gradle.common-custom-user-data-gradle-plugin") version "2.8.0"
+  id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
 dependencyResolutionManagement {
   repositories {
+    if (providers.environmentVariable("CI").isPresent) {
+      maven {
+        name = "googleMavenCentralMirror"
+        url = uri("https://maven-central.storage-download.googleapis.com/maven2/")
+        mavenContent { releasesOnly() }
+      }
+    }
     mavenCentral()
   }
 }
 
+enableFeaturePreview("STABLE_CONFIGURATION_CACHE")
 apply(from = "$rootDir/gradle/develocity.gradle")
 
 rootProject.name = "caffeine"

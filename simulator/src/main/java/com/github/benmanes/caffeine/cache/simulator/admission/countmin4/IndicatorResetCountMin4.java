@@ -49,6 +49,11 @@ public final class IndicatorResetCountMin4 implements Frequency {
   }
 
   @Override
+  public void ensureCapacity(long maximumSize) {
+    sketch.ensureCapacity(maximumSize);
+  }
+
+  @Override
   public void reportMiss() {
     if (sketch.getEventsToCount() <= 0) {
       sketch.resetEventsToCount();
@@ -62,10 +67,11 @@ public final class IndicatorResetCountMin4 implements Frequency {
     return indicator.getIndicator();
   }
 
-  private int hintToStep(double ind) {
+  private static int hintToStep(double ind) {
     return (int) (ind * 30);
   }
 
+  @SuppressWarnings("unused")
   public int getEventsToCount() {
     return sketch.getEventsToCount();
   }

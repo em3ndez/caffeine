@@ -23,7 +23,6 @@ import org.jctools.maps.NonBlockingHashMap;
 import com.github.benmanes.caffeine.cache.impl.Cache2k;
 import com.github.benmanes.caffeine.cache.impl.CaffeineCache;
 import com.github.benmanes.caffeine.cache.impl.CoherenceCache;
-import com.github.benmanes.caffeine.cache.impl.ConcurrentHashMapV7;
 import com.github.benmanes.caffeine.cache.impl.ConcurrentMapCache;
 import com.github.benmanes.caffeine.cache.impl.Ehcache3;
 import com.github.benmanes.caffeine.cache.impl.GuavaCache;
@@ -42,16 +41,11 @@ import net.jodah.expiringmap.ExpiringMap;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@SuppressWarnings("IdentifierName")
 public enum CacheType {
 
   /* --------------- Unbounded --------------- */
 
-  ConcurrentHashMapV7 { // see OpenJDK/7u40-b43
-    @Override public <K, V> BasicCache<K, V> create(int maximumSize) {
-      return new ConcurrentMapCache<>(
-          new ConcurrentHashMapV7<>(maximumSize, 0.75f, CONCURRENCY_LEVEL));
-    }
-  },
   ConcurrentHashMap {
     @Override public <K, V> BasicCache<K, V> create(int maximumSize) {
       return new ConcurrentMapCache<>(new ConcurrentHashMap<>(maximumSize));
@@ -155,7 +149,7 @@ public enum CacheType {
   },
   LinkedHashMap_Lru {
     @Override public <K, V> BasicCache<K, V> create(int maximumSize) {
-      return new LinkedHashMapCache<>(maximumSize, /* accessOrder */ true);
+      return new LinkedHashMapCache<>(maximumSize, /* accessOrder= */ true);
     }
   },
   TCache_Lfu {

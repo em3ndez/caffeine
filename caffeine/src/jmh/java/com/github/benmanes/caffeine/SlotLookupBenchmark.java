@@ -20,12 +20,13 @@ import java.lang.invoke.VarHandle;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.LongStream;
 
-import org.jctools.util.UnsafeAccess;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.infra.Blackhole;
+
+import com.google.errorprone.annotations.Var;
 
 /**
  * A comparison of different lookup approaches for indexes for a slot in a fixed-sized shared array.
@@ -48,14 +49,13 @@ import org.openjdk.jmh.infra.Blackhole;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @State(Scope.Benchmark)
-@SuppressWarnings("PMD.MethodNamingConventions")
+@SuppressWarnings({"IdentifierName", "NotNullFieldNotInitialized",
+    "PMD.MethodNamingConventions", "unused"})
 public class SlotLookupBenchmark {
-  static final int SPARSE_SIZE = 2 << 14;
   static final int ARENA_SIZE = 2 << 6;
   static final VarHandle PROBE;
 
   ThreadLocal<Integer> threadLocal;
-  long probeOffset;
   long[] array;
 
   @Setup
@@ -75,11 +75,6 @@ public class SlotLookupBenchmark {
     array = LongStream.range(0, ARENA_SIZE).toArray();
   }
 
-  @Setup
-  public void setupStriped64() {
-    probeOffset = UnsafeAccess.fieldOffset(Thread.class, "threadLocalRandomProbe");
-  }
-
   @Benchmark
   public int threadLocal() {
     // Emulates holding the arena slot in a thread-local
@@ -94,7 +89,7 @@ public class SlotLookupBenchmark {
     return selectSlot(Long.hashCode(hash));
   }
 
-  private static long mix64(long x) {
+  private static long mix64(@Var long x) {
     x = (x ^ (x >>> 30)) * 0xbf58476d1ce4e5b9L;
     x = (x ^ (x >>> 27)) * 0x94d049bb133111ebL;
     return x ^ (x >>> 31);
@@ -107,40 +102,16 @@ public class SlotLookupBenchmark {
     return selectSlot(hash);
   }
 
-  private static int mix32(int x) {
+  private static int mix32(@Var int x) {
     x = ((x >>> 16) ^ x) * 0x45d9f3b;
     x = ((x >>> 16) ^ x) * 0x45d9f3b;
     return (x >>> 16) ^ x;
   }
 
   @Benchmark
-  public long striped64_unsafe(Blackhole blackhole) {
-    // Emulates finding the arena slot by reusing the thread-local random seed (j.u.c.a.Striped64)
-    int hash = getProbe_unsafe();
-    if (hash == 0) {
-      blackhole.consume(ThreadLocalRandom.current()); // force initialization
-      hash = getProbe_unsafe();
-    }
-    advanceProbe_unsafe(hash);
-    int index = selectSlot(hash);
-    return array[index];
-  }
-
-  private int getProbe_unsafe() {
-    return UnsafeAccess.UNSAFE.getInt(Thread.currentThread(), probeOffset);
-  }
-
-  private void advanceProbe_unsafe(int probe) {
-    probe ^= probe << 13; // xorshift
-    probe ^= probe >>> 17;
-    probe ^= probe << 5;
-    UnsafeAccess.UNSAFE.putInt(Thread.currentThread(), probeOffset, probe);
-  }
-
-  @Benchmark
   public long striped64_varHandle(Blackhole blackhole) {
     // Emulates finding the arena slot by reusing the thread-local random seed (j.u.c.a.Striped64)
-    int hash = getProbe_varHandle();
+    @Var int hash = getProbe_varHandle();
     if (hash == 0) {
       blackhole.consume(ThreadLocalRandom.current()); // force initialization
       hash = getProbe_varHandle();
@@ -150,11 +121,11 @@ public class SlotLookupBenchmark {
     return array[index];
   }
 
-  private int getProbe_varHandle() {
+  private static int getProbe_varHandle() {
     return (int) PROBE.get(Thread.currentThread());
   }
 
-  private void advanceProbe_varHandle(int probe) {
+  private static void advanceProbe_varHandle(@Var int probe) {
     probe ^= probe << 13; // xorshift
     probe ^= probe >>> 17;
     probe ^= probe << 5;

@@ -16,7 +16,7 @@
 package com.github.benmanes.caffeine.jcache.event;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.Iterator;
 import java.util.Map;
@@ -25,10 +25,8 @@ import javax.cache.Cache;
 import javax.cache.event.CacheEntryEvent;
 import javax.cache.event.EventType;
 
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.testng.annotations.BeforeTest;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import com.google.common.collect.testing.IteratorFeature;
 import com.google.common.collect.testing.IteratorTester;
@@ -36,53 +34,67 @@ import com.google.common.collect.testing.IteratorTester;
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class JCacheEntryEventTest {
-  @Mock Cache<Integer, Integer> cache;
+final class JCacheEntryEventTest {
 
-  JCacheEntryEvent<Integer, Integer> event;
-
-  @BeforeTest
-  public void before() throws Exception {
-    MockitoAnnotations.openMocks(this).close();
-    event = new JCacheEntryEvent<>(cache, EventType.CREATED, 1, true, 2, 3);
+  @Test
+  void unwrap_fail() {
+    try (Cache<Integer, Integer> cache = Mockito.mock()) {
+      var event = new JCacheEntryEvent<>(cache, EventType.CREATED,
+          1, /* hasOldValue= */ true, 2, 3);
+      assertThrows(IllegalArgumentException.class, () -> event.unwrap(Map.Entry.class));
+    }
   }
 
   @Test
-  public void unwrap_fail() {
-    assertThrows(IllegalArgumentException.class, () -> event.unwrap(Map.Entry.class));
+  void unwrap() {
+    try (Cache<Integer, Integer> cache = Mockito.mock()) {
+      var event = new JCacheEntryEvent<>(cache, EventType.CREATED,
+          1, /* hasOldValue= */ true, 2, 3);
+      assertThat(event.unwrap(Cache.Entry.class)).isSameInstanceAs(event);
+    }
   }
 
   @Test
-  public void unwrap() {
-    assertThat(event.unwrap(Cache.Entry.class)).isSameInstanceAs(event);
+  void isOldValueAvailable_false() {
+    try (Cache<Integer, Integer> cache = Mockito.mock()) {
+      var entry = new JCacheEntryEvent<>(cache, EventType.CREATED,
+          1, /* hasOldValue= */ false, null, 3);
+      assertThat(entry.isOldValueAvailable()).isFalse();
+    }
   }
 
   @Test
-  public void isOldValueAvailable_false() {
-    var entry = new JCacheEntryEvent<>(cache, EventType.CREATED, 1, false, null, 3);
-    assertThat(entry.isOldValueAvailable()).isFalse();
+  void isOldValueAvailable() {
+    try (Cache<Integer, Integer> cache = Mockito.mock()) {
+      var event = new JCacheEntryEvent<>(cache, EventType.CREATED,
+          1, /* hasOldValue= */ true, 2, 3);
+      assertThat(event.isOldValueAvailable()).isTrue();
+    }
   }
 
   @Test
-  public void isOldValueAvailable() {
-    assertThat(event.isOldValueAvailable()).isTrue();
+  void getOldValue() {
+    try (Cache<Integer, Integer> cache = Mockito.mock()) {
+      var event = new JCacheEntryEvent<>(cache, EventType.CREATED,
+          1, /* hasOldValue= */ true, 2, 3);
+      assertThat(event.getOldValue()).isEqualTo(2);
+    }
   }
 
   @Test
-  public void getOldValue() {
-    assertThat(event.getOldValue()).isEqualTo(2);
-  }
-
-  @Test
-  public void iterable() {
-    var tester = new IteratorTester<CacheEntryEvent<? extends Integer, ? extends Integer>>(
-        6, IteratorFeature.UNMODIFIABLE, event, IteratorTester.KnownOrder.KNOWN_ORDER) {
-      @Override
-      protected Iterator<CacheEntryEvent<? extends Integer, ? extends Integer>> newTargetIterator() {
-        return event.iterator();
-      }
-    };
-    tester.test();
-    tester.testForEachRemaining();
+  void iterable() {
+    try (Cache<Integer, Integer> cache = Mockito.mock()) {
+      var event = new JCacheEntryEvent<>(cache, EventType.CREATED,
+          1, /* hasOldValue= */ true, 2, 3);
+      var tester = new IteratorTester<>(
+          6, IteratorFeature.UNMODIFIABLE, event, IteratorTester.KnownOrder.KNOWN_ORDER) {
+        @Override protected
+            Iterator<CacheEntryEvent<? extends Integer, ? extends Integer>> newTargetIterator() {
+          return event.iterator();
+        }
+      };
+      tester.test();
+      tester.testForEachRemaining();
+    }
   }
 }

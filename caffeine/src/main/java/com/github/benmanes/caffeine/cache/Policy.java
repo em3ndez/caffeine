@@ -18,7 +18,6 @@ package com.github.benmanes.caffeine.cache;
 import static com.github.benmanes.caffeine.cache.Caffeine.toNanosSaturated;
 
 import java.time.Duration;
-import java.util.ConcurrentModificationException;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -29,9 +28,8 @@ import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
-import org.checkerframework.checker.index.qual.NonNegative;
-import org.checkerframework.checker.nullness.qual.Nullable;
-import org.checkerframework.checker.nullness.qual.PolyNull;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 
 /**
  * An access point for inspecting and performing low-level operations based on the cache's runtime
@@ -42,6 +40,7 @@ import org.checkerframework.checker.nullness.qual.PolyNull;
  * @param <V> the type of values
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@NullMarked
 public interface Policy<K, V> {
 
   /**
@@ -62,8 +61,7 @@ public interface Policy<K, V> {
    *         no mapping for the key
    * @throws NullPointerException if the specified key is null
    */
-  @Nullable
-  V getIfPresentQuietly(K key);
+  @Nullable V getIfPresentQuietly(K key);
 
   /**
    * Returns the cache entry associated with the {@code key} in this cache, or {@code null} if there
@@ -75,10 +73,9 @@ public interface Policy<K, V> {
    * @return the entry mapping for the specified key, or {@code null} if this cache contains no
    *         mapping for the key
    * @throws NullPointerException if the specified key is null
+   * @since 3.0.6
    */
-  @Nullable
-  default CacheEntry<K, V> getEntryIfPresentQuietly(K key) {
-    // This method was added & implemented in version 3.0.6
+  default @Nullable CacheEntry<K, V> getEntryIfPresentQuietly(K key) {
     throw new UnsupportedOperationException();
   }
 
@@ -190,13 +187,12 @@ public interface Policy<K, V> {
      *
      * @return the maximum size bounding, which may be either weighted or unweighted
      */
-    @NonNegative
     long getMaximum();
 
     /**
      * Specifies the maximum total size of this cache. This value may be interpreted as the weighted
      * or unweighted threshold size based on how this cache was constructed. If the cache currently
-     * exceeds the new maximum size this operation eagerly evict entries until the cache shrinks to
+     * exceeds the new maximum size this operation eagerly evicts entries until the cache shrinks to
      * the appropriate size.
      * <p>
      * Note that some implementations may have an internal inherent bound on the maximum total size.
@@ -206,7 +202,7 @@ public interface Policy<K, V> {
      *        cache was constructed
      * @throws IllegalArgumentException if the maximum size specified is negative
      */
-    void setMaximum(@NonNegative long maximum);
+    void setMaximum(long maximum);
 
     /**
      * Returns an unmodifiable snapshot {@link Map} view of the cache with ordered traversal. The
@@ -221,8 +217,9 @@ public interface Policy<K, V> {
      * @param limit the maximum size of the returned map (use {@link Integer#MAX_VALUE} to disregard
      *        the limit)
      * @return a snapshot view of the cache from the coldest entry to the hottest
+     * @throws IllegalArgumentException if the limit specified is negative
      */
-    Map<K, V> coldest(@NonNegative int limit);
+    Map<K, V> coldest(int limit);
 
     /**
      * Returns an unmodifiable snapshot {@link Map} view of the cache with ordered traversal. The
@@ -238,9 +235,10 @@ public interface Policy<K, V> {
      * @param weightLimit the maximum weight of the returned map (use {@link Long#MAX_VALUE} to
      *        disregard the limit)
      * @return a snapshot view of the cache from the coldest entry to the hottest
+     * @throws IllegalArgumentException if the limit specified is negative
+     * @since 3.0.4
      */
-    default Map<K, V> coldestWeighted(@NonNegative long weightLimit) {
-      // This method was added & implemented in version 3.0.4
+    default Map<K, V> coldestWeighted(long weightLimit) {
       throw new UnsupportedOperationException();
     }
 
@@ -251,10 +249,8 @@ public interface Policy<K, V> {
      * at the time of creating this computation.
      * <p>
      * Usage example:
-     * <pre>{@code
-     *   List<K> tenColdestKeys = cache.policy().eviction().orElseThrow()
-     *       .coldest(stream -> stream.map(Map.Entry::getKey).limit(10).toList());
-     * }</pre>
+     * {@snippet class=com.github.benmanes.caffeine.cache.Snippets
+     *           region=eviction_coldest lang=java}
      * <p>
      * Beware that this computation is performed within the eviction policy's exclusive lock, so the
      * computation should be short and simple. While the computation is in progress further eviction
@@ -265,11 +261,13 @@ public interface Policy<K, V> {
      * @return the computed value
      * @throws NullPointerException if the mappingFunction is null
      * @throws RuntimeException or Error if the mappingFunction does so
-     * @throws ConcurrentModificationException if the computation detectably reads or writes an
-     *         entry in this cache
+     * @throws java.util.ConcurrentModificationException if the computation detectably reads or
+     *         writes an entry in this cache
+     * @since 3.0.6
      */
-    default <T> T coldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
-      // This method was added & implemented in version 3.0.6
+    @SuppressWarnings({"JavadocDeclaration", "JavadocReference"})
+    default <T extends @Nullable Object> T coldest(
+        Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
       throw new UnsupportedOperationException();
     }
 
@@ -286,8 +284,9 @@ public interface Policy<K, V> {
      * @param limit the maximum size of the returned map (use {@link Integer#MAX_VALUE} to disregard
      *        the limit)
      * @return a snapshot view of the cache from the hottest entry to the coldest
+     * @throws IllegalArgumentException if the limit specified is negative
      */
-    Map<K, V> hottest(@NonNegative int limit);
+    Map<K, V> hottest(int limit);
 
     /**
      * Returns an unmodifiable snapshot {@link Map} view of the cache with ordered traversal. The
@@ -303,9 +302,10 @@ public interface Policy<K, V> {
      * @param weightLimit the maximum weight of the returned map (use {@link Long#MAX_VALUE} to
      *        disregard the limit)
      * @return a snapshot view of the cache from the hottest entry to the coldest
+     * @throws IllegalArgumentException if the limit specified is negative
+     * @since 3.0.4
      */
-    default Map<K, V> hottestWeighted(@NonNegative long weightLimit) {
-      // This method was added & implemented in version 3.0.4
+    default Map<K, V> hottestWeighted(long weightLimit) {
       throw new UnsupportedOperationException();
     }
 
@@ -316,10 +316,8 @@ public interface Policy<K, V> {
      * at the time of creating this computation.
      * <p>
      * Usage example:
-     * <pre>{@code
-     *   List<K> tenHottestKeys = cache.policy().eviction().orElseThrow()
-     *       .hottest(stream -> stream.map(Map.Entry::getKey).limit(10).toList());
-     * }</pre>
+     * {@snippet class=com.github.benmanes.caffeine.cache.Snippets
+     *           region=eviction_hottest lang=java}
      * <p>
      * Beware that this computation is performed within the eviction policy's exclusive lock, so the
      * computation should be short and simple. While the computation is in progress further eviction
@@ -330,11 +328,13 @@ public interface Policy<K, V> {
      * @return the computed value
      * @throws NullPointerException if the mappingFunction is null
      * @throws RuntimeException or Error if the mappingFunction does so
-     * @throws ConcurrentModificationException if the computation detectably reads or writes an
-     *         entry in this cache
+     * @throws java.util.ConcurrentModificationException if the computation detectably reads or
+     *         writes an entry in this cache
+     * @since 3.0.6
      */
-    default <T> T hottest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
-      // This method was added & implemented in version 3.0.6
+    @SuppressWarnings({"JavadocDeclaration", "JavadocReference"})
+    default <T extends @Nullable Object> T hottest(
+        Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
       throw new UnsupportedOperationException();
     }
   }
@@ -348,30 +348,26 @@ public interface Policy<K, V> {
   interface FixedExpiration<K, V> {
 
     /**
-     * Returns the age of the entry based on the expiration policy. The entry's age is the cache's
-     * estimate of the amount of time since the entry's expiration was last reset.
+     * Returns the age of the entry, the estimated time elapsed since its expiration was last reset.
      * <p>
-     * An expiration policy uses the age to determine if an entry is fresh or stale by comparing it
-     * to the freshness lifetime. This is calculated as {@code fresh = freshnessLifetime > age}
-     * where {@code freshnessLifetime = expires - currentTime}.
+     * The remaining time until expiration can be estimated by subtracting this age from the
+     * {@linkplain #getExpiresAfter(TimeUnit) expiration duration}.
      *
      * @param key the key for the entry being queried
      * @param unit the unit that {@code age} is expressed in
-     * @return the age if the entry is present in the cache
+     * @return the age, or an empty optional if the entry is absent
      * @throws NullPointerException if the specified key is null
      */
     OptionalLong ageOf(K key, TimeUnit unit);
 
     /**
-     * Returns the age of the entry based on the expiration policy. The entry's age is the cache's
-     * estimate of the amount of time since the entry's expiration was last reset.
+     * Returns the age of the entry, the estimated time elapsed since its expiration was last reset.
      * <p>
-     * An expiration policy uses the age to determine if an entry is fresh or stale by comparing it
-     * to the freshness lifetime. This is calculated as {@code fresh = freshnessLifetime > age}
-     * where {@code freshnessLifetime = expires - currentTime}.
+     * The remaining time until expiration can be estimated by subtracting this age from the
+     * {@linkplain #getExpiresAfter() expiration duration}.
      *
      * @param key the key for the entry being queried
-     * @return the age if the entry is present in the cache
+     * @return the age, or an empty optional if the entry is absent
      * @throws NullPointerException if the specified key is null
      */
     default Optional<Duration> ageOf(K key) {
@@ -382,23 +378,18 @@ public interface Policy<K, V> {
     }
 
     /**
-     * Returns the fixed duration used to determine if an entry should be automatically removed due
-     * to elapsing this time bound. An entry is considered fresh if its age is less than this
-     * duration, and stale otherwise. The expiration policy determines when the entry's age is
-     * reset.
+     * Returns the fixed duration after which an entry expires. The expiration policy determines
+     * when the entry's age is reset.
      *
      * @param unit the unit that duration is expressed in
      * @return the length of time after which an entry should be automatically removed
      * @throws NullPointerException if the unit is null
      */
-    @NonNegative
     long getExpiresAfter(TimeUnit unit);
 
     /**
-     * Returns the fixed duration used to determine if an entry should be automatically removed due
-     * to elapsing this time bound. An entry is considered fresh if its age is less than this
-     * duration, and stale otherwise. The expiration policy determines when the entry's age is
-     * reset.
+     * Returns the fixed duration after which an entry expires. The expiration policy determines
+     * when the entry's age is reset.
      *
      * @return the length of time after which an entry should be automatically removed
      */
@@ -415,7 +406,7 @@ public interface Policy<K, V> {
      * @throws IllegalArgumentException if {@code duration} is negative
      * @throws NullPointerException if the unit is null
      */
-    void setExpiresAfter(@NonNegative long duration, TimeUnit unit);
+    void setExpiresAfter(long duration, TimeUnit unit);
 
     /**
      * Specifies that each entry should be automatically removed from the cache once a fixed
@@ -442,20 +433,19 @@ public interface Policy<K, V> {
      * @param limit the maximum size of the returned map (use {@link Integer#MAX_VALUE} to disregard
      *        the limit)
      * @return a snapshot view of the cache from the oldest entry to the youngest
+     * @throws IllegalArgumentException if the limit specified is negative
      */
-    Map<K, V> oldest(@NonNegative int limit);
+    Map<K, V> oldest(int limit);
 
     /**
-     * Returns the computed result from the ordered traversal of the cache entries. The oorder of
+     * Returns the computed result from the ordered traversal of the cache entries. The order of
      * iteration is from the entries most likely to expire (oldest) to the entries least likely to
      * expire (youngest). This order is determined by the expiration policy's best guess at the time
      * of creating this computation.
      * <p>
      * Usage example:
-     * <pre>{@code
-     *   List<K> tenOldestKeys = cache.policy().expireAfterWrite().orElseThrow()
-     *       .oldest(stream -> stream.map(Map.Entry::getKey).limit(10).toList());
-     * }</pre>
+     * {@snippet class=com.github.benmanes.caffeine.cache.Snippets
+     *           region=expireFixed_oldest lang=java}
      * <p>
      * Beware that this computation is performed within the eviction policy's exclusive lock, so the
      * computation should be short and simple. While the computation is in progress further eviction
@@ -466,9 +456,13 @@ public interface Policy<K, V> {
      * @return the computed value
      * @throws NullPointerException if the mappingFunction is null
      * @throws RuntimeException or Error if the mappingFunction does so
+     * @throws java.util.ConcurrentModificationException if the computation detectably reads or
+     *         writes an entry in this cache
+     * @since 3.0.6
      */
-    default <T> T oldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
-      // This method was added & implemented in version 3.0.6
+    @SuppressWarnings({"JavadocDeclaration", "JavadocReference"})
+    default <T extends @Nullable Object> T oldest(
+        Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
       throw new UnsupportedOperationException();
     }
 
@@ -485,8 +479,9 @@ public interface Policy<K, V> {
      * @param limit the maximum size of the returned map (use {@link Integer#MAX_VALUE} to disregard
      *        the limit)
      * @return a snapshot view of the cache from the youngest entry to the oldest
+     * @throws IllegalArgumentException if the limit specified is negative
      */
-    Map<K, V> youngest(@NonNegative int limit);
+    Map<K, V> youngest(int limit);
 
     /**
      * Returns the computed result from the ordered traversal of the cache entries. The order of
@@ -495,10 +490,8 @@ public interface Policy<K, V> {
      * of creating this computation.
      * <p>
      * Usage example:
-     * <pre>{@code
-     *   List<K> tenYoungestKeys = cache.policy().expireAfterWrite().orElseThrow()
-     *       .youngest(stream -> stream.map(Map.Entry::getKey).limit(10).toList());
-     * }</pre>
+     * {@snippet class=com.github.benmanes.caffeine.cache.Snippets
+     *           region=expireFixed_youngest lang=java}
      * <p>
      * Beware that this computation is performed within the eviction policy's exclusive lock, so the
      * computation should be short and simple. While the computation is in progress further eviction
@@ -509,9 +502,13 @@ public interface Policy<K, V> {
      * @return the computed value
      * @throws NullPointerException if the mappingFunction is null
      * @throws RuntimeException or Error if the mappingFunction does so
+     * @throws java.util.ConcurrentModificationException if the computation detectably reads or
+     *         writes an entry in this cache
+     * @since 3.0.6
      */
-    default <T> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
-      // This method was added & implemented in version 3.0.6
+    @SuppressWarnings({"JavadocDeclaration", "JavadocReference"})
+    default <T extends @Nullable Object> T youngest(
+        Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
       throw new UnsupportedOperationException();
     }
   }
@@ -525,19 +522,19 @@ public interface Policy<K, V> {
   interface VarExpiration<K, V> {
 
     /**
-     * Returns the duration until the entry should be automatically removed. The expiration policy
-     * determines when the entry's duration is reset.
+     * Returns the remaining duration until the entry expires. The expiration policy determines
+     * when the entry's expiration is reset.
      *
      * @param key the key for the entry being queried
-     * @param unit the unit that {@code age} is expressed in
+     * @param unit the unit that {@code duration} is expressed in
      * @return the duration if the entry is present in the cache
      * @throws NullPointerException if the specified key or unit is null
      */
     OptionalLong getExpiresAfter(K key, TimeUnit unit);
 
     /**
-     * Returns the duration until the entry should be automatically removed. The expiration policy
-     * determines when the entry's duration is reset.
+     * Returns the remaining duration until the entry expires. The expiration policy determines
+     * when the entry's expiration is reset.
      *
      * @param key the key for the entry being queried
      * @return the duration if the entry is present in the cache
@@ -552,7 +549,8 @@ public interface Policy<K, V> {
 
     /**
      * Specifies that the entry should be automatically removed from the cache once the duration has
-     * elapsed. The expiration policy determines when the entry's age is reset.
+     * elapsed. The expiration policy determines when the entry's age is reset. This method has no
+     * effect if the mapping is absent.
      *
      * @param key the key for the entry being set
      * @param duration the length of time from now when the entry should be automatically removed
@@ -560,11 +558,12 @@ public interface Policy<K, V> {
      * @throws IllegalArgumentException if {@code duration} is negative
      * @throws NullPointerException if the specified key or unit is null
      */
-    void setExpiresAfter(K key, @NonNegative long duration, TimeUnit unit);
+    void setExpiresAfter(K key, long duration, TimeUnit unit);
 
     /**
      * Specifies that the entry should be automatically removed from the cache once the duration has
-     * elapsed. The expiration policy determines when the entry's age is reset.
+     * elapsed. The expiration policy determines when the entry's age is reset. This method has no
+     * effect if the mapping is absent.
      *
      * @param key the key for the entry being set
      * @param duration the length of time from now when the entry should be automatically removed
@@ -578,8 +577,8 @@ public interface Policy<K, V> {
     /**
      * Associates the {@code value} with the {@code key} in this cache if the specified key is not
      * already associated with a value. This method differs from {@link Map#putIfAbsent} by
-     * substituting the configured {@link Expiry} with the specified duration, has no effect on the
-     * duration if the entry was present, and returns the success rather than a value.
+     * substituting the configured {@link Expiry} with the specified duration and has no effect on
+     * the duration if the entry was present.
      *
      * @param key the key with which the specified value is to be associated
      * @param value value to be associated with the specified key
@@ -590,13 +589,13 @@ public interface Policy<K, V> {
      * @throws IllegalArgumentException if {@code duration} is negative
      * @throws NullPointerException if the specified key, value, or unit is null
      */
-    @Nullable V putIfAbsent(K key, V value, @NonNegative long duration, TimeUnit unit);
+    @Nullable V putIfAbsent(K key, V value, long duration, TimeUnit unit);
 
     /**
      * Associates the {@code value} with the {@code key} in this cache if the specified key is not
      * already associated with a value. This method differs from {@link Map#putIfAbsent} by
-     * substituting the configured {@link Expiry} with the specified duration, has no effect on the
-     * duration if the entry was present, and returns the success rather than a value.
+     * substituting the configured {@link Expiry} with the specified duration and has no effect on
+     * the duration if the entry was present.
      *
      * @param key the key with which the specified value is to be associated
      * @param value value to be associated with the specified key
@@ -625,7 +624,7 @@ public interface Policy<K, V> {
      * @throws IllegalArgumentException if {@code duration} is negative
      * @throws NullPointerException if the specified key, value, or unit is null
      */
-    @Nullable V put(K key, V value, @NonNegative long duration, TimeUnit unit);
+    @Nullable V put(K key, V value, long duration, TimeUnit unit);
 
     /**
      * Associates the {@code value} with the {@code key} in this cache. If the cache previously
@@ -654,8 +653,8 @@ public interface Policy<K, V> {
      * differs from {@code cache.asMap().compute(key, remappingFunction)} by substituting the
      * configured {@link Expiry} with the specified duration.
      * <p>
-     * <b>Warning:</b> the {@code remappingFunction} <b>must not</b> attempt to update any other
-     * mappings of this cache.
+     * <b>Warning:</b> the {@code remappingFunction} <b>must not</b> modify this cache during the
+     * computation.
      *
      * @param key key with which the specified value is to be associated
      * @param remappingFunction the function to compute a value
@@ -667,11 +666,11 @@ public interface Policy<K, V> {
      *         this cache that would otherwise never complete
      * @throws RuntimeException or Error if the remappingFunction does so, in which case the mapping
      *         is unchanged
+     * @since 3.0.6
      */
-    default @PolyNull V compute(K key,
-        BiFunction<? super K, ? super V, ? extends @PolyNull V> remappingFunction,
+    default @Nullable V compute(K key,
+        BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction,
         Duration duration) {
-      // This method was added & implemented in version 3.0.6
       throw new UnsupportedOperationException();
     }
 
@@ -688,20 +687,19 @@ public interface Policy<K, V> {
      * @param limit the maximum size of the returned map (use {@link Integer#MAX_VALUE} to disregard
      *        the limit)
      * @return a snapshot view of the cache from the oldest entry to the youngest
+     * @throws IllegalArgumentException if the limit specified is negative
      */
-    Map<K, V> oldest(@NonNegative int limit);
+    Map<K, V> oldest(int limit);
 
     /**
-     * Returns the computed result from the ordered traversal of the cache entries. The oorder of
+     * Returns the computed result from the ordered traversal of the cache entries. The order of
      * iteration is from the entries most likely to expire (oldest) to the entries least likely to
      * expire (youngest). This order is determined by the expiration policy's best guess at the time
      * of creating this computation.
      * <p>
      * Usage example:
-     * <pre>{@code
-     *   List<K> tenOldestKeys = cache.policy().expireAfterVariably().orElseThrow()
-     *       .oldest(stream -> stream.map(Map.Entry::getKey).limit(10).toList());
-     * }</pre>
+     * {@snippet class=com.github.benmanes.caffeine.cache.Snippets
+     *           region=expireVar_oldest lang=java}
      * <p>
      * Beware that this computation is performed within the eviction policy's exclusive lock, so the
      * computation should be short and simple. While the computation is in progress further eviction
@@ -712,9 +710,13 @@ public interface Policy<K, V> {
      * @return the computed value
      * @throws NullPointerException if the mappingFunction is null
      * @throws RuntimeException or Error if the mappingFunction does so
+     * @throws java.util.ConcurrentModificationException if the computation detectably reads or
+     *         writes an entry in this cache
+     * @since 3.0.6
      */
-    default <T> T oldest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
-      // This method was added & implemented in version 3.0.6
+    @SuppressWarnings({"JavadocDeclaration", "JavadocReference"})
+    default <T extends @Nullable Object> T oldest(
+        Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
       throw new UnsupportedOperationException();
     }
 
@@ -731,8 +733,9 @@ public interface Policy<K, V> {
      * @param limit the maximum size of the returned map (use {@link Integer#MAX_VALUE} to disregard
      *        the limit)
      * @return a snapshot view of the cache from the youngest entry to the oldest
+     * @throws IllegalArgumentException if the limit specified is negative
      */
-    Map<K, V> youngest(@NonNegative int limit);
+    Map<K, V> youngest(int limit);
 
     /**
      * Returns the computed result from the ordered traversal of the cache entries. The order of
@@ -741,10 +744,8 @@ public interface Policy<K, V> {
      * of creating this computation.
      * <p>
      * Usage example:
-     * <pre>{@code
-     *   List<K> tenYoungestKeys = cache.policy().expireAfterVariably().orElseThrow()
-     *       .youngest(stream -> stream.map(Map.Entry::getKey).limit(10).toList());
-     * }</pre>
+     * {@snippet class=com.github.benmanes.caffeine.cache.Snippets
+     *           region=expireVar_youngest lang=java}
      * <p>
      * Beware that this computation is performed within the eviction policy's exclusive lock, so the
      * computation should be short and simple. While the computation is in progress further eviction
@@ -755,9 +756,13 @@ public interface Policy<K, V> {
      * @return the computed value
      * @throws NullPointerException if the mappingFunction is null
      * @throws RuntimeException or Error if the mappingFunction does so
+     * @throws java.util.ConcurrentModificationException if the computation detectably reads or
+     *         writes an entry in this cache
+     * @since 3.0.6
      */
-    default <T> T youngest(Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
-      // This method was added & implemented in version 3.0.6
+    @SuppressWarnings({"JavadocDeclaration", "JavadocReference"})
+    default <T extends @Nullable Object> T youngest(
+        Function<Stream<CacheEntry<K, V>>, T> mappingFunction) {
       throw new UnsupportedOperationException();
     }
   }
@@ -771,30 +776,28 @@ public interface Policy<K, V> {
   interface FixedRefresh<K, V> {
 
     /**
-     * Returns the age of the entry based on the refresh policy. The entry's age is the cache's
-     * estimate of the amount of time since the entry's refresh period was last reset.
+     * Returns the age of the entry, the estimated time elapsed since its refresh period was last
+     * reset.
      * <p>
-     * A refresh policy uses the age to determine if an entry is fresh or stale by comparing it
-     * to the freshness lifetime. This is calculated as {@code fresh = freshnessLifetime > age}
-     * where {@code freshnessLifetime = expires - currentTime}.
+     * The time until the entry is eligible for refresh can be estimated by subtracting this age
+     * from the {@linkplain #getRefreshesAfter(TimeUnit) refresh duration}.
      *
      * @param key the key for the entry being queried
      * @param unit the unit that {@code age} is expressed in
-     * @return the age if the entry is present in the cache
+     * @return the age, or an empty optional if the entry is absent
      * @throws NullPointerException if the specified key or unit is null
      */
     OptionalLong ageOf(K key, TimeUnit unit);
 
     /**
-     * Returns the age of the entry based on the refresh policy. The entry's age is the cache's
-     * estimate of the amount of time since the entry's refresh period was last reset.
+     * Returns the age of the entry, the estimated time elapsed since its refresh period was last
+     * reset.
      * <p>
-     * A refresh policy uses the age to determine if an entry is fresh or stale by comparing it
-     * to the freshness lifetime. This is calculated as {@code fresh = freshnessLifetime > age}
-     * where {@code freshnessLifetime = expires - currentTime}.
+     * The time until the entry is eligible for refresh can be estimated by subtracting this age
+     * from the {@linkplain #getRefreshesAfter() refresh duration}.
      *
      * @param key the key for the entry being queried
-     * @return the age if the entry is present in the cache
+     * @return the age, or an empty optional if the entry is absent
      * @throws NullPointerException if the specified key is null
      */
     default Optional<Duration> ageOf(K key) {
@@ -805,23 +808,18 @@ public interface Policy<K, V> {
     }
 
     /**
-     * Returns the fixed duration used to determine if an entry should be eligible for reloading due
-     * to elapsing this time bound. An entry is considered fresh if its age is less than this
-     * duration, and stale otherwise. The refresh policy determines when the entry's age is
-     * reset.
+     * Returns the fixed duration after which an entry is eligible for refresh. The refresh policy
+     * determines when the entry's age is reset.
      *
      * @param unit the unit that duration is expressed in
      * @return the length of time after which an entry is eligible to be reloaded
      * @throws NullPointerException if the unit is null
      */
-    @NonNegative
     long getRefreshesAfter(TimeUnit unit);
 
     /**
-     * Returns the fixed duration used to determine if an entry should be eligible for reloading due
-     * to elapsing this time bound. An entry is considered fresh if its age is less than this
-     * duration, and stale otherwise. The refresh policy determines when the entry's age is
-     * reset.
+     * Returns the fixed duration after which an entry is eligible for refresh. The refresh policy
+     * determines when the entry's age is reset.
      *
      * @return the length of time after which an entry is eligible to be reloaded
      */
@@ -835,17 +833,17 @@ public interface Policy<K, V> {
      *
      * @param duration the length of time after which an entry is eligible to be reloaded
      * @param unit the unit that {@code duration} is expressed in
-     * @throws IllegalArgumentException if {@code duration} is negative
+     * @throws IllegalArgumentException if {@code duration} is zero or negative
      * @throws NullPointerException if the unit is null
      */
-    void setRefreshesAfter(@NonNegative long duration, TimeUnit unit);
+    void setRefreshesAfter(long duration, TimeUnit unit);
 
     /**
      * Specifies that each entry should be eligible for reloading once a fixed duration has elapsed.
      * The refresh policy determines when the entry's age is reset.
      *
      * @param duration the length of time after which an entry is eligible to be reloaded
-     * @throws IllegalArgumentException if {@code duration} is negative
+     * @throws IllegalArgumentException if {@code duration} is zero or negative
      * @throws NullPointerException if the duration is null
      */
     default void setRefreshesAfter(Duration duration) {
@@ -862,13 +860,14 @@ public interface Policy<K, V> {
    * @param <K> the type of keys
    * @param <V> the type of values
    */
+  @NullMarked
   interface CacheEntry<K, V> extends Map.Entry<K, V> {
 
     /**
      * Returns the entry's weight. If the cache was not configured with a maximum weight then this
      * value is always {@code 1}.
      *
-     * @return the weight if the entry
+     * @return the entry's weight
      */
     int weight();
 

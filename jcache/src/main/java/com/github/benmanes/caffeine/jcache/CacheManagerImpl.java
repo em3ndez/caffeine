@@ -17,11 +17,12 @@ package com.github.benmanes.caffeine.jcache;
 
 import static java.util.Objects.requireNonNull;
 
+import java.lang.System.Logger;
+import java.lang.System.Logger.Level;
 import java.lang.ref.WeakReference;
 import java.net.URI;
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,7 +34,7 @@ import javax.cache.configuration.CompleteConfiguration;
 import javax.cache.configuration.Configuration;
 import javax.cache.spi.CachingProvider;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 /**
  * An implementation of JSR-107 {@link CacheManager} that manages Caffeine-based caches.
@@ -42,16 +43,19 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  */
 @SuppressWarnings("PMD.CloseResource")
 public final class CacheManagerImpl implements CacheManager {
-  private final WeakReference<ClassLoader> classLoaderReference;
-  private final Map<String, CacheProxy<?, ?>> caches;
-  private final CachingProvider cacheProvider;
-  private final Properties properties;
+  private static final Logger logger = System.getLogger(CacheManagerImpl.class.getName());
+
   private final Object lock;
-  private final URI uri;
 
-  private final boolean runsAsAnOsgiBundle;
+  final WeakReference<ClassLoader> classLoaderReference;
+  final Map<String, CacheProxy<?, ?>> caches;
+  final CachingProvider cacheProvider;
+  final Properties properties;
+  final URI uri;
 
-  private volatile boolean closed;
+  final boolean runsAsAnOsgiBundle;
+
+  volatile boolean closed;
 
   public CacheManagerImpl(CachingProvider cacheProvider, boolean runsAsAnOsgiBundle,
       URI uri, ClassLoader classLoader, Properties properties) {
@@ -87,41 +91,45 @@ public final class CacheManagerImpl implements CacheManager {
   @Override
   public <K, V, C extends Configuration<K, V>> Cache<K, V> createCache(
       String cacheName, C configuration) {
-    ClassLoader old = Thread.currentThread().getContextClassLoader();
+    requireNonNull(configuration);
+    var classLoader = Thread.currentThread().getContextClassLoader();
     try {
       if (runsAsAnOsgiBundle) {
         // override the context class loader with the CachingManager's classloader
         Thread.currentThread().setContextClassLoader(getClassLoader());
       }
-      requireNotClosed();
-      requireNonNull(configuration);
 
-      CacheProxy<?, ?> cache = caches.compute(cacheName, (name, existing) -> {
-        if ((existing != null) && !existing.isClosed()) {
-          throw new CacheException("Cache " + cacheName + " already exists");
-        } else if (CacheFactory.isDefinedExternally(this, cacheName)) {
-          throw new CacheException("Cache " + cacheName + " is configured externally");
-        }
-        return CacheFactory.createCache(this, cacheName, configuration);
-      });
+      synchronized (lock) {
+        requireNotClosed();
+        CacheProxy<?, ?> cache = requireNonNull(caches.compute(cacheName, (name, existing) -> {
+          if (existing != null) {
+            throw new CacheException("Cache " + cacheName + " already exists");
+          } else if (CacheFactory.isDefinedExternally(this, cacheName)) {
+            throw new CacheException("Cache " + cacheName + " is configured externally");
+          }
+          return CacheFactory.createCache(this, cacheName, configuration);
+        }));
 
-      @SuppressWarnings("unchecked")
-      var config = cache.getConfiguration(CompleteConfiguration.class);
-      enableManagement(cache.getName(), config.isManagementEnabled());
-      enableStatistics(cache.getName(), config.isStatisticsEnabled());
+        @SuppressWarnings("unchecked")
+        var config = cache.getConfiguration(CompleteConfiguration.class);
+        enableManagement(cache.getName(), config.isManagementEnabled());
+        enableStatistics(cache.getName(), config.isStatisticsEnabled());
 
-      @SuppressWarnings("unchecked")
-      Cache<K, V> castedCache = (Cache<K, V>) cache;
-      return castedCache;
+        @SuppressWarnings("unchecked")
+        var castedCache = (Cache<K, V>) cache;
+        return castedCache;
+      }
     } finally {
-      Thread.currentThread().setContextClassLoader(old);
+      Thread.currentThread().setContextClassLoader(classLoader);
     }
   }
 
   @Override
-  public @Nullable <K, V> Cache<K, V> getCache(
+  public <K, V> @Nullable Cache<K, V> getCache(
       String cacheName, Class<K> keyType, Class<V> valueType) {
-    ClassLoader old = Thread.currentThread().getContextClassLoader();
+    requireNonNull(keyType);
+    requireNonNull(valueType);
+    var classLoader = Thread.currentThread().getContextClassLoader();
     try {
       if (runsAsAnOsgiBundle) {
         // override the context class loader with the CachingManager's classloader
@@ -131,8 +139,6 @@ public final class CacheManagerImpl implements CacheManager {
       if (cache == null) {
         return null;
       }
-      requireNonNull(keyType);
-      requireNonNull(valueType);
 
       @SuppressWarnings("unchecked")
       var config = cache.getConfiguration(CompleteConfiguration.class);
@@ -145,54 +151,67 @@ public final class CacheManagerImpl implements CacheManager {
       }
       return cache;
     } finally {
-      Thread.currentThread().setContextClassLoader(old);
+      Thread.currentThread().setContextClassLoader(classLoader);
     }
   }
 
   @Override
-  public <K, V> CacheProxy<K, V> getCache(String cacheName) {
-    ClassLoader old = Thread.currentThread().getContextClassLoader();
+  @SuppressWarnings("NullAway")
+  public <K, V> @Nullable CacheProxy<K, V> getCache(String cacheName) {
+    requireNonNull(cacheName);
+    var classLoader = Thread.currentThread().getContextClassLoader();
     try {
       if (runsAsAnOsgiBundle) {
         // override the context class loader with the CachingManager's classloader
         Thread.currentThread().setContextClassLoader(getClassLoader());
       }
-      requireNonNull(cacheName);
-      requireNotClosed();
 
-      CacheProxy<?, ?> cache = caches.computeIfAbsent(cacheName, name -> {
-        CacheProxy<?, ?> created = CacheFactory.tryToCreateFromExternalSettings(this, name);
-        if (created != null) {
-          @SuppressWarnings("unchecked")
-          var config = created.getConfiguration(CompleteConfiguration.class);
-          created.enableManagement(config.isManagementEnabled());
-          created.enableStatistics(config.isStatisticsEnabled());
-        }
-        return created;
-      });
+      synchronized (lock) {
+        requireNotClosed();
+        CacheProxy<?, ?> cache = caches.computeIfAbsent(cacheName, name -> {
+          CacheProxy<?, ?> created = CacheFactory.tryToCreateFromExternalSettings(this, name);
+          if (created != null) {
+            @SuppressWarnings("unchecked")
+            var config = created.getConfiguration(CompleteConfiguration.class);
+            created.enableManagement(config.isManagementEnabled());
+            created.enableStatistics(config.isStatisticsEnabled());
+          }
+          return created;
+        });
 
-      @SuppressWarnings("unchecked")
-      CacheProxy<K, V> castedCache = (CacheProxy<K, V>) cache;
-      return castedCache;
+        @SuppressWarnings("unchecked")
+        var castedCache = (CacheProxy<K, V>) cache;
+        return castedCache;
+      }
     } finally {
-      Thread.currentThread().setContextClassLoader(old);
+      Thread.currentThread().setContextClassLoader(classLoader);
     }
   }
 
   @Override
+  @SuppressWarnings("PreferredInterfaceType")
   public Collection<String> getCacheNames() {
     requireNotClosed();
-    return Collections.unmodifiableCollection(new ArrayList<>(caches.keySet()));
+    return List.copyOf(caches.keySet());
   }
 
   @Override
   public void destroyCache(String cacheName) {
-    requireNotClosed();
+    synchronized (lock) {
+      requireNotClosed();
 
-    Cache<?, ?> cache = caches.remove(cacheName);
-    if (cache != null) {
-      cache.close();
+      try (var cache = caches.remove(cacheName)) {
+        if (cache != null) {
+          cache.clear();
+        }
+      }
     }
+  }
+
+  /** Removes the cache from the registry if it is still the registered instance. */
+  void destroyCache(String cacheName, CacheProxy<?, ?> cache) {
+    requireNotClosed();
+    caches.remove(cacheName, cache);
   }
 
   @Override
@@ -223,13 +242,21 @@ public final class CacheManagerImpl implements CacheManager {
       return;
     }
     synchronized (lock) {
-      if (!isClosed()) {
-        cacheProvider.close(uri, classLoaderReference.get());
-        for (Cache<?, ?> cache : caches.values()) {
-          cache.close();
-        }
-        closed = true;
+      if (isClosed()) {
+        return;
       }
+      for (Cache<?, ?> cache : caches.values()) {
+        try {
+          cache.close();
+        } catch (RuntimeException e) {
+          logger.log(Level.WARNING, "Exception thrown when closing cache " + cache.getName(), e);
+        }
+      }
+      closed = true;
+    }
+    ClassLoader classLoader = classLoaderReference.get();
+    if (classLoader != null) {
+      cacheProvider.close(uri, classLoader);
     }
   }
 
@@ -243,8 +270,8 @@ public final class CacheManagerImpl implements CacheManager {
     if (clazz.isInstance(this)) {
       return clazz.cast(this);
     }
-    throw new IllegalArgumentException("Unwapping to " + clazz
-        + " is not a supported by this implementation");
+    throw new IllegalArgumentException("Unwrapping to " + clazz
+        + " is not supported by this implementation");
   }
 
   /** Checks that the cache manager is not closed. */

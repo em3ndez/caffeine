@@ -20,13 +20,12 @@ import java.util.concurrent.atomic.LongAdder;
 
 import javax.cache.management.CacheStatisticsMXBean;
 
-import org.checkerframework.checker.index.qual.NonNegative;
-
 /**
  * Caffeine JCache statistics.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@SuppressWarnings("IdentifierName")
 public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
   private final LongAdder puts = new LongAdder();
   private final LongAdder hits = new LongAdder();
@@ -37,7 +36,15 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
   private final LongAdder getTimeNanos = new LongAdder();
   private final LongAdder removeTimeNanos = new LongAdder();
 
+  /** The loader time nested in the current thread's read-through cache operation. */
+  private final ThreadLocal<long[]> loadTimeNanos;
+
   private volatile boolean enabled;
+
+  /** Creates an empty statistics bean. */
+  public JCacheStatisticsMXBean() {
+    loadTimeNanos = new ThreadLocal<>();
+  }
 
   /** Returns if statistic collection is enabled. */
   public boolean isEnabled() {
@@ -72,8 +79,10 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
 
   @Override
   public float getCacheHitPercentage() {
-    long requestCount = getCacheGets();
-    return (requestCount == 0) ? 0f : 100 * ((float) getCacheHits() / requestCount);
+    long hitCount = getCacheHits();
+    long missCount = getCacheMisses();
+    long requestCount = saturatedAdd(hitCount, missCount);
+    return (requestCount == 0) ? 0f : 100 * ((float) hitCount / requestCount);
   }
 
   /**
@@ -81,7 +90,7 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
    *
    * @param count the number of hits to record
    */
-  public void recordHits(@NonNegative long count) {
+  public void recordHits(long count) {
     if (enabled) {
       hits.add(count);
     }
@@ -94,8 +103,10 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
 
   @Override
   public float getCacheMissPercentage() {
-    long requestCount = getCacheGets();
-    return (requestCount == 0) ? 0f : 100 * ((float) getCacheMisses() / requestCount);
+    long hitCount = getCacheHits();
+    long missCount = getCacheMisses();
+    long requestCount = saturatedAdd(hitCount, missCount);
+    return (requestCount == 0) ? 0f : 100 * ((float) missCount / requestCount);
   }
 
   /**
@@ -104,7 +115,7 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
    *
    * @param count the number of misses to record
    */
-  public void recordMisses(@NonNegative long count) {
+  public void recordMisses(long count) {
     if (enabled) {
       misses.add(count);
     }
@@ -112,7 +123,7 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
 
   @Override
   public long getCacheGets() {
-    return getCacheHits() + getCacheMisses();
+    return saturatedAdd(getCacheHits(), getCacheMisses());
   }
 
   @Override
@@ -125,7 +136,7 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
    *
    * @param count the number of writes to record
    */
-  public void recordPuts(@NonNegative long count) {
+  public void recordPuts(long count) {
     if (enabled && (count != 0)) {
       puts.add(count);
     }
@@ -141,7 +152,7 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
    *
    * @param count the number of removals to record
    */
-  public void recordRemovals(@NonNegative long count) {
+  public void recordRemovals(long count) {
     if (enabled) {
       removals.add(count);
     }
@@ -157,7 +168,7 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
    *
    * @param count the number of evictions to record
    */
-  public void recordEvictions(@NonNegative long count) {
+  public void recordEvictions(long count) {
     if (enabled) {
       evictions.add(count);
     }
@@ -178,6 +189,31 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
     if (enabled && (durationNanos != 0)) {
       getTimeNanos.add(durationNanos);
     }
+  }
+
+  /** Starts tracking the loader time nested inside a read-through cache operation. */
+  public void beginLoadTime() {
+    loadTimeNanos.set(new long[1]);
+  }
+
+  /** Returns whether a read-through cache operation is tracking its nested loader time. */
+  public boolean isRecordingLoadTime() {
+    return loadTimeNanos.get() != null;
+  }
+
+  /** Records loader time if it is nested inside a read-through cache operation. */
+  public void recordLoadTime(long durationNanos) {
+    long[] loadTime = loadTimeNanos.get();
+    if (loadTime != null) {
+      loadTime[0] += durationNanos;
+    }
+  }
+
+  /** Stops tracking and returns the loader time nested inside a read-through cache operation. */
+  public long endLoadTime() {
+    long[] loadTime = loadTimeNanos.get();
+    loadTimeNanos.remove();
+    return (loadTime == null) ? 0L : loadTime[0];
   }
 
   @Override
@@ -218,5 +254,10 @@ public final class JCacheStatisticsMXBean implements CacheStatisticsMXBean {
     }
     long opsTimeMicro = TimeUnit.NANOSECONDS.toMicros(opsTimeNanos);
     return (float) opsTimeMicro / requestCount;
+  }
+
+  private static long saturatedAdd(long a, long b) {
+    long sum = a + b;
+    return (sum < 0) ? Long.MAX_VALUE : sum;
   }
 }

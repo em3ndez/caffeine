@@ -17,55 +17,94 @@ package com.github.benmanes.caffeine.jcache.expiry;
 
 import static com.google.common.truth.Truth.assertThat;
 
-import javax.cache.expiry.Duration;
-import javax.cache.expiry.ExpiryPolicy;
+import java.util.HashSet;
+import java.util.List;
 
-import org.testng.annotations.Test;
+import javax.cache.expiry.AccessedExpiryPolicy;
+import javax.cache.expiry.CreatedExpiryPolicy;
+import javax.cache.expiry.Duration;
+import javax.cache.expiry.EternalExpiryPolicy;
+import javax.cache.expiry.ExpiryPolicy;
+import javax.cache.expiry.ModifiedExpiryPolicy;
+import javax.cache.expiry.TouchedExpiryPolicy;
+
+import org.junit.jupiter.api.Test;
+
+import com.google.common.testing.EqualsTester;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class JCacheExpiryPolicyTest {
-  final ExpiryPolicy eternal = new JCacheExpiryPolicy(
+final class JCacheExpiryPolicyTest {
+  static final ExpiryPolicy eternal = new JCacheExpiryPolicy(
       Duration.ETERNAL, Duration.ETERNAL, Duration.ETERNAL);
-  final ExpiryPolicy temporal = new JCacheExpiryPolicy(
+  static final ExpiryPolicy temporal = new JCacheExpiryPolicy(
       Duration.ONE_DAY, Duration.ONE_HOUR, Duration.ONE_MINUTE);
 
   @Test
-  public void creation() {
+  void creation() {
     assertThat(eternal.getExpiryForCreation()).isEqualTo(Duration.ETERNAL);
     assertThat(temporal.getExpiryForCreation()).isEqualTo(Duration.ONE_DAY);
   }
 
   @Test
-  public void update() {
+  void update() {
     assertThat(eternal.getExpiryForUpdate()).isEqualTo(Duration.ETERNAL);
     assertThat(temporal.getExpiryForUpdate()).isEqualTo(Duration.ONE_HOUR);
   }
 
   @Test
-  public void access() {
+  void access() {
     assertThat(eternal.getExpiryForAccess()).isEqualTo(Duration.ETERNAL);
     assertThat(temporal.getExpiryForAccess()).isEqualTo(Duration.ONE_MINUTE);
   }
 
   @Test
-  public void equals_wrongType() {
+  void equals_wrongType() {
     assertThat(eternal.equals(new Object())).isFalse();
   }
 
   @Test
-  public void equals_wrongValue() {
-    assertThat(eternal).isNotEqualTo(temporal);
+  void equals_other() {
+    new EqualsTester()
+        .addEqualityGroup(new JCacheExpiryPolicy(
+            Duration.ETERNAL, /* update= */ null, /* access= */ null))
+        .addEqualityGroup(new AccessedExpiryPolicy(Duration.ETERNAL))
+        .addEqualityGroup(new ModifiedExpiryPolicy(Duration.ETERNAL))
+        .addEqualityGroup(new CreatedExpiryPolicy(Duration.ETERNAL))
+        .addEqualityGroup(new TouchedExpiryPolicy(Duration.ETERNAL))
+        .addEqualityGroup(new EternalExpiryPolicy())
+        .testEquals();
   }
 
   @Test
-  public void equals() {
-    assertThat(eternal.equals(eternal)).isTrue();
+  void equals() {
+    var tester = new EqualsTester();
+    var durations = List.of(Duration.ETERNAL, Duration.ONE_DAY, Duration.ONE_HOUR);
+    for (var creation : durations) {
+      for (var update : durations) {
+        for (var read : durations) {
+          tester.addEqualityGroup(
+              new JCacheExpiryPolicy(creation, update, read),
+              new JCacheExpiryPolicy(creation, update, read));
+        }
+      }
+    }
+    tester.testEquals();
   }
 
   @Test
-  public void hash() {
-    assertThat(eternal.hashCode()).isNotEqualTo(temporal.hashCode());
+  void hash() {
+    var hashes = new HashSet<Integer>();
+    var durations = List.of(Duration.ETERNAL, Duration.ONE_DAY, Duration.ONE_HOUR);
+    for (var creation : durations) {
+      for (var update : durations) {
+        for (var read : durations) {
+          var policy = new JCacheExpiryPolicy(creation, update, read);
+          assertThat(hashes).doesNotContain(policy.hashCode());
+          hashes.add(policy.hashCode());
+        }
+      }
+    }
   }
 }

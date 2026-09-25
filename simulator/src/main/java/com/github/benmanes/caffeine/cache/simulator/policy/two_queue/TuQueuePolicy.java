@@ -16,6 +16,9 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.two_queue;
 
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
+
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
@@ -30,7 +33,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 /**
  * An adaption of the 2Q algorithm used by OpenBSD and memcached. Unlike the original 2Q algorithm,
  * non-resident entries are not retained in the TU-Q policy. For details see OpenBSD description at
- * <a href="http://www.tedunangst.com/flak/post/2Q-buffer-cache-algorithm">2Q buffer cache
+ * <a href="https://www.tedunangst.com/flak/post/2Q-buffer-cache-algorithm">2Q buffer cache
  * algorithm</a> and memcached's at <a href="https://github.com/memcached/memcached/pull/97">[Work
  * In Progress] LRU rework</a>.
  * <p>
@@ -51,7 +54,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @PolicySpec(name = "two-queue.TuQueue")
-public class TuQueuePolicy implements KeyOnlyPolicy {
+public final class TuQueuePolicy implements KeyOnlyPolicy {
   private final Long2ObjectMap<Node> data;
   private final PolicyStats policyStats;
   private final int maximumSize;
@@ -69,7 +72,7 @@ public class TuQueuePolicy implements KeyOnlyPolicy {
 
   @SuppressWarnings("this-escape")
   public TuQueuePolicy(Config config) {
-    TuQueueSettings settings = new TuQueueSettings(config);
+    var settings = new TuQueueSettings(config);
 
     this.headHot = new Node();
     this.headWarm = new Node();
@@ -83,8 +86,8 @@ public class TuQueuePolicy implements KeyOnlyPolicy {
 
   @Override
   public void record(long key) {
+    var node = data.get(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
     if (node == null) {
       policyStats.recordMiss();
       onMiss(key);
@@ -95,44 +98,43 @@ public class TuQueuePolicy implements KeyOnlyPolicy {
   }
 
   private void onHit(Node node) {
-    if (node.type == QueueType.HOT) {
-      node.moveToTail(headHot);
-    } else if (node.type == QueueType.WARM) {
-      node.moveToTail(headWarm);
-    } else if (node.type == QueueType.COLD) {
-      // If we have a cache hit on a cold buffer, it turns into a warm buffer and goes to the
-      // front of the warm queue. Then as the warm queue lengthens, buffers start slipping from
-      // the end onto the cold queue.
-      node.remove();
-      sizeCold--;
+    requireNonNull(node.type);
+    switch (node.type) {
+      case HOT -> node.moveToTail(headHot);
+      case WARM -> node.moveToTail(headWarm);
+      case COLD -> {
+        // If we have a cache hit on a cold buffer, it turns into a warm buffer and goes to the
+        // front of the warm queue. Then as the warm queue lengthens, buffers start slipping from
+        // the end onto the cold queue.
+        node.remove();
+        sizeCold--;
 
-      node.type = QueueType.WARM;
-      node.appendToTail(headWarm);
-      sizeWarm++;
+        node.type = QueueType.WARM;
+        node.appendToTail(headWarm);
+        sizeWarm++;
 
-      if (sizeWarm > maxWarm) {
-        Node demoted = headWarm.next;
-        demoted.remove();
-        sizeWarm--;
-        demoted.type = QueueType.COLD;
-        demoted.appendToTail(headCold);
-        sizeCold++;
+        if (sizeWarm > maxWarm) {
+          Node demoted = requireNonNull(headWarm.next);
+          demoted.remove();
+          sizeWarm--;
+          demoted.type = QueueType.COLD;
+          demoted.appendToTail(headCold);
+          sizeCold++;
+        }
       }
-    } else {
-      throw new IllegalStateException();
     }
   }
 
   /** Adds the entry to the cache as HOT, overflowing to the COLD queue, and evicts if necessary. */
   private void onMiss(long key) {
-    Node node = new Node(key);
+    var node = new Node(key);
     node.type = QueueType.HOT;
     node.appendToTail(headHot);
     data.put(key, node);
     sizeHot++;
 
     if (sizeHot > maxHot) {
-      Node demoted = headHot.next;
+      Node demoted = requireNonNull(headHot.next);
       demoted.remove();
       sizeHot--;
       demoted.appendToTail(headCold);
@@ -144,7 +146,7 @@ public class TuQueuePolicy implements KeyOnlyPolicy {
 
   private void evict() {
     if (data.size() > maximumSize) {
-      Node victim = headCold.next;
+      Node victim = requireNonNull(headCold.next);
       data.remove(victim.key);
       victim.remove();
       sizeCold--;
@@ -172,9 +174,9 @@ public class TuQueuePolicy implements KeyOnlyPolicy {
   static final class Node {
     final long key;
 
-    Node prev;
-    Node next;
-    QueueType type;
+    @Nullable Node prev;
+    @Nullable Node next;
+    @Nullable QueueType type;
 
     Node() {
       this.key = Long.MIN_VALUE;
@@ -188,7 +190,7 @@ public class TuQueuePolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void appendToTail(Node head) {
-      Node tail = head.prev;
+      Node tail = requireNonNull(head.prev);
       head.prev = this;
       tail.next = this;
       next = head;
@@ -197,19 +199,25 @@ public class TuQueuePolicy implements KeyOnlyPolicy {
 
     /** Moves the node to the tail. */
     public void moveToTail(Node head) {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       // unlink
       prev.next = next;
       next.prev = prev;
 
       // link
       next = head;
-      prev = head.prev;
+      prev = requireNonNull(head.prev);
       head.prev = this;
       prev.next = this;
     }
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       prev.next = next;
       next.prev = prev;
       prev = next = null;
@@ -226,17 +234,14 @@ public class TuQueuePolicy implements KeyOnlyPolicy {
   }
 
   static final class TuQueueSettings extends BasicSettings {
-
     public TuQueueSettings(Config config) {
       super(config);
     }
-
     public double percentHot() {
       double percentHot = config().getDouble("tu-queue.percent-hot");
       checkState(percentHot < 1.0);
       return percentHot;
     }
-
     public double percentWarm() {
       double percentWarm = config().getDouble("tu-queue.percent-warm");
       checkState(percentWarm < 1.0);

@@ -1,0 +1,81 @@
+@file:Suppress("PackageDirectoryMismatch")
+import org.gradle.util.GradleVersion.version
+
+plugins {
+  id("dev.sigstore.sign-base")
+  id("com.gradleup.nmcp")
+  `maven-publish`
+  `java-library`
+  signing
+}
+
+java {
+  withJavadocJar()
+  withSourcesJar()
+}
+
+configurations.sigstoreClientClasspath {
+  resolutionStrategy.eachDependency {
+    if ((requested.group == "io.grpc")
+        && version(libs.versions.grpc.get()) >= version(requested.version)) {
+      useVersion(libs.versions.grpc.get())
+    }
+  }
+}
+
+publishing {
+  publications {
+    register<MavenPublication>("mavenJava") {
+      from(components["java"])
+
+      pom {
+        name = "Caffeine cache"
+        description = project.description
+        url = "https://github.com/ben-manes/caffeine"
+        inceptionYear = "2014"
+
+        scm {
+          url = "https://github.com/ben-manes/caffeine"
+          connection = "scm:git:https://github.com/ben-manes/caffeine.git"
+          developerConnection = "scm:git:ssh://git@github.com/ben-manes/caffeine.git"
+        }
+
+        licenses {
+          license {
+            name = "Apache License, Version 2.0"
+            url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+            distribution = "repo"
+          }
+        }
+
+        developers {
+          developer {
+            id = "ben-manes"
+            name = "Ben Manes"
+            email = "ben.manes@gmail.com"
+            roles = listOf("owner", "developer")
+          }
+        }
+      }
+    }
+  }
+}
+
+signing {
+  // A build without a signing key stages an unsigned publication rather than failing
+  setRequired { false }
+
+  val signingKey = project.findProperty("signingKey") as String?
+  val signingKeyId = project.findProperty("signingKeyId") as String?
+  val signingPassword = project.findProperty("signingPassword") as String?
+  useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+  sign(publishing.publications["mavenJava"])
+}
+
+if (providers.environmentVariable("ACTIONS_ID_TOKEN_REQUEST_URL").isPresent) {
+  publishing {
+    sigstoreSign {
+      sign(publications = publishing.publications)
+    }
+  }
+}

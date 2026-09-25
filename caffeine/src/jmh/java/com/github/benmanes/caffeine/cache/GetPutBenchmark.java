@@ -17,6 +17,7 @@ package com.github.benmanes.caffeine.cache;
 
 import java.util.Random;
 
+import org.jspecify.annotations.Nullable;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Group;
 import org.openjdk.jmh.annotations.GroupThreads;
@@ -31,18 +32,19 @@ import site.ycsb.generator.NumberGenerator;
 import site.ycsb.generator.ScrambledZipfianGenerator;
 
 /**
- * A benchmark that evaluates the read/write performance of a cache. The cache is pre-populated for
+ * A benchmark that evaluates the read/write performance of a cache. The cache is prepopulated for
  * a 100% hit rate and a Zipf distribution of keys is used to mimic application usage patterns.
  * <p>
- * <pre>{@code
- *   ./gradlew jmh -PincludePattern=GetPutBenchmark
- * }</pre>
+ * {@snippet lang="shell" :
+ * ./gradlew jmh -PincludePattern=GetPutBenchmark -PjavaVersion=21 --rerun
+ * }
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @State(Scope.Group)
-@SuppressWarnings({"CanonicalAnnotationSyntax", "LexicographicalAnnotationAttributeListing",
-  "PMD.JUnit4TestShouldUseAfterAnnotation", "PMD.MethodNamingConventions"})
+@SuppressWarnings({"CanonicalAnnotationSyntax", "IdentifierName",
+    "LexicographicalAnnotationAttributeListing", "JavadocDeclaration",
+    "NotNullFieldNotInitialized", "PMD.MethodNamingConventions", "unused"})
 public class GetPutBenchmark {
   private static final int SIZE = (2 << 14);
   private static final int MASK = SIZE - 1;
@@ -74,7 +76,7 @@ public class GetPutBenchmark {
 
     // Enforce full initialization of internal structures
     for (int i = 0; i < 2 * SIZE; i++) {
-      cache.put(i, Boolean.TRUE);
+      cache.put(i, true);
     }
     cache.clear();
     cache.cleanUp();
@@ -83,7 +85,7 @@ public class GetPutBenchmark {
     NumberGenerator generator = new ScrambledZipfianGenerator(ITEMS);
     for (int i = 0; i < SIZE; i++) {
       ints[i] = generator.nextValue().intValue();
-      cache.put(ints[i], Boolean.TRUE);
+      cache.put(ints[i], true);
     }
   }
 
@@ -93,22 +95,22 @@ public class GetPutBenchmark {
   }
 
   @Benchmark @Group("read_only") @GroupThreads(8)
-  public Boolean readOnly(ThreadState threadState) {
+  public @Nullable Boolean readOnly(ThreadState threadState) {
     return cache.get(ints[threadState.index++ & MASK]);
   }
 
   @Benchmark @Group("write_only") @GroupThreads(8)
   public void writeOnly(ThreadState threadState) {
-    cache.put(ints[threadState.index++ & MASK], Boolean.TRUE);
+    cache.put(ints[threadState.index++ & MASK], true);
   }
 
   @Benchmark @Group("readwrite") @GroupThreads(6)
-  public Boolean readwrite_get(ThreadState threadState) {
+  public @Nullable Boolean readwrite_get(ThreadState threadState) {
     return cache.get(ints[threadState.index++ & MASK]);
   }
 
   @Benchmark @Group("readwrite") @GroupThreads(2)
   public void readwrite_put(ThreadState threadState) {
-    cache.put(ints[threadState.index++ & MASK], Boolean.TRUE);
+    cache.put(ints[threadState.index++ & MASK], true);
   }
 }

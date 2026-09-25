@@ -18,20 +18,19 @@ package com.github.benmanes.caffeine.jcache;
 import static java.util.Locale.US;
 import static java.util.Objects.requireNonNull;
 
+import java.util.OptionalLong;
 import java.util.Random;
-import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 import javax.cache.Cache;
-import javax.cache.Caching;
-import javax.cache.configuration.MutableConfiguration;
 
-import com.github.benmanes.caffeine.jcache.spi.CaffeineCachingProvider;
+import com.github.benmanes.caffeine.jcache.configuration.CaffeineConfiguration;
 import com.google.common.base.Stopwatch;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.google.common.util.concurrent.Uninterruptibles;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 
 /**
@@ -44,25 +43,26 @@ public final class JCacheProfiler {
   private static final int KEYS = 10_000;
   private static final boolean READ = true;
 
-  private final Cache<Integer, Boolean> cache;
-  private final Executor executor;
   private final LongAdder count;
   private final Random random;
 
   JCacheProfiler() {
     random = new Random();
     count = new LongAdder();
-    var provider = Caching.getCachingProvider(CaffeineCachingProvider.class.getName());
-    var cacheManager = provider.getCacheManager(
-        provider.getDefaultURI(), provider.getDefaultClassLoader());
-    cache = cacheManager.createCache("profiler", new MutableConfiguration<>());
-    executor = Executors.newCachedThreadPool(new ThreadFactoryBuilder()
-        .setPriority(Thread.MIN_PRIORITY).setDaemon(true).build());
   }
 
   public void start() {
+    var configuration = new CaffeineConfiguration<Integer, Boolean>()
+        .setMaximumSize(OptionalLong.of(KEYS));
+    try (var fixture = JCacheFixture.builder().build();
+         var cache = fixture.cacheManager().createCache("profiler", configuration)) {
+      run(cache);
+    }
+  }
+
+  private void run(Cache<Integer, Boolean> cache) {
     for (int i = 0; i < KEYS; i++) {
-      cache.put(i, Boolean.TRUE);
+      cache.put(i, true);
     }
     Runnable task = () -> {
       for (int i = random.nextInt(); ; i++) {
@@ -70,25 +70,34 @@ public final class JCacheProfiler {
         if (READ) {
           requireNonNull(cache.get(key));
         } else {
-          cache.put(key, Boolean.TRUE);
+          cache.put(key, true);
         }
         count.increment();
       }
     };
 
-    scheduleStatusTask();
-    for (int i = 0; i < THREADS; i++) {
-      executor.execute(task);
+    @SuppressWarnings("PMD.CloseResource")
+    var executor = Executors.newCachedThreadPool(
+        new ThreadFactoryBuilder().setDaemon(true).build());
+    try {
+      scheduleStatusTask();
+      for (int i = 0; i < THREADS; i++) {
+        executor.execute(task);
+      }
+    } finally {
+      executor.shutdown();
+      Uninterruptibles.awaitTerminationUninterruptibly(executor);
     }
   }
 
   @CanIgnoreReturnValue
+  @SuppressWarnings({"resource", "SystemOut"})
   private ScheduledFuture<?> scheduleStatusTask() {
     var stopwatch = Stopwatch.createStarted();
     return Executors.newSingleThreadScheduledExecutor().scheduleWithFixedDelay(() -> {
-      long count = this.count.longValue();
-      long rate = count / stopwatch.elapsed(TimeUnit.SECONDS);
-      System.out.printf(US, "%s - %,d [%,d / sec]%n", stopwatch, count, rate);
+      long iterations = count.longValue();
+      long rate = iterations / stopwatch.elapsed(TimeUnit.SECONDS);
+      System.out.printf(US, "%s - %,d [%,d / sec]%n", stopwatch, iterations, rate);
     }, 5, 5, TimeUnit.SECONDS);
   }
 

@@ -22,7 +22,7 @@ import com.github.benmanes.caffeine.cache.simulator.parser.TraceReader.KeyOnlyTr
 
 /**
  * A reader for the trace files of application address instructions, provided by
- * <a href="http://cseweb.ucsd.edu/classes/fa07/cse240a/project1.html">UC SD</a>.
+ * <a href="https://cseweb.ucsd.edu/classes/fa07/cse240a/project1.html">UC SD</a>.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
@@ -37,6 +37,6 @@ public final class AddressTraceReader extends TextTraceReader implements KeyOnly
     return lines()
         .map(line -> line.split(" ", 3)[1])
         .map(address -> address.substring(2))
-        .mapToLong(address -> Long.parseLong(address, 16));
+        .mapToLong(address -> Long.parseUnsignedLong(address, 16));
   }
 }

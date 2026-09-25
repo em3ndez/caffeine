@@ -19,7 +19,7 @@ import static java.util.Objects.requireNonNull;
 
 import javax.cache.Cache;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.RemovalListener;
@@ -36,9 +36,8 @@ public final class JCacheEvictionListener<K, V> implements RemovalListener<K, Ex
   private final JCacheStatisticsMXBean statistics;
   private final EventDispatcher<K, V> dispatcher;
 
-  private Cache<K, V> cache;
+  private @Nullable Cache<K, V> cache;
 
-  @SuppressWarnings("NullAway.Init")
   public JCacheEvictionListener(EventDispatcher<K, V> dispatcher,
       JCacheStatisticsMXBean statistics) {
     this.dispatcher = requireNonNull(dispatcher);
@@ -55,16 +54,16 @@ public final class JCacheEvictionListener<K, V> implements RemovalListener<K, Ex
   }
 
   @Override
-  @SuppressWarnings("NullAway")
-  public void onRemoval(K key, @Nullable Expirable<V> expirable, RemovalCause cause) {
-    if (expirable != null) {
-      V value = expirable.get();
-      if (cause == RemovalCause.EXPIRED) {
-        dispatcher.publishExpiredQuietly(cache, key, value);
-      } else {
-        dispatcher.publishRemovedQuietly(cache, key, value);
-      }
-      statistics.recordEvictions(1L);
+  public void onRemoval(@Nullable K key, @Nullable Expirable<V> expirable, RemovalCause cause) {
+    requireNonNull(key);
+    requireNonNull(cache);
+    requireNonNull(expirable);
+    V value = expirable.get();
+    if (cause == RemovalCause.EXPIRED) {
+      dispatcher.publishExpiredQuietly(cache, key, value);
+    } else {
+      dispatcher.publishRemovedQuietly(cache, key, value);
     }
+    statistics.recordEvictions(1L);
   }
 }

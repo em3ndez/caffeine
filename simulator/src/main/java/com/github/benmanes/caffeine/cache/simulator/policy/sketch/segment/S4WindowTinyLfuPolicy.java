@@ -16,15 +16,18 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.sketch.segment;
 
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
-import com.github.benmanes.caffeine.cache.simulator.admission.Admittor;
-import com.github.benmanes.caffeine.cache.simulator.admission.TinyLfu;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admission;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admitter;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
@@ -45,7 +48,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
   private final Long2ObjectMap<Node> data;
   private final PolicyStats policyStats;
-  private final Admittor admittor;
+  private final Admitter admitter;
   private final Node[] headMainQ;
   private final int maximumSize;
   private final int[] sizeMainQ;
@@ -56,9 +59,10 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   private int sizeWindow;
 
+  @SuppressWarnings("Varifier")
   public S4WindowTinyLfuPolicy(double percentMain, S4WindowTinyLfuSettings settings) {
     this.policyStats = new PolicyStats(name() + " (%.0f%%)", 100 * (1.0d - percentMain));
-    this.admittor = new TinyLfu(settings.config(), policyStats);
+    this.admitter = Admission.TINYLFU.from(settings.config(), policyStats);
     this.maximumSize = Math.toIntExact(settings.maximumSize());
     this.maxMain = (int) (maximumSize * percentMain);
     this.maxWindow = maximumSize - maxMain;
@@ -72,7 +76,7 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   /** Returns all variations of this policy based on the configuration parameters. */
   public static Set<Policy> policies(Config config) {
-    S4WindowTinyLfuSettings settings = new S4WindowTinyLfuSettings(config);
+    var settings = new S4WindowTinyLfuSettings(config);
     return settings.percentMain().stream()
         .map(percentMain -> new S4WindowTinyLfuPolicy(percentMain, settings))
         .collect(toUnmodifiableSet());
@@ -85,9 +89,9 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   @Override
   public void record(long key) {
+    var node = data.get(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
-    admittor.record(key);
+    admitter.record(key);
     if (node == null) {
       onMiss(key);
       policyStats.recordMiss();
@@ -104,7 +108,7 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   /** Adds the entry to the admission window, evicting if necessary. */
   private void onMiss(long key) {
-    Node node = new Node(key, Status.WINDOW);
+    var node = new Node(key, Status.WINDOW);
     node.appendToTail(headWindow);
     data.put(key, node);
     sizeWindow++;
@@ -135,7 +139,7 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
     int maxPerLevel = maxMain / levels;
     for (int i = levels - 1; i > 0; i--) {
       if (sizeMainQ[i] > maxPerLevel) {
-        Node demote = headMainQ[i].next;
+        Node demote = requireNonNull(headMainQ[i].next);
         demote.remove();
         sizeMainQ[i]--;
 
@@ -152,7 +156,7 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
       return;
     }
 
-    Node candidate = headWindow.next;
+    Node candidate = requireNonNull(headWindow.next);
     candidate.remove();
     sizeWindow--;
 
@@ -161,8 +165,8 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
     sizeMainQ[0]++;
 
     if (data.size() > maximumSize) {
-      Node victim = headMainQ[0].next;
-      Node evict = admittor.admit(candidate.key, victim.key) ? victim : candidate;
+      Node victim = requireNonNull(headMainQ[0].next);
+      Node evict = admitter.admit(candidate.key, victim.key) ? victim : candidate;
       data.remove(evict.key);
       evict.remove();
       sizeMainQ[0]--;
@@ -175,7 +179,7 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
   public void finished() {
     for (int i = 0; i < levels; i++) {
       int level = i;
-      int count = (int) data.values().stream()
+      long count = data.values().stream()
           .filter(node -> node.status == Status.MAIN)
           .filter(node -> node.level == level)
           .count();
@@ -193,20 +197,21 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
   static final class Node {
     final long key;
 
-    Status status;
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
+    @Nullable Status status;
+
     int level;
 
     /** Creates a new, unlinked node. */
-    public Node(long key, Status status) {
+    public Node(long key, @Nullable Status status) {
       this.status = status;
       this.key = key;
     }
 
     /** Creates a new sentinel node. */
     static Node sentinel(int level) {
-      Node node = new Node(Long.MIN_VALUE, null);
+      var node = new Node(Long.MIN_VALUE, null);
       node.level = level;
       node.prev = node;
       node.next = node;
@@ -220,6 +225,7 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void appendToTail(Node head) {
+      requireNonNull(head.prev);
       Node tail = head.prev;
       head.prev = this;
       tail.next = this;
@@ -229,6 +235,8 @@ public final class S4WindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
       prev.next = next;
       next.prev = prev;
       next = prev = null;

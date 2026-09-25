@@ -19,49 +19,49 @@ import static java.util.Objects.requireNonNull;
 
 import java.io.Serializable;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.CacheLoader;
 import com.google.common.cache.CacheLoader.InvalidCacheLoadException;
+import com.google.common.cache.CacheLoader.UnsupportedLoadingOperationException;
 import com.google.common.cache.LoadingCache;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.ExecutionError;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.UncheckedExecutionException;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 
 /**
  * A Caffeine-backed loading cache through a Guava facade.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@SuppressWarnings({"PMD.ExceptionAsFlowControl", "serial"})
+@SuppressWarnings("serial")
 final class CaffeinatedGuavaLoadingCache<K, V>
     extends CaffeinatedGuavaCache<K, V> implements LoadingCache<K, V> {
-  private static final ThreadLocal<Boolean> nullBulkLoad =
-      ThreadLocal.withInitial(() -> Boolean.FALSE);
+  private static final ThreadLocal<Boolean> nullBulkLoad = new ThreadLocal<>();
   private static final long serialVersionUID = 1L;
-
-  private final com.github.benmanes.caffeine.cache.LoadingCache<K, V> cache;
 
   CaffeinatedGuavaLoadingCache(com.github.benmanes.caffeine.cache.LoadingCache<K, V> cache) {
     super(cache);
-    this.cache = cache;
   }
 
   @Override
-  @SuppressWarnings({"NullAway", "PMD.PreserveStackTrace"})
+  @SuppressWarnings("PMD.PreserveStackTrace")
   public V get(K key) throws ExecutionException {
     requireNonNull(key);
     try {
-      return cache.get(key);
+      return requireLoaded(loadingCache().get(key));
     } catch (InvalidCacheLoadException e) {
       throw e;
     } catch (CacheLoaderException e) {
@@ -74,12 +74,12 @@ final class CaffeinatedGuavaLoadingCache<K, V>
   }
 
   @Override
-  @SuppressWarnings({"CatchingUnchecked", "NullAway",
-    "PMD.AvoidCatchingNPE", "PMD.PreserveStackTrace"})
+  @SuppressWarnings({"CatchingUnchecked", "PMD.PreserveStackTrace"})
   public V getUnchecked(K key) {
+    requireNonNull(key);
     try {
-      return cache.get(key);
-    } catch (NullPointerException | InvalidCacheLoadException e) {
+      return requireLoaded(loadingCache().get(key));
+    } catch (InvalidCacheLoadException e) {
       throw e;
     } catch (CacheLoaderException e) {
       throw new UncheckedExecutionException(e.getCause());
@@ -91,21 +91,24 @@ final class CaffeinatedGuavaLoadingCache<K, V>
   }
 
   @Override
-  @SuppressWarnings({"CatchingUnchecked", "PMD.AvoidCatchingNPE", "PMD.PreserveStackTrace"})
+  @SuppressWarnings({"CatchingUnchecked", "PMD.PreserveStackTrace"})
   public ImmutableMap<K, V> getAll(Iterable<? extends K> keys) throws ExecutionException {
+    requireNonNull(keys);
+    var keysToLoad = ImmutableList.copyOf(keys);
+    boolean enclosing = (nullBulkLoad.get() != null);
+    nullBulkLoad.remove();
     try {
-      Map<K, V> result = cache.getAll(keys);
-      if (nullBulkLoad.get()) {
-        nullBulkLoad.set(false);
+      Map<K, V> result = loadingCache().getAll(keysToLoad);
+      if (nullBulkLoad.get() != null) {
         throw new InvalidCacheLoadException("null key or value");
       }
-      for (K key : keys) {
+      for (K key : keysToLoad) {
         if (!result.containsKey(key)) {
           throw new InvalidCacheLoadException("loadAll failed to return a value for " + key);
         }
       }
       return ImmutableMap.copyOf(result);
-    } catch (NullPointerException | InvalidCacheLoadException e) {
+    } catch (InvalidCacheLoadException e) {
       throw e;
     } catch (CacheLoaderException e) {
       throw new ExecutionException(e.getCause());
@@ -113,19 +116,39 @@ final class CaffeinatedGuavaLoadingCache<K, V>
       throw new UncheckedExecutionException(e);
     } catch (Error e) {
       throw new ExecutionError(e);
+    } finally {
+      if (enclosing) {
+        nullBulkLoad.set(true);
+      } else {
+        nullBulkLoad.remove();
+      }
     }
   }
 
   @Override
-  @SuppressWarnings({"deprecation", "NullAway"})
+  @SuppressWarnings("deprecation")
   public V apply(K key) {
-    return cache.get(key);
+    return getUnchecked(key);
   }
 
   @Override
   @SuppressWarnings("FutureReturnValueIgnored")
   public void refresh(K key) {
-    cache.refresh(key);
+    loadingCache().refresh(key);
+  }
+
+  /** Returns the delegate as a loading cache. */
+  private com.github.benmanes.caffeine.cache.LoadingCache<K, V> loadingCache() {
+    return (com.github.benmanes.caffeine.cache.LoadingCache<K, V>) cache;
+  }
+
+  /** Returns the loaded value, or throws if absent. */
+  @CanIgnoreReturnValue
+  private static <V> V requireLoaded(@Nullable V value) {
+    if (value == null) {
+      throw new InvalidCacheLoadException("null value");
+    }
+    return value;
   }
 
   abstract static class CaffeinatedLoader<K, V> implements CacheLoader<K, V>, Serializable {
@@ -136,6 +159,7 @@ final class CaffeinatedGuavaLoadingCache<K, V>
     CaffeinatedLoader(com.google.common.cache.CacheLoader<K, V> cacheLoader) {
       this.cacheLoader = requireNonNull(cacheLoader);
     }
+    @SuppressWarnings("ConstantValue")
     @Override public CompletableFuture<V> asyncReload(K key, V oldValue, Executor executor) {
       var future = new CompletableFuture<V>();
       try {
@@ -145,10 +169,22 @@ final class CaffeinatedGuavaLoadingCache<K, V>
         } else {
           Futures.addCallback(reloader, new FutureCompleter<>(future), Runnable::run);
         }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        future.completeExceptionally(e);
       } catch (Throwable t) {
         future.completeExceptionally(t);
       }
       return future;
+    }
+    /** Sequentially loads each missing entry. */
+    @SuppressWarnings("PMD.SignatureDeclareThrowsException")
+    Map<K, V> loadSequentially(Set<? extends K> keys) throws Exception {
+      var result = new HashMap<K, V>(keys.size(), /* loadFactor= */ 1.0f);
+      for (K key : keys) {
+        result.put(key, load(key));
+      }
+      return result;
     }
   }
 
@@ -158,6 +194,7 @@ final class CaffeinatedGuavaLoadingCache<K, V>
     InternalSingleLoader(com.google.common.cache.CacheLoader<K, V> cacheLoader) {
       super(cacheLoader);
     }
+    @SuppressWarnings("ConstantValue")
     @Override public V load(K key) {
       try {
         V value = cacheLoader.load(key);
@@ -182,13 +219,19 @@ final class CaffeinatedGuavaLoadingCache<K, V>
     InternalBulkLoader(com.google.common.cache.CacheLoader<K, V> cacheLoader) {
       super(cacheLoader);
     }
+    @SuppressWarnings("ConstantValue")
     @Override public Map<K, V> loadAll(Set<? extends K> keys) {
       try {
-        Map<K, V> loaded = cacheLoader.loadAll(keys);
+        Map<K, V> loaded;
+        try {
+          loaded = cacheLoader.loadAll(keys);
+        } catch (UnsupportedLoadingOperationException e) {
+          return loadSequentially(keys);
+        }
         if (loaded == null) {
           throw new InvalidCacheLoadException("null map");
         }
-        Map<K, V> result = new HashMap<>(loaded.size(), /* load factor */ 1.0f);
+        var result = new IdentityHashMap<K, V>(loaded.size());
         loaded.forEach((key, value) -> {
           if ((key == null) || (value == null)) {
             nullBulkLoad.set(true);
@@ -214,6 +257,7 @@ final class CaffeinatedGuavaLoadingCache<K, V>
     ExternalSingleLoader(com.google.common.cache.CacheLoader<K, V> cacheLoader) {
       super(cacheLoader);
     }
+    @SuppressWarnings("ConstantValue")
     @Override public V load(K key) throws Exception {
       V value = cacheLoader.load(key);
       if (value == null) {
@@ -229,8 +273,23 @@ final class CaffeinatedGuavaLoadingCache<K, V>
     ExternalBulkLoader(com.google.common.cache.CacheLoader<K, V> cacheLoader) {
       super(cacheLoader);
     }
+    @SuppressWarnings("ConstantValue")
     @Override public Map<K, V> loadAll(Set<? extends K> keys) throws Exception {
-      return cacheLoader.loadAll(keys);
+      Map<K, V> loaded;
+      try {
+        loaded = cacheLoader.loadAll(keys);
+      } catch (UnsupportedLoadingOperationException e) {
+        return loadSequentially(keys);
+      }
+      if (loaded == null) {
+        throw new InvalidCacheLoadException("null map");
+      }
+      for (var entry : loaded.entrySet()) {
+        if ((entry.getKey() == null) || (entry.getValue() == null)) {
+          throw new InvalidCacheLoadException("null key or value");
+        }
+      }
+      return loaded;
     }
   }
 

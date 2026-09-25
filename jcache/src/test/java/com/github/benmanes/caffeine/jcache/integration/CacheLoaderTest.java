@@ -15,121 +15,921 @@
  */
 package com.github.benmanes.caffeine.jcache.integration;
 
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.getStatistics;
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.nullRef;
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
+import static java.util.Objects.requireNonNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyIterable;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
 
+import javax.cache.Cache;
+import javax.cache.CacheException;
+import javax.cache.configuration.MutableCacheEntryListenerConfiguration;
+import javax.cache.event.CacheEntryCreatedListener;
+import javax.cache.event.CacheEntryExpiredListener;
+import javax.cache.event.CacheEntryRemovedListener;
+import javax.cache.event.CacheEntryUpdatedListener;
+import javax.cache.expiry.CreatedExpiryPolicy;
 import javax.cache.expiry.Duration;
 import javax.cache.expiry.ExpiryPolicy;
 import javax.cache.integration.CacheLoader;
 import javax.cache.integration.CacheLoaderException;
+import javax.cache.processor.EntryProcessor;
 
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mockito;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
 
-import com.github.benmanes.caffeine.jcache.AbstractJCacheTest;
-import com.github.benmanes.caffeine.jcache.configuration.CaffeineConfiguration;
+import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.github.benmanes.caffeine.jcache.Expirable;
+import com.github.benmanes.caffeine.jcache.JCacheFixture;
+import com.github.benmanes.caffeine.jcache.copy.Copier;
 import com.google.common.collect.Maps;
+import com.google.common.util.concurrent.MoreExecutors;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class CacheLoaderTest extends AbstractJCacheTest {
-  private CacheLoader<Integer, Integer> cacheLoader;
-  private ExpiryPolicy expiry;
+final class CacheLoaderTest {
 
-  @Test
-  public void load() {
-    when(cacheLoader.load(any())).thenReturn(-1);
-    assertThat(jcacheLoading.get(1)).isEqualTo(-1);
+  private static JCacheFixture jcacheFixture(
+      ExpiryPolicy expiry, CacheLoader<Integer, Integer> cacheLoader) {
+    return JCacheFixture.builder()
+        .loading(config -> {
+          config.setCacheLoaderFactory(() -> cacheLoader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setStatisticsEnabled(true);
+          config.setReadThrough(true);
+        }).build();
+  }
+
+  private static JCacheFixture jcacheFixture(
+      ExpiryPolicy expiry, CacheLoader<Integer, Integer> cacheLoader, Copier copier) {
+    return JCacheFixture.builder()
+        .loading(config -> {
+          config.setCacheLoaderFactory(() -> cacheLoader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setCopierFactory(() -> copier);
+          config.setStatisticsEnabled(true);
+          config.setStoreByValue(true);
+          config.setReadThrough(true);
+        }).build();
   }
 
   @Test
-  public void load_null() {
-    when(cacheLoader.load(any())).thenReturn(null);
-    assertThat(jcacheLoading.get(1)).isNull();
-  }
-
-  @Test(dataProvider = "throwables")
-  public void load_failure(Throwable throwable) {
-    when(cacheLoader.load(any())).thenThrow(throwable);
-    var e = assertThrows(CacheLoaderException.class, () -> jcacheLoading.get(1));
-    if (e != throwable) {
-      assertThat(e).hasCauseThat().isSameInstanceAs(throwable);
+  void load() {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.load(any())).thenReturn(-1);
+      assertThat(fixture.jcacheLoading().get(1)).isEqualTo(-1);
     }
   }
 
   @Test
-  public void load_failure_expiry() {
-    when(expiry.getExpiryForCreation()).thenThrow(IllegalStateException.class);
-    when(cacheLoader.load(any())).thenReturn(-1);
-    var e = assertThrows(CacheLoaderException.class, () -> jcacheLoading.get(1));
-    assertThat(e).hasCauseThat().isInstanceOf(IllegalStateException.class);
+  void load_null() {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.load(any())).thenReturn(nullRef());
+      assertThat(fixture.jcacheLoading().get(1)).isNull();
+    }
   }
 
   @Test
-  public void loadAll() {
-    when(cacheLoader.loadAll(anyIterable())).then(answer -> {
-      Iterable<Integer> keys = answer.getArgument(0);
-      return Maps.toMap(keys, key -> -key);
+  void load_null_subtractsLoaderTimeFromGetTime() {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      // Simulate a slow loader by advancing the cache's ticker inside load()
+      when(cacheLoader.load(any())).thenAnswer(invocation -> {
+        fixture.ticker().advance(java.time.Duration.ofMillis(100));
+        return nullRef();
+      });
+
+      assertThat(fixture.jcacheLoading().get(1)).isNull();
+
+      // recordGetTime is documented as excluding loader time. Pre-fix, the null-result early
+      // return skipped the subtraction and the loader's 100ms stayed attributed to the average
+      // get-time. The clock only advances inside load(), so the corrected time is zero.
+      var statistics = getStatistics(fixture.jcacheLoading());
+      assertThat(statistics.getCacheMisses()).isEqualTo(1L);
+      assertThat(statistics.getCacheHits()).isEqualTo(0L);
+      assertThat(statistics.getAverageGetTime()).isEqualTo(0f);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("readOperations")
+  void load_outputCopyFailure_keepsGetTimeNonNegative(
+      Consumer<Cache<Integer, Integer>> operation, Set<Integer> keys) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    var copies = new HashMap<Integer, Integer>();
+    var copier = new Copier() {
+      @Override public <T> T copy(T object, ClassLoader classLoader) {
+        if ((object instanceof Integer) && (((Integer) object) < 0)) {
+          var value = (Integer) object;
+          Integer priorCount = copies.get(value);
+          int count = (priorCount == null) ? 1 : (priorCount + 1);
+          copies.put(value, count);
+          if (count > 1) {
+            throw new CacheException("output copy failed");
+          }
+        }
+        return object;
+      }
+    };
+    try (var fixture = jcacheFixture(expiry, cacheLoader, copier);
+         var cache = fixture.jcacheLoading()) {
+      when(cacheLoader.load(any())).thenAnswer(invocation -> {
+        fixture.ticker().advance(java.time.Duration.ofMillis(100));
+        return -1;
+      });
+      when(cacheLoader.loadAll(anyIterable())).thenAnswer(invocation -> {
+        fixture.ticker().advance(java.time.Duration.ofMillis(100));
+        Iterable<Integer> loadedKeys = invocation.getArgument(0);
+        return Maps.toMap(loadedKeys, key -> -key);
+      });
+      assertThrows(CacheException.class, () -> operation.accept(cache));
+
+      assertThat(getStatistics(cache).getCacheMisses()).isEqualTo(keys.size());
+      assertThat(getStatistics(cache).getAverageGetTime()).isAtLeast(0f);
+      keys.forEach(key -> assertThat(cache.containsKey(key)).isTrue());
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("readOperations")
+  void load_failure_excludesLoaderTime(
+      Consumer<Cache<Integer, Integer>> operation, Set<Integer> keys) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader);
+         var cache = fixture.jcacheLoading()) {
+      when(cacheLoader.load(any())).thenAnswer(invocation -> {
+        fixture.ticker().advance(java.time.Duration.ofMillis(100));
+        throw new CacheLoaderException("load failed");
+      });
+      when(cacheLoader.loadAll(anyIterable())).thenAnswer(invocation -> {
+        fixture.ticker().advance(java.time.Duration.ofMillis(100));
+        throw new CacheLoaderException("load failed");
+      });
+      assertThrows(CacheLoaderException.class, () -> operation.accept(cache));
+
+      assertThat(getStatistics(cache).getCacheMisses()).isEqualTo(keys.size());
+      assertThat(getStatistics(cache).getCacheHits()).isEqualTo(0L);
+      assertThat(getStatistics(cache).getAverageGetTime()).isEqualTo(0f);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("readOperations")
+  void load_copierTime_includedInGetTime(
+      Consumer<Cache<Integer, Integer>> operation, Set<Integer> keys) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    var onCopy = new AtomicReference<Runnable>(() -> {});
+    var copier = new Copier() {
+      @Override public <T> T copy(T object, ClassLoader classLoader) {
+        if ((object instanceof Integer) && (((Integer) object) < 0)) {
+          onCopy.get().run();
+        }
+        return object;
+      }
+    };
+    try (var fixture = jcacheFixture(expiry, cacheLoader, copier);
+         var cache = fixture.jcacheLoading()) {
+      onCopy.set(() -> fixture.ticker().advance(java.time.Duration.ofMillis(50)));
+      when(cacheLoader.load(any())).thenAnswer(invocation -> {
+        fixture.ticker().advance(java.time.Duration.ofMillis(100));
+        return -1;
+      });
+      when(cacheLoader.loadAll(anyIterable())).thenAnswer(invocation -> {
+        fixture.ticker().advance(java.time.Duration.ofMillis(100));
+        Iterable<Integer> loadedKeys = invocation.getArgument(0);
+        return Maps.toMap(loadedKeys, key -> -key);
+      });
+
+      operation.accept(cache);
+
+      assertThat(getStatistics(cache).getCacheMisses()).isEqualTo(keys.size());
+      assertThat(getStatistics(cache).getAverageGetTime()).isEqualTo(100_000f);
+      keys.forEach(key -> assertThat(cache.containsKey(key)).isTrue());
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void nativeLoad_doesNotChangeJCacheGetTime() {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader);
+         var cache = fixture.jcacheLoading()) {
+      when(cacheLoader.load(any())).thenAnswer(invocation -> {
+        fixture.ticker().advance(java.time.Duration.ofMillis(100));
+        return -1;
+      });
+      var nativeCache = (LoadingCache<Integer, Expirable<Integer>>)
+          cache.unwrap(LoadingCache.class);
+
+      assertThat(nativeCache.get(1)).isNotNull();
+      assertThat(getStatistics(cache).getCacheGets()).isEqualTo(0L);
+
+      assertThat(cache.get(1)).isEqualTo(-1);
+      assertThat(getStatistics(cache).getCacheHits()).isEqualTo(1L);
+      assertThat(getStatistics(cache).getCacheMisses()).isEqualTo(0L);
+      assertThat(getStatistics(cache).getAverageGetTime()).isEqualTo(0f);
+    }
+  }
+
+  @Test
+  void get_loaderThrows_recordsMiss() {
+    // A read-through get whose loader throws still records the miss (the find already failed before
+    // the load ran) -- matching the loading getAll, the RI, and core
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    when(cacheLoader.load(any())).thenThrow(new IllegalStateException("boom"));
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      assertThrows(CacheLoaderException.class, () -> fixture.jcacheLoading().get(1));
+      assertThat(JCacheFixture.getStatistics(fixture.jcacheLoading()).getCacheMisses()).isEqualTo(1L);
+    }
+  }
+
+  @ParameterizedTest @MethodSource("readOperations")
+  void readThrough_loaderInterrupted_restoresInterruptStatus(
+      Consumer<Cache<Integer, Integer>> operation, Set<Integer> keys) {
+    // An interrupted loader, as another JVM language throws it undeclared, leaves the caller's thread
+    // interrupted, as core's loading cache does when it converts the exception itself
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    when(cacheLoader.load(any())).thenAnswer(invocation -> { throw new InterruptedException(); });
+    when(cacheLoader.loadAll(anyIterable())).thenAnswer(invocation -> {
+      throw new InterruptedException();
     });
-    var result = jcacheLoading.getAll(Set.of(1, 2, 3));
-    assertThat(result).containsExactly(1, -1, 2, -2, 3, -3);
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      boolean interrupted;
+      try {
+        var error = assertThrows(CacheLoaderException.class,
+            () -> operation.accept(fixture.jcacheLoading()));
+        assertThat(error).hasCauseThat().isInstanceOf(InterruptedException.class);
+      } finally {
+        interrupted = Thread.interrupted();
+      }
+      assertThat(interrupted).isTrue();
+      for (int key : keys) {
+        assertThat(fixture.jcacheLoading().containsKey(key)).isFalse();
+      }
+    }
   }
 
-  @Test
-  public void loadAll_null() {
-    when(cacheLoader.loadAll(anyIterable())).thenReturn(null);
-    assertThrows(CacheLoaderException.class, () -> jcacheLoading.getAll(Set.of(1, 2, 3)));
+  @ParameterizedTest @MethodSource("processorFailures")
+  void invoke_loaderFailure_canRecover(boolean bulk, Exception failure) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenAnswer(invocation -> { throw failure; });
+    try (var fixture = jcacheFixture(expiry, loader);
+         var cache = fixture.jcacheLoading()) {
+      EntryProcessor<Integer, Integer, Integer> processor = (entry, args) -> {
+        try {
+          return entry.getValue();
+        } catch (CacheLoaderException e) {
+          if (failure instanceof CacheLoaderException) {
+            assertThat(e).isSameInstanceAs(failure);
+          } else {
+            assertThat(e).hasCauseThat().isSameInstanceAs(failure);
+          }
+          entry.setValue(-1);
+          return -1;
+        }
+      };
+      if (bulk) {
+        var results = cache.invokeAll(Set.of(1), processor);
+        assertThat(requireNonNull(results.get(1)).get()).isEqualTo(-1);
+      } else {
+        assertThat(cache.invoke(1, processor)).isEqualTo(-1);
+      }
+      assertThat(cache.get(1)).isEqualTo(-1);
+      verify(loader).load(1);
+    }
   }
 
-  @Test
-  public void loadAll_nullMapping() {
-    when(cacheLoader.loadAll(anyIterable())).thenReturn(Collections.singletonMap(1, null));
-    var result = jcacheLoading.getAll(Set.of(1, 2, 3));
-    assertThat(result).isEmpty();
+  @ParameterizedTest @MethodSource("processorOperations")
+  void invoke_loaderInterrupted_restoresInterruptStatus(boolean bulk) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    var failure = new InterruptedException();
+    when(loader.load(1)).thenAnswer(invocation -> { throw failure; });
+    try (var fixture = jcacheFixture(expiry, loader);
+         var cache = fixture.jcacheLoading()) {
+      EntryProcessor<Integer, Integer, Integer> processor = (entry, args) -> {
+        try {
+          return entry.getValue();
+        } catch (CacheLoaderException e) {
+          assertThat(e).hasCauseThat().isSameInstanceAs(failure);
+          assertThat(Thread.currentThread().isInterrupted()).isTrue();
+          entry.setValue(-1);
+          return -1;
+        }
+      };
+      boolean interrupted;
+      try {
+        if (bulk) {
+          var results = cache.invokeAll(Set.of(1), processor);
+          assertThat(requireNonNull(results.get(1)).get()).isEqualTo(-1);
+        } else {
+          assertThat(cache.invoke(1, processor)).isEqualTo(-1);
+        }
+      } finally {
+        interrupted = Thread.interrupted();
+      }
+      assertThat(interrupted).isTrue();
+      assertThat(cache.get(1)).isEqualTo(-1);
+      verify(loader).load(1);
+    }
   }
 
-  @Test(dataProvider = "throwables")
-  public void loadAll_failure(Throwable throwable) {
-    when(cacheLoader.loadAll(any())).thenThrow(throwable);
-    var e = assertThrows(CacheLoaderException.class, () -> jcacheLoading.getAll(Set.of(1, 2, 3)));
-    if (e != throwable) {
-      assertThat(e).hasCauseThat().isSameInstanceAs(throwable);
+  @ParameterizedTest @MethodSource("processorOperations")
+  void invoke_loaderError_propagates(boolean bulk) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    var failure = new AssertionError();
+    when(loader.load(1)).thenThrow(failure);
+    try (var fixture = jcacheFixture(expiry, loader);
+         var cache = fixture.jcacheLoading()) {
+      var error = assertThrows(AssertionError.class, () -> {
+        if (bulk) {
+          cache.invokeAll(Set.of(1), (entry, args) -> entry.getValue());
+        } else {
+          cache.invoke(1, (entry, args) -> entry.getValue());
+        }
+      });
+      assertThat(error).isSameInstanceAs(failure);
+      assertThat(cache.containsKey(1)).isFalse();
+      verify(loader).load(1);
+    }
+  }
+
+  @ParameterizedTest @MethodSource("processorOperations")
+  void invoke_nullLoad_consumed(boolean bulk) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenReturn(nullRef(), -1);
+    try (var fixture = jcacheFixture(expiry, loader);
+         var cache = fixture.jcacheLoading()) {
+      EntryProcessor<Integer, Integer, Integer> processor = (entry, args) -> {
+        assertThat(entry.getValue()).isNull();
+        assertThat(entry.getValue()).isNull();
+        assertThat(entry.exists()).isFalse();
+        return -1;
+      };
+      if (bulk) {
+        var results = cache.invokeAll(Set.of(1), processor);
+        assertThat(requireNonNull(results.get(1)).get()).isEqualTo(-1);
+      } else {
+        assertThat(cache.invoke(1, processor)).isEqualTo(-1);
+      }
+      assertThat(cache.containsKey(1)).isFalse();
+      verify(loader).load(1);
+    }
+  }
+
+  @ParameterizedTest @MethodSource("processorOperations")
+  void invoke_removedEntry_doesNotLoad(boolean bulk) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenReturn(-1);
+    try (var fixture = jcacheFixture(expiry, loader);
+         var cache = fixture.jcacheLoading()) {
+      cache.put(1, 2);
+      EntryProcessor<Integer, Integer, Integer> processor = (entry, args) -> {
+        entry.remove();
+        assertThat(entry.getValue()).isNull();
+        assertThat(entry.getValue()).isNull();
+        assertThat(entry.exists()).isFalse();
+        return -1;
+      };
+      if (bulk) {
+        var results = cache.invokeAll(Set.of(1), processor);
+        assertThat(requireNonNull(results.get(1)).get()).isEqualTo(-1);
+      } else {
+        assertThat(cache.invoke(1, processor)).isEqualTo(-1);
+      }
+      assertThat(cache.containsKey(1)).isFalse();
+      verify(loader, never()).load(any());
+    }
+  }
+
+  @ParameterizedTest @MethodSource("processorOperations")
+  void invoke_loaderFailure_canRetry(boolean bulk) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenThrow(new IllegalStateException()).thenReturn(-1);
+    try (var fixture = jcacheFixture(expiry, loader);
+         var cache = fixture.jcacheLoading()) {
+      EntryProcessor<Integer, Integer, Integer> processor = (entry, args) -> {
+        assertThrows(RuntimeException.class, entry::getValue);
+        return entry.getValue();
+      };
+      if (bulk) {
+        var results = cache.invokeAll(Set.of(1), processor);
+        assertThat(requireNonNull(results.get(1)).get()).isEqualTo(-1);
+      } else {
+        assertThat(cache.invoke(1, processor)).isEqualTo(-1);
+      }
+      assertThat(cache.get(1)).isEqualTo(-1);
+      verify(loader, times(2)).load(1);
     }
   }
 
   @Test
-  public void loadAll_failure_expiry() {
-    when(expiry.getExpiryForCreation()).thenThrow(IllegalStateException.class);
-    when(cacheLoader.loadAll(anyIterable())).thenReturn(Map.of(1, 1, 2, 2));
-    var e = assertThrows(CacheLoaderException.class, () -> jcacheLoading.getAll(Set.of(1, 2, 3)));
-    assertThat(e).hasCauseThat().isInstanceOf(IllegalStateException.class);
+  void refresh_publishesUpdatedNotCreated() {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenReturn(-1, -2);
+
+    var created = new AtomicInteger();
+    var updated = new AtomicInteger();
+    CacheEntryCreatedListener<Integer, Integer> createdListener =
+        events -> events.forEach(event -> created.incrementAndGet());
+    CacheEntryUpdatedListener<Integer, Integer> updatedListener =
+        events -> events.forEach(event -> updated.incrementAndGet());
+
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setReadThrough(true);
+          config.setCacheLoaderFactory(() -> loader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+          config.setRefreshAfterWrite(OptionalLong.of(TimeUnit.MINUTES.toNanos(1)));
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              () -> createdListener, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              () -> updatedListener, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+        }).build();
+        var cache = fixture.jcacheLoading()) {
+      assertThat(cache.get(1)).isEqualTo(-1);
+      fixture.ticker().advance(java.time.Duration.ofMinutes(2));
+
+      // Trigger the refresh, which runs inline via directExecutor.
+      assertThat(cache.get(1)).isNotNull();
+
+      // The refresh reloads an existing entry, so it publishes UPDATED, not a second CREATED.
+      assertThat(created.get()).isEqualTo(1);
+      assertThat(updated.get()).isEqualTo(1);
+    }
   }
 
-  @DataProvider(name = "throwables")
-  Object[] providesThrowables() {
-    return new Object[] { new IllegalStateException(), new CacheLoaderException() };
+  @Test
+  void reload_nullValue() {
+    // A refresh whose reload yields null drops the entry rather than storing null, and publishes
+    // REMOVED (symmetric with the UPDATED/EXPIRED a non-null reload fires).
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenReturn(-1, (Integer) null);
+
+    var removed = new AtomicInteger();
+    CacheEntryRemovedListener<Integer, Integer> removedListener =
+        events -> events.forEach(event -> removed.incrementAndGet());
+
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setReadThrough(true);
+          config.setCacheLoaderFactory(() -> loader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+          config.setRefreshAfterWrite(OptionalLong.of(TimeUnit.MINUTES.toNanos(1)));
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              () -> removedListener, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+        }).build();
+        var cache = fixture.jcacheLoading()) {
+      assertThat(cache.get(1)).isEqualTo(-1);
+      fixture.ticker().advance(java.time.Duration.ofMinutes(2));
+
+      // Trigger the refresh; the reload's null result drops the entry and fires REMOVED.
+      assertThat(cache.get(1)).isEqualTo(-1);
+      verify(loader, Mockito.times(2)).load(1);
+      assertThat(cache.containsKey(1)).isFalse();
+      assertThat(removed.get()).isEqualTo(1);
+    }
   }
 
-  @Override protected CaffeineConfiguration<Integer, Integer> getConfiguration() {
-    expiry = Mockito.mock(answer -> Duration.ZERO);
-    cacheLoader = Mockito.mock();
+  @Test
+  void reload_zeroExpiry_publishesExpired() {
+    // A reload whose update expiry is ZERO expires the reloaded value in place of updating it.
+    ExpiryPolicy expiry = Mockito.mock();
+    when(expiry.getExpiryForCreation()).thenReturn(Duration.ETERNAL);
+    when(expiry.getExpiryForUpdate()).thenReturn(Duration.ZERO);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenReturn(-1, -2);
 
-    var configuration = new CaffeineConfiguration<Integer, Integer>();
-    configuration.setExpiryPolicyFactory(() -> expiry);
-    configuration.setStatisticsEnabled(true);
-    return configuration;
+    var expired = new AtomicInteger();
+    CacheEntryExpiredListener<Integer, Integer> expiredListener =
+        events -> events.forEach(event -> expired.incrementAndGet());
+
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setReadThrough(true);
+          config.setCacheLoaderFactory(() -> loader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+          config.setRefreshAfterWrite(OptionalLong.of(TimeUnit.MINUTES.toNanos(1)));
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              () -> expiredListener, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+        }).build();
+        var cache = fixture.jcacheLoading()) {
+      assertThat(cache.get(1)).isEqualTo(-1);
+      fixture.ticker().advance(java.time.Duration.ofMinutes(2));
+
+      // Trigger the refresh; the ZERO update expiry publishes EXPIRED and drops the entry.
+      assertThat(cache.get(1)).isEqualTo(-1);
+      verify(loader, Mockito.times(2)).load(1);
+      assertThat(expired.get()).isEqualTo(1);
+      assertThat(cache.containsKey(1)).isFalse();
+    }
   }
 
-  @Override protected CacheLoader<Integer, Integer> getCacheLoader() {
-    return cacheLoader;
+  @Test
+  void reload_nullUpdateExpiry_keepsExpiration() {
+    // getExpiryForUpdate() returning null (the CreatedExpiryPolicy/AccessedExpiryPolicy default)
+    // means "no change" — a refresh reload must keep the entry's existing expiration rather than
+    // make it eternal. A long native expireAfterWrite keeps the jcache-expired entry present.
+    var expiry = new CreatedExpiryPolicy(new Duration(TimeUnit.MINUTES, 2));
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenReturn(-1, -2);
+
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setReadThrough(true);
+          config.setCacheLoaderFactory(() -> loader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+          config.setExpireAfterWrite(OptionalLong.of(TimeUnit.HOURS.toNanos(1)));
+          config.setRefreshAfterWrite(OptionalLong.of(TimeUnit.MINUTES.toNanos(1)));
+        }).build();
+        var cache = fixture.jcacheLoading()) {
+      // t=0: created with a 2-minute expiry.
+      assertThat(cache.get(1)).isEqualTo(-1);
+
+      // t=90s: past refreshAfterWrite(1m) so the reload runs inline; getExpiryForUpdate()==null
+      // must keep the original expiry (t=2m), not extend it to eternal.
+      fixture.ticker().advance(java.time.Duration.ofSeconds(90));
+      assertThat(cache.get(1)).isNotNull();
+
+      // t=125s: past the original 2-minute expiry but before the reload re-arms refresh (t=150s).
+      fixture.ticker().advance(java.time.Duration.ofSeconds(35));
+      assertThat(cache.containsKey(1)).isFalse();
+    }
+  }
+
+  @Test
+  void reload_updateExpiryFailure_keepsExpiration() {
+    // A throwing getExpiryForUpdate uses the implementation default of leaving the expiration
+    // unchanged (matching the put path), not making the entry eternal.
+    ExpiryPolicy expiry = Mockito.mock();
+    when(expiry.getExpiryForCreation()).thenReturn(new Duration(TimeUnit.MINUTES, 2));
+    when(expiry.getExpiryForUpdate()).thenThrow(IllegalStateException.class);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenReturn(-1, -2);
+
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setReadThrough(true);
+          config.setCacheLoaderFactory(() -> loader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+          config.setExpireAfterWrite(OptionalLong.of(TimeUnit.HOURS.toNanos(1)));
+          config.setRefreshAfterWrite(OptionalLong.of(TimeUnit.MINUTES.toNanos(1)));
+        }).build();
+        var cache = fixture.jcacheLoading()) {
+      assertThat(cache.get(1)).isEqualTo(-1);
+
+      fixture.ticker().advance(java.time.Duration.ofSeconds(90));
+      assertThat(cache.get(1)).isNotNull();
+
+      fixture.ticker().advance(java.time.Duration.ofSeconds(35));
+      assertThat(cache.containsKey(1)).isFalse();
+    }
+  }
+
+  @ParameterizedTest @MethodSource("throwables")
+  void reload_failure(Throwable throwable) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.load(1)).thenReturn(-1).thenThrow(throwable);
+
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setReadThrough(true);
+          config.setCacheLoaderFactory(() -> loader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+          config.setRefreshAfterWrite(OptionalLong.of(TimeUnit.MINUTES.toNanos(1)));
+        }).build();
+        var cache = fixture.jcacheLoading()) {
+      assertThat(cache.get(1)).isEqualTo(-1);
+      fixture.ticker().advance(java.time.Duration.ofMinutes(2));
+
+      // The reload throws; the refresh fails and the entry keeps its prior value.
+      assertThat(cache.get(1)).isEqualTo(-1);
+      verify(loader, Mockito.atLeast(2)).load(1);
+    }
+  }
+
+  @Test
+  void loadAll_keepExisting_reloadsJCacheExpired() {
+    // A native expireAfterWrite (long) alongside a shorter jcache ExpiryPolicy: native expiry no
+    // longer mirrors the Expirable, so a jcache-expired entry stays physically present and
+    // keep-existing must still reload it
+    ExpiryPolicy expiry = Mockito.mock(answer -> new Duration(TimeUnit.MINUTES, 1));
+    CacheLoader<Integer, Integer> loader = Mockito.mock();
+    when(loader.loadAll(any())).thenAnswer(invocation -> {
+      var loaded = new HashMap<Integer, Integer>();
+      invocation.<Iterable<Integer>>getArgument(0).forEach(key -> loaded.put(key, -2));
+      return loaded;
+    });
+
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setReadThrough(true);
+          config.setCacheLoaderFactory(() -> loader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setExpireAfterWrite(OptionalLong.of(TimeUnit.HOURS.toNanos(1)));
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+        }).build();
+        var cache = fixture.jcacheLoading()) {
+      cache.put(1, -1);
+      fixture.ticker().advance(java.time.Duration.ofMinutes(2));
+
+      cache.loadAll(Set.of(1), /* replaceExistingValues= */ false, null);
+
+      assertThat(cache.get(1)).isEqualTo(-2);
+    }
+  }
+
+  @ParameterizedTest @MethodSource("throwables")
+  void load_failure(Throwable throwable) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.load(any())).thenThrow(throwable);
+      var e = assertThrows(CacheLoaderException.class, () -> fixture.jcacheLoading().get(1));
+      if (e != throwable) {
+        assertThat(e).hasCauseThat().isSameInstanceAs(throwable);
+      }
+    }
+  }
+
+  @Test
+  void load_failure_expiry() {
+    // Per JSR-107 1.1.1 p.55: "Should an exception occur while determining the
+    // Duration, an implementation specific default Duration will be used."
+    // The load returns the value; the exception is swallowed and logged.
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(expiry.getExpiryForCreation()).thenThrow(IllegalStateException.class);
+      when(cacheLoader.load(any())).thenReturn(-1);
+      assertThat(fixture.jcacheLoading().get(1)).isEqualTo(-1);
+    }
+  }
+
+  @Test
+  void load_adjustedTimeSentinelZero() {
+    // A computed creation expiry that collides with the ZERO ("already expired") sentinel is
+    // clamped (like the put path, CacheProxy.getWriteExpireTimeMillis) so the loaded entry is
+    // stored rather than mistaken for the not-added sentinel and dropped. Per JSR-107 the caller
+    // that triggers the load still receives the value, whereas the not-added sentinel returns null.
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    var duration = Mockito.spy(new Duration(TimeUnit.MILLISECONDS, 1));
+    when(duration.getAdjustedTime(anyLong())).thenReturn(0L);
+    when(expiry.getExpiryForCreation()).thenReturn(duration);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.load(any())).thenReturn(-1);
+      assertThat(fixture.jcacheLoading().get(1)).isEqualTo(-1);
+    }
+  }
+
+  @Test
+  void load_adjustedTimeSentinelMax() {
+    // A computed creation expiry that collides with the ETERNAL sentinel (Long.MAX_VALUE) is
+    // clamped to a finite expiry so the entry is not mistaken for one that never expires.
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    var duration = Mockito.spy(new Duration(TimeUnit.MILLISECONDS, 1));
+    when(duration.getAdjustedTime(anyLong())).thenReturn(Long.MAX_VALUE);
+    when(expiry.getExpiryForCreation()).thenReturn(duration);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.load(any())).thenReturn(-1);
+      assertThat(fixture.jcacheLoading().get(1)).isEqualTo(-1);
+    }
+  }
+
+  @Test
+  void load_nullCreationExpiry_isEternal() {
+    // getExpiryForCreation() returning null (unlike ZERO or a finite Duration) leaves the loaded
+    // entry eternal rather than dropping or expiring it, matching the put path's default.
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    when(expiry.getExpiryForCreation()).thenReturn(null);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.load(any())).thenReturn(-1);
+      assertThat(fixture.jcacheLoading().get(1)).isEqualTo(-1);
+
+      fixture.ticker().advance(java.time.Duration.ofDays(1));
+      assertThat(fixture.jcacheLoading().containsKey(1)).isTrue();
+    }
+  }
+
+  @Test
+  void load_zeroExpiry_publishesExpiredNotCreated() {
+    // Per JSR-107 1.1.1 p.55: "If a Duration#ZERO is returned the new Cache.Entry
+    // is considered to be already expired and will not be added to the Cache."
+    // Match the put-path convention: publish EXPIRED in place of CREATED.
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    CacheEntryCreatedListener<Integer, Integer> created = Mockito.mock();
+    CacheEntryExpiredListener<Integer, Integer> expired = Mockito.mock();
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setCacheLoaderFactory(() -> cacheLoader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setReadThrough(true);
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              /* listenerFactory= */ () -> created, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              /* listenerFactory= */ () -> expired, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+        }).build()) {
+      when(cacheLoader.load(any())).thenReturn(-1);
+      assertThat(fixture.jcacheLoading().get(1)).isNull();
+      assertThat(fixture.jcacheLoading().containsKey(1)).isFalse();
+      verify(created, never()).onCreated(any());
+      verify(expired).onExpired(any());
+    }
+  }
+
+  @Test
+  void loadAll_zeroExpiry_publishesExpiredNotCreated() {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    CacheEntryCreatedListener<Integer, Integer> created = Mockito.mock();
+    CacheEntryExpiredListener<Integer, Integer> expired = Mockito.mock();
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setCacheLoaderFactory(() -> cacheLoader);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setReadThrough(true);
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              /* listenerFactory= */ () -> created, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              /* listenerFactory= */ () -> expired, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+        }).build()) {
+      when(cacheLoader.loadAll(anyIterable())).thenReturn(Map.of(1, -1, 2, -2));
+      assertThat(fixture.jcacheLoading().getAll(Set.of(1, 2))).isEmpty();
+      verify(created, never()).onCreated(any());
+      verify(expired, Mockito.atLeastOnce()).onExpired(any());
+    }
+  }
+
+  @Test
+  void load_failure_expiry_publishesCreated() {
+    // Counterpart to load_failure_expiry: with the policy throwing, the load
+    // still succeeds (default Duration is used) and CREATED is published.
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    CacheEntryCreatedListener<Integer, Integer> listener = Mockito.mock();
+    try (var fixture = JCacheFixture.builder()
+        .loading(config -> {
+          config.setReadThrough(true);
+          config.setExpiryPolicyFactory(() -> expiry);
+          config.setCacheLoaderFactory(() -> cacheLoader);
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              /* listenerFactory= */ () -> listener, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+        }).build()) {
+      when(expiry.getExpiryForCreation()).thenThrow(IllegalStateException.class);
+      when(cacheLoader.load(any())).thenReturn(-1);
+      assertThat(fixture.jcacheLoading().get(1)).isEqualTo(-1);
+      verify(listener).onCreated(any());
+    }
+  }
+
+  @Test
+  void loadAll() {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ETERNAL);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.loadAll(anyIterable())).then(answer -> {
+        Iterable<Integer> keys = answer.getArgument(0);
+        return Maps.toMap(keys, key -> -key);
+      });
+      var result = fixture.jcacheLoading().getAll(Set.of(1, 2, 3));
+      assertThat(result).containsExactly(1, -1, 2, -2, 3, -3);
+    }
+  }
+
+  @Test
+  void loadAll_null() {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.loadAll(anyIterable())).thenReturn(null);
+      assertThrows(CacheLoaderException.class, () ->
+          fixture.jcacheLoading().getAll(Set.of(1, 2, 3)));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("NullableProblems")
+  void loadAll_nullMapping() {
+    var mappings = new HashMap<@Nullable Integer, @Nullable Integer>();
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    mappings.put(1, null);
+    mappings.put(null, 2);
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.loadAll(anyIterable())).thenReturn(mappings);
+      var result = fixture.jcacheLoading().getAll(Set.of(1, 2, 3));
+      assertThat(result).isEmpty();
+    }
+  }
+
+  @ParameterizedTest @MethodSource("throwables")
+  void loadAll_failure(Throwable throwable) {
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(cacheLoader.loadAll(any())).thenThrow(throwable);
+      var e = assertThrows(CacheLoaderException.class, () ->
+          fixture.jcacheLoading().getAll(Set.of(1, 2, 3)));
+      if (e != throwable) {
+        assertThat(e).hasCauseThat().isSameInstanceAs(throwable);
+      }
+    }
+  }
+
+  @Test
+  void loadAll_failure_expiry() {
+    // Per JSR-107 1.1.1 p.55: a thrown getExpiryForCreation uses an
+    // implementation default. The bulk load still succeeds.
+    ExpiryPolicy expiry = Mockito.mock(answer -> Duration.ZERO);
+    CacheLoader<Integer, Integer> cacheLoader = Mockito.mock();
+    try (var fixture = jcacheFixture(expiry, cacheLoader)) {
+      when(expiry.getExpiryForCreation()).thenThrow(IllegalStateException.class);
+      when(cacheLoader.loadAll(anyIterable())).thenReturn(Map.of(1, 1, 2, 2));
+      var result = fixture.jcacheLoading().getAll(Set.of(1, 2, 3));
+      assertThat(result).containsExactly(1, 1, 2, 2);
+    }
+  }
+
+  @MethodSource
+  static Stream<Exception> throwables() {
+    return Stream.of(new IllegalStateException(), new CacheLoaderException());
+  }
+
+  static Stream<Arguments> readOperations() {
+    return Stream.of(
+        arguments((Consumer<Cache<Integer, Integer>>) cache -> cache.get(1), Set.of(1)),
+        arguments((Consumer<Cache<Integer, Integer>>) cache -> cache.getAll(Set.of(1, 2)),
+            Set.of(1, 2)));
+  }
+
+  static Stream<Boolean> processorOperations() {
+    return Stream.of(false, true);
+  }
+
+  static Stream<Arguments> processorFailures() {
+    return processorOperations().flatMap(bulk -> Stream.of(
+        new IllegalStateException(), new Exception(), new CacheLoaderException())
+        .map(failure -> arguments(bulk, failure)));
   }
 }

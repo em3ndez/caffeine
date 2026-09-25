@@ -30,4 +30,18 @@ public interface Frequency {
 
   /** Feedback to allow for adaptability. */
   default void reportMiss() {}
+
+  /**
+   * Grows the sketch, if necessary, to estimate popularity for the given number of entries. A
+   * weighted cache retracks on every addition, as the entry count moves with the entry sizes.
+   * Implementations that cannot be resized retain their initial capacity.
+   *
+   * @param maximumSize the maximum number of entries in the cache
+   */
+  default void ensureCapacity(long maximumSize) {}
+
+  /** Returns whether {@link #ensureCapacity} can grow the sketch after it is constructed. */
+  default boolean isResizable() {
+    return false;
+  }
 }

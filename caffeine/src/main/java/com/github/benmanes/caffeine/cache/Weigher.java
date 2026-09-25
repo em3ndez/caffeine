@@ -20,7 +20,7 @@ import static java.util.Objects.requireNonNull;
 
 import java.io.Serializable;
 
-import org.checkerframework.checker.index.qual.NonNegative;
+import org.jspecify.annotations.NullMarked;
 
 /**
  * Calculates the weights of cache entries. The total weight threshold is used to determine when an
@@ -30,6 +30,7 @@ import org.checkerframework.checker.index.qual.NonNegative;
  * @param <V> the type of values
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@NullMarked
 @FunctionalInterface
 public interface Weigher<K, V> {
 
@@ -41,7 +42,6 @@ public interface Weigher<K, V> {
    * @param value the value to weigh
    * @return the weight of the entry; must be non-negative
    */
-  @NonNegative
   int weigh(K key, V value);
 
   /**
@@ -53,7 +53,7 @@ public interface Weigher<K, V> {
    */
   static <K, V> Weigher<K, V> singletonWeigher() {
     @SuppressWarnings("unchecked")
-    Weigher<K, V> instance = (Weigher<K, V>) SingletonWeigher.INSTANCE;
+    var instance = (Weigher<K, V>) SingletonWeigher.INSTANCE;
     return instance;
   }
 
@@ -91,7 +91,7 @@ final class BoundedWeigher<K, V> implements Weigher<K, V>, Serializable {
   @Override
   public int weigh(K key, V value) {
     int weight = delegate.weigh(key, value);
-    requireArgument(weight >= 0);
+    requireArgument(weight >= 0, "weight cannot be negative: %s", weight);
     return weight;
   }
 

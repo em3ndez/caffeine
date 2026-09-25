@@ -31,8 +31,8 @@ public final class TinyCacheWithGhostCachePolicy implements KeyOnlyPolicy {
   private final PolicyStats policyStats;
 
   public TinyCacheWithGhostCachePolicy(Config config) {
+    var settings = new BasicSettings(config);
     this.policyStats = new PolicyStats(name());
-    BasicSettings settings = new BasicSettings(config);
     int maximumSize = Math.toIntExact(settings.maximumSize());
     tinyCache = new TinyCacheWithGhostCache((int) Math.ceil(maximumSize / 64.0),
         64, settings.randomSeed());
@@ -41,11 +41,11 @@ public final class TinyCacheWithGhostCachePolicy implements KeyOnlyPolicy {
   @Override
   public void record(long key) {
     if (tinyCache.contains(key)) {
-      tinyCache.recordItem(key);
+      tinyCache.recordItem();
       policyStats.recordHit();
     } else {
       boolean evicted = tinyCache.addItem(key);
-      tinyCache.recordItem(key);
+      tinyCache.recordItem();
       policyStats.recordMiss();
       if (evicted) {
         policyStats.recordEviction();

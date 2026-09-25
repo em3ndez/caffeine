@@ -22,9 +22,11 @@ import java.util.concurrent.Executor;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 
 /**
  * An in-memory cache providing thread safety and atomicity guarantees. This interface provides an
@@ -32,7 +34,7 @@ import com.github.benmanes.caffeine.cache.stats.StatsCounter;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-interface LocalCache<K, V> extends ConcurrentMap<K, V> {
+interface LocalCache<K, V extends @Nullable Object> extends ConcurrentMap<K, V> {
 
   /** Returns whether this cache is asynchronous. */
   boolean isAsync();
@@ -45,6 +47,9 @@ interface LocalCache<K, V> extends ConcurrentMap<K, V> {
 
   /** Asynchronously sends a removal notification to the listener. */
   void notifyRemoval(@Nullable K key, @Nullable V value, RemovalCause cause);
+
+  /** Returns the removal listener, or {@code null} if none is configured. */
+  @Nullable RemovalListener<K, V> removalListener();
 
   /** Returns the {@link Executor} used by this cache. */
   Executor executor();
@@ -61,6 +66,9 @@ interface LocalCache<K, V> extends ConcurrentMap<K, V> {
   /** See {@link Cache#estimatedSize()}. */
   long estimatedSize();
 
+  /** Returns if the keys are weak reference garbage collected. */
+  boolean collectKeys();
+
   /** Returns the reference key. */
   Object referenceKey(K key);
 
@@ -71,52 +79,77 @@ interface LocalCache<K, V> extends ConcurrentMap<K, V> {
   boolean isPendingEviction(K key);
 
   /**
-   * See {@link Cache#getIfPresent(K)}. This method differs by accepting a parameter of whether
+   * See {@link Cache#getIfPresent(Object)}. This method differs by accepting a parameter of whether
    * to record the hit-and-miss statistics based on the success of this operation.
    */
-  @Nullable
-  V getIfPresent(K key, boolean recordStats);
+  @Nullable V getIfPresent(K key, boolean recordStats);
 
   /**
-   * See {@link Cache#getIfPresent(K)}. This method differs by not recording the access with
+   * See {@link Cache#getIfPresent(Object)}. This method differs by not recording the access with
    * the statistics nor the eviction policy.
    */
-  @Nullable
-  V getIfPresentQuietly(Object key);
+  @Nullable V getIfPresentQuietly(Object key);
 
   /** See {@link Cache#getAllPresent}. */
   Map<K, V> getAllPresent(Iterable<? extends K> keys);
 
+  @Override
+  default boolean replace(K key, V oldValue, V newValue) {
+    return replace(key, oldValue, newValue, /* shouldDiscardRefresh= */ true, /* quietly= */ false);
+  }
+
   /**
-   * See {@link ConcurrentMap#replace(K, K, V)}. This method differs by optionally not discarding an
-   * in-flight refresh for the entry if replaced.
+   * See {@link ConcurrentMap#replace(Object, Object, Object)}. This method differs by optionally
+   * not discarding an in-flight refresh for the entry if replaced and, when quiet, by not
+   * recording the update as an access with the eviction policy.
    */
-  boolean replace(K key, V oldValue, V newValue, boolean shouldDiscardRefresh);
+  @CanIgnoreReturnValue
+  boolean replace(K key, V oldValue, V newValue, boolean shouldDiscardRefresh, boolean quietly);
 
   @Override
   default @Nullable V compute(K key,
-      BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+      BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction) {
     return compute(key, remappingFunction, expiry(),
-        /* recordLoad */ true, /* recordLoadFailure */ true);
+        /* recordLoad= */ true, /* recordLoadFailure= */ true);
   }
 
   /**
    * See {@link ConcurrentMap#compute}. This method differs by accepting parameters indicating
    * whether to record load statistics based on the success of this operation.
    */
-  @Nullable V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction,
-      @Nullable Expiry<? super K, ? super V> expiry, boolean recordLoad, boolean recordLoadFailure);
+  default @Nullable V compute(K key,
+      BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction,
+      @Nullable Expiry<? super K, ? super V> expiry,
+      boolean recordLoad, boolean recordLoadFailure) {
+    return compute(key, remappingFunction, expiry, recordLoad, recordLoadFailure,
+        /* hints= */ null);
+  }
+
+  /**
+   * See {@link ConcurrentMap#compute}. This method differs by accepting parameters indicating
+   * whether to record load statistics and an optional {@link RemapHints} the remapping function
+   * may set to signal a same-instance no-op return (e.g. a refresh that needs to be discarded
+   * without touching the entry, or a putIfAbsent-style query that should not interfere with an
+   * in-flight refresh). The {@code hints} is captured by the function which may mutate the fields
+   * to communicate intent back to the cache.
+   */
+  @Nullable V compute(K key,
+      BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction,
+      @Nullable Expiry<? super K, ? super V> expiry, boolean recordLoad,
+      boolean recordLoadFailure, @Nullable RemapHints hints);
 
   @Override
-  default @Nullable V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction) {
-    return computeIfAbsent(key, mappingFunction, /* recordStats */ true, /* recordLoad */ true);
+  default V computeIfAbsent(K key,
+      Function<? super K, ? extends @Nullable V> mappingFunction) {
+    return castNonNull(
+        computeIfAbsent(key, mappingFunction, /* recordStats= */ true, /* recordLoad= */ true));
   }
 
   /**
    * See {@link ConcurrentMap#computeIfAbsent}. This method differs by accepting parameters
    * indicating how to record statistics.
    */
-  @Nullable V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction,
+  @Nullable V computeIfAbsent(K key, Function<? super K, ? extends @Nullable V> mappingFunction,
       boolean recordStats, boolean recordLoad);
 
   /** See {@link Cache#invalidateAll(Iterable)}. */
@@ -130,32 +163,33 @@ interface LocalCache<K, V> extends ConcurrentMap<K, V> {
   void cleanUp();
 
   /** Notify the removal listener of a replacement if the value reference was changed. */
-  @SuppressWarnings("FutureReturnValueIgnored")
-  default void notifyOnReplace(K key, V oldValue, V newValue) {
-    if ((oldValue == null) || (oldValue == newValue)) {
+  @SuppressWarnings({"FutureReturnValueIgnored", "UnnecessaryReturnStatement"})
+  default void notifyOnReplace(K key, @Nullable V oldValue, @NonNull V newValue) {
+    if ((oldValue == null) || (oldValue == newValue) || (removalListener() == null)) {
       return;
     } else if (isAsync()) {
       var oldFuture = (CompletableFuture<?>) oldValue;
       var newFuture = (CompletableFuture<?>) newValue;
-      newFuture.whenCompleteAsync((nv, e) -> {
+      newFuture.whenComplete((nv, e) -> {
         if (e == null) {
-          oldFuture.thenAcceptAsync(ov -> {
+          oldFuture.thenAccept(ov -> {
             if (nv != ov) {
               notifyRemoval(key, oldValue, RemovalCause.REPLACED);
             }
-          }, executor());
+          });
         } else {
           notifyRemoval(key, oldValue, RemovalCause.REPLACED);
         }
-      }, executor());
+      });
     } else {
       notifyRemoval(key, oldValue, RemovalCause.REPLACED);
     }
   }
 
-  /** Decorates the remapping function to record statistics if enabled. */
-  default <T, R> Function<? super T, ? extends R> statsAware(
-      Function<? super T, ? extends R> mappingFunction, boolean recordLoad) {
+  /** Decorates the mapping function to record statistics if enabled, recording a miss if called. */
+  default <T extends @Nullable Object, R extends @Nullable Object>
+      Function<? super T, ? extends @Nullable R> statsAware(
+          Function<? super T, ? extends @Nullable R> mappingFunction, boolean recordLoad) {
     if (!isRecordingStats()) {
       return mappingFunction;
     }
@@ -165,12 +199,12 @@ interface LocalCache<K, V> extends ConcurrentMap<K, V> {
       long startTime = statsTicker().read();
       try {
         value = mappingFunction.apply(key);
-      } catch (RuntimeException | Error e) {
+      } catch (Throwable t) {
         statsCounter().recordLoadFailure(statsTicker().read() - startTime);
-        throw e;
+        throw t;
       }
-      long loadTime = statsTicker().read() - startTime;
       if (recordLoad) {
+        long loadTime = statsTicker().read() - startTime;
         if (value == null) {
           statsCounter().recordLoadFailure(loadTime);
         } else {
@@ -182,16 +216,18 @@ interface LocalCache<K, V> extends ConcurrentMap<K, V> {
   }
 
   /** Decorates the remapping function to record statistics if enabled. */
-  default <T, U, R> BiFunction<? super T, ? super U, ? extends R> statsAware(
-      BiFunction<? super T, ? super U, ? extends R> remappingFunction) {
-    return statsAware(remappingFunction, /* recordLoad */ true, /* recordLoadFailure */ true);
+  default <T extends @Nullable Object, U extends @Nullable Object, R extends @Nullable Object>
+      BiFunction<? super T, ? super U, ? extends @Nullable R> statsAware(
+          BiFunction<? super T, ? super U, ? extends R> remappingFunction) {
+    return statsAware(remappingFunction, /* recordLoad= */ true, /* recordLoadFailure= */ true);
   }
 
   /** Decorates the remapping function to record statistics if enabled. */
-  default <T, U, R> BiFunction<? super T, ? super U, ? extends R> statsAware(
-      BiFunction<? super T, ? super U, ? extends R> remappingFunction,
-      boolean recordLoad, boolean recordLoadFailure) {
-    if (!isRecordingStats()) {
+  default <T extends @Nullable Object, U extends @Nullable Object, R extends @Nullable Object>
+      BiFunction<? super T, ? super U, ? extends @Nullable R> statsAware(
+          BiFunction<? super T, ? super U, ? extends @Nullable R> remappingFunction,
+          boolean recordLoad, boolean recordLoadFailure) {
+    if (!isRecordingStats() || (!recordLoad && !recordLoadFailure)) {
       return remappingFunction;
     }
     return (t, u) -> {
@@ -199,14 +235,14 @@ interface LocalCache<K, V> extends ConcurrentMap<K, V> {
       long startTime = statsTicker().read();
       try {
         result = remappingFunction.apply(t, u);
-      } catch (RuntimeException | Error e) {
+      } catch (Throwable e) {
         if (recordLoadFailure) {
           statsCounter().recordLoadFailure(statsTicker().read() - startTime);
         }
         throw e;
       }
-      long loadTime = statsTicker().read() - startTime;
       if (recordLoad) {
+        long loadTime = statsTicker().read() - startTime;
         if (result == null) {
           statsCounter().recordLoadFailure(loadTime);
         } else {
@@ -215,5 +251,48 @@ interface LocalCache<K, V> extends ConcurrentMap<K, V> {
       }
       return result;
     };
+  }
+
+  /** Returns {@code null} to isolate workarounds due to JSpecify's lack of poly-null support. */
+  @SuppressWarnings({"DataFlowIssue", "NullableProblems", "NullAway"})
+  static <T> @NonNull T castNonNull(@Nullable T value) {
+    return value;
+  }
+
+  /** Returns {@code null} to isolate workarounds due to JSpecify's lack of poly-null support. */
+  @SuppressWarnings({"DataFlowIssue", "NullableProblems",
+      "NullAway", "TypeParameterUnusedInFormals"})
+  static <T> @NonNull T nullRef() {
+    return null;
+  }
+
+  /**
+   * Mutable hints for a remapping. The function may set them when returning the same value
+   * instance to signal a no-op (skip writes to the entry's metadata or leave an in-flight refresh
+   * intact), and a caller may preset {@code quietly} so a completion's update is not recorded as
+   * a usage.
+   */
+  final class RemapHints {
+    /**
+     * Skip writes to the entry's metadata (accessTime, writeTime, variableTime, and weight) for a
+     * same-instance return. Used by callers that detect a no-op.
+     */
+    boolean preserveTimestamps;
+
+    /** Additionally, leave any in-flight refresh intact so that no-op paths do not interfere. */
+    boolean preserveRefresh;
+
+    /**
+     * The caller presets this to finalize the write quietly: an update skips the frequency
+     * sketch increment and the eviction policy's hit sampling (a completion is bookkeeping,
+     * not a usage).
+     */
+    boolean quietly;
+
+    /** Signals that the remapping did not modify the entry. */
+    void preserveEntry() {
+      preserveTimestamps = true;
+      preserveRefresh = true;
+    }
   }
 }

@@ -16,17 +16,14 @@
 package com.github.benmanes.caffeine.cache;
 
 import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
-
-import com.squareup.javapoet.ClassName;
-import com.squareup.javapoet.ParameterSpec;
-import com.squareup.javapoet.ParameterizedTypeName;
-import com.squareup.javapoet.TypeName;
-import com.squareup.javapoet.TypeVariableName;
+import com.palantir.javapoet.ClassName;
+import com.palantir.javapoet.ParameterSpec;
+import com.palantir.javapoet.ParameterizedTypeName;
+import com.palantir.javapoet.TypeName;
+import com.palantir.javapoet.TypeVariableName;
 
 /**
  * Shared constants for a code generation specification.
@@ -34,7 +31,7 @@ import com.squareup.javapoet.TypeVariableName;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 public final class Specifications {
-  public static final String PACKAGE_NAME = Specifications.class.getPackage().getName();
+  public static final String PACKAGE_NAME = Specifications.class.getPackageName();
   public static final String RETIRED_STRONG_KEY = "RETIRED_STRONG_KEY";
   public static final String RETIRED_WEAK_KEY = "RETIRED_WEAK_KEY";
   public static final String DEAD_STRONG_KEY = "DEAD_STRONG_KEY";
@@ -53,14 +50,9 @@ public final class Specifications {
       ClassName.get(Reference.class), kTypeVar);
   public static final TypeName referenceKeyType = ParameterizedTypeName.get(
       ClassName.get(PACKAGE_NAME + ".References", "WeakKeyReference"), kTypeVar);
-  public static final TypeName rawReferenceKeyType = ParameterizedTypeName.get(
-      ClassName.get(PACKAGE_NAME + ".References", "WeakKeyReference"), ClassName.get(Object.class));
 
-  public static final ParameterSpec keySpec = ParameterSpec.builder(kTypeVar, "key").build();
   public static final ParameterSpec keyRefSpec =
       ParameterSpec.builder(Object.class, "keyReference").build();
-  public static final ParameterSpec keyRefQueueSpec =
-      ParameterSpec.builder(kRefQueueType, "keyReferenceQueue").build();
 
   public static final ParameterSpec valueSpec = ParameterSpec.builder(vTypeVar, "value").build();
   public static final ParameterSpec valueRefQueueSpec =
@@ -68,7 +60,6 @@ public final class Specifications {
 
   public static final TypeName METHOD_HANDLES = ClassName.get(MethodHandles.class);
   public static final TypeName LOOKUP = ClassName.get(MethodHandles.Lookup.class);
-  public static final TypeName VAR_HANDLE = ClassName.get(VarHandle.class);
 
   public static final ClassName LOCAL_CACHE_FACTORY =
       ClassName.get(PACKAGE_NAME, "LocalCacheFactory");
@@ -84,7 +75,7 @@ public final class Specifications {
   public static final ParameterizedTypeName ASYNC_CACHE_LOADER = ParameterizedTypeName.get(
       ClassName.get(PACKAGE_NAME, "AsyncCacheLoader"), TypeVariableName.get("? super K"), vTypeVar);
   public static final ParameterSpec ASYNC_CACHE_LOADER_PARAM = ParameterSpec
-      .builder(ASYNC_CACHE_LOADER, "cacheLoader").addAnnotation(Nullable.class).build();
+      .builder(ASYNC_CACHE_LOADER, "cacheLoader").build();
 
   public static final TypeName REMOVAL_LISTENER = ParameterizedTypeName.get(
       ClassName.get(PACKAGE_NAME, "RemovalListener"), kTypeVar, vTypeVar);
@@ -104,8 +95,8 @@ public final class Specifications {
   public static final TypeName TIMER_WHEEL = ParameterizedTypeName.get(
       ClassName.get(PACKAGE_NAME, "TimerWheel"), kTypeVar, vTypeVar);
 
-  public static final TypeName FREQUENCY_SKETCH = ParameterizedTypeName.get(
-      ClassName.get(PACKAGE_NAME, "FrequencySketch"), kTypeVar);
+  public static final TypeName FREQUENCY_SKETCH = ClassName.get(PACKAGE_NAME, "FrequencySketch");
+  public static final TypeName WINDOW_CLIMBER = ClassName.get(PACKAGE_NAME, "WindowClimber");
 
   private Specifications() {}
 }

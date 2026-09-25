@@ -17,7 +17,10 @@ package com.github.benmanes.caffeine.cache;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
+
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 
@@ -30,9 +33,12 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  * @param <K> the type of keys maintained by this cache
- * @param <V> the type of mapped values
+ * @param <V> the type of mapped values. A loading function may return null values only if the
+ *     cache declares a nullable value type. The cache returns those null values to callers.
+ *     (Null values are still never <i>stored</i> in the cache.)
  */
-public interface LoadingCache<K, V> extends Cache<K, V> {
+@NullMarked
+public interface LoadingCache<K, V extends @Nullable Object> extends Cache<K, V> {
 
   /**
    * Returns the value associated with the {@code key} in this cache, obtaining that value from
@@ -46,8 +52,7 @@ public interface LoadingCache<K, V> extends Cache<K, V> {
    * enters it into this cache unless {@code null}. The entire method invocation is performed
    * atomically, so the function is applied at most once per key. Some attempted update operations
    * on this cache by other threads may be blocked while the computation is in progress, so the
-   * computation should be short and simple, and must not attempt to update any other mappings of
-   * this cache.
+   * computation should be short and simple, and must not modify this cache during the computation.
    *
    * @param key the key with which the specified value is to be associated
    * @return the current (existing or computed) value associated with the specified key, or null if
@@ -55,7 +60,8 @@ public interface LoadingCache<K, V> extends Cache<K, V> {
    * @throws NullPointerException if the specified key is null
    * @throws IllegalStateException if the computation detectably attempts a recursive update to this
    *         cache that would otherwise never complete
-   * @throws CompletionException if a checked exception was thrown while loading the value
+   * @throws java.util.concurrent.CompletionException if a checked exception was thrown while
+   *         loading the value
    * @throws RuntimeException or Error if the {@link CacheLoader} does so, in which case the mapping
    *         is left unestablished
    */
@@ -81,12 +87,13 @@ public interface LoadingCache<K, V> extends Cache<K, V> {
    * @param keys the keys whose associated values are to be returned
    * @return an unmodifiable mapping of keys to values for the specified keys in this cache
    * @throws NullPointerException if the specified collection is null or contains a null element
-   * @throws CompletionException if a checked exception was thrown while loading the value
+   * @throws java.util.concurrent.CompletionException if a checked exception was thrown while
+   *         loading the value
    * @throws RuntimeException or Error if the {@link CacheLoader} does so, if
    *         {@link CacheLoader#loadAll} returns {@code null}, or returns a map containing null keys
    *         or values. In all cases, the mapping is left unestablished.
    */
-  Map<K, V> getAll(Iterable<? extends K> keys);
+  Map<K, @NonNull V> getAll(Iterable<? extends K> keys);
 
   /**
    * Loads a new value for the {@code key}, asynchronously. While the new value is loading the
@@ -95,9 +102,8 @@ public interface LoadingCache<K, V> extends Cache<K, V> {
    * exception is thrown while refreshing, the previous value will remain, <i>and the exception will
    * be logged (using {@link System.Logger}) and swallowed</i>.
    * <p>
-   * Caches loaded by a {@link CacheLoader} will call {@link CacheLoader#reload} if the cache
-   * currently contains a value for the {@code key}, and {@link CacheLoader#load} otherwise. Loading
-   * is asynchronous by delegating to the default executor.
+   * Loading is asynchronous by calling {@link AsyncCacheLoader#asyncReload} if the cache currently
+   * contains a value for the {@code key}, and {@link AsyncCacheLoader#asyncLoad} otherwise.
    * <p>
    * Returns an existing future without doing anything if another thread is currently loading the
    * value for {@code key}.
@@ -117,9 +123,8 @@ public interface LoadingCache<K, V> extends Cache<K, V> {
    * be logged (using {@link System.Logger}) and swallowed</i>. If another thread is currently
    * loading the value for {@code key}, then this method does not perform an additional load.
    * <p>
-   * Caches loaded by a {@link CacheLoader} will call {@link CacheLoader#reload} if the cache
-   * currently contains a value for the {@code key}, and {@link CacheLoader#load} otherwise. Loading
-   * is asynchronous by delegating to the default executor.
+   * Loading is asynchronous by calling {@link AsyncCacheLoader#asyncReload} if the cache currently
+   * contains a value for the {@code key}, and {@link AsyncCacheLoader#asyncLoad} otherwise.
    *
    * @param keys the keys whose associated values are to be returned
    * @return a future containing an unmodifiable mapping of keys to values for the specified keys
@@ -127,5 +132,5 @@ public interface LoadingCache<K, V> extends Cache<K, V> {
    * @throws NullPointerException if the specified collection is null or contains a null element
    */
   @CanIgnoreReturnValue
-  CompletableFuture<Map<K, V>> refreshAll(Iterable<? extends K> keys);
+  CompletableFuture<Map<K, @NonNull V>> refreshAll(Iterable<? extends K> keys);
 }

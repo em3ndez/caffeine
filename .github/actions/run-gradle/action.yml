@@ -4,20 +4,24 @@ inputs:
   arguments:
     required: false
     description: Gradle arguments
+  lint:
+    default: 'false'
+    required: false
+    description: Run ErrorProne/NullAway and fail on warnings (-Werror)
   java:
     required: true
     description: The JDK version
-  early-access:
-    default: '23'
+  distribution:
+    default: temurin
     required: false
-    description: The early access release
-  graal:
-    default: '21'
+    description: The Java distribution
+  cache-encryption-key:
     required: false
-    description: The GraalVM version
-  token:
+    description: A Gradle cache encryption key
+  local-cache-read-only:
+    default: 'false'
     required: false
-    description: 'A Github PAT'
+    description: Existing entries will be read from the local cache but none will be written
   attempt-limit:
     default: '1'
     required: false
@@ -29,74 +33,110 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Prepare OpenJDK
-      if: inputs.java != 'GraalVM'
-      shell: bash
-      run: echo "JAVA_VERSION=${{ inputs.java }}" >> $GITHUB_ENV
-    - name: Prepare GraalVM
-      if: inputs.java == 'GraalVM'
+    - name: Setup shell
+      if: runner.os == 'macOS'
       shell: bash
       run: |
-        echo "GRAALVM=true" >> $GITHUB_ENV
-        echo "JAVA_VERSION=${{ inputs.graal }}" >> $GITHUB_ENV
-    - name: Set up JDK ${{ inputs.java }}
-      uses: actions/setup-java@99b8673ff64fbf99d8d325f52d9a5bdedb8483e9 # v4.2.1
-      if: (inputs.early-access != inputs.java) && (inputs.java != 'GraalVM')
+        brew install bash
+        echo "/opt/homebrew/bin/bash" >> $GITHUB_PATH || \
+        echo "/usr/local/bin/bash" >> $GITHUB_PATH
+        brew install grep
+        echo "/opt/homebrew/opt/grep/libexec/gnubin" >> $GITHUB_PATH || \
+        echo "/usr/local/opt/grep/libexec/gnubin" >> $GITHUB_PATH
+    - name: Read Gradle JDK toolchain version
+      id: gradle_toolchain
+      shell: bash
+      run: |
+        toolchainVersion=$(grep -oP '(?<=^toolchainVersion=).*' gradle/gradle-daemon-jvm.properties)
+        echo "version=${toolchainVersion}" >> $GITHUB_OUTPUT
+    - name: Set up JDK ${{ steps.gradle_toolchain.outputs.version }}
+      id: gradle_jdk
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
       with:
+        java-version: ${{ steps.gradle_toolchain.outputs.version }}
+        distribution: temurin
+        cache-jdk: true
+    - name: Set up JDK 25 (Fray)
+      id: fray_jdk
+      if: ${{ contains(inputs.arguments, 'frayTest') }}
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      with:
+        java-version: 25
+        distribution: corretto # requires jmods
+        cache-jdk: true
+    - name: Set up JDK
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      with:
+        cache-jdk: true
         java-version: ${{ inputs.java }}
-        distribution: temurin
-    - name: Set up JDK ${{ inputs.java }}
-      uses: oracle-actions/setup-java@83e2004a40aaa491fbc6b4697353b9a75b095efb # v1.3.4
-      if: (inputs.early-access == inputs.java) && (inputs.java != 'GraalVM')
-      with:
-        release: ${{ inputs.java }}
-        website: jdk.java.net
-        version: latest
-    - name: Set up GraalVM
-      uses: graalvm/setup-graalvm@2f25c0caae5b220866f732832d5e3e29ff493338 # v1.2.1
-      if: inputs.java == 'GraalVM'
-      with:
-        distribution: 'graalvm'
-        github-token: ${{ inputs.token }}
-        java-version: ${{ env.JAVA_VERSION }}
-    - name: Prepare JDK ${{ inputs.java }}
+        distribution: ${{ endsWith(inputs.java, '-ea') && 'temurin' || inputs.distribution }}
+    - name: Prepare JDK toolchain
+      id: java_toolchain
+      env:
+        INPUTS_JAVA: ${{ inputs.java }}
+        JDK_EA: ${{ endsWith(inputs.java, '-ea') }}
+        INPUTS_DISTRIBUTION: ${{ endsWith(inputs.java, '-ea') && 'temurin' || inputs.distribution }}
       shell: bash
       run: |
-        echo "JDK_CI=$JAVA_HOME" >> $GITHUB_ENV
-        echo "JDK_EA=${{ inputs.early-access == inputs.java }}" >> $GITHUB_ENV
-    - name: Set up JDK 17
-      id: setup-gradle-jdk
-      uses: actions/setup-java@99b8673ff64fbf99d8d325f52d9a5bdedb8483e9 # v4.2.1
-      if: inputs.java != 'GraalVM'
-      with:
-        java-version: 17
-        distribution: temurin
+        declare -A -r VENDORS=(
+          ["zulu"]="Azul"
+          ["temurin"]="Adoptium"
+        )
+        version="${INPUTS_JAVA%-ea}"
+        vendor=${VENDORS["$INPUTS_DISTRIBUTION"]}
+
+        if [[ "$INPUTS_DISTRIBUTION" == "graalvm" ]]; then
+          echo "graalvm_home=$JAVA_HOME" >> $GITHUB_OUTPUT
+          echo "graalvm=true" >> $GITHUB_OUTPUT
+        fi
+        echo "distribution=$INPUTS_DISTRIBUTION" >> $GITHUB_OUTPUT
+        echo "early_access=$JDK_EA" >> $GITHUB_OUTPUT
+        echo "java_home=$JAVA_HOME" >> $GITHUB_OUTPUT
+        echo "version=$version" >> $GITHUB_OUTPUT
+        echo "vendor=$vendor" >> $GITHUB_OUTPUT
     - name: Setup Gradle
-      id: setup-gradle
-      uses: gradle/actions/setup-gradle@db19848a5fa7950289d3668fb053140cf3028d43 # v3.3.2
-      env:
-        JAVA_HOME: ${{ steps.setup-gradle-jdk.outputs.path }}
-        ORG_GRADLE_PROJECT_org.gradle.java.installations.auto-download: 'false'
+      uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
       with:
-        add-job-summary: never
-        cache-read-only: false
-        gradle-home-cache-cleanup: true
-        gradle-home-cache-strict-match: true
+        add-job-summary: on-failure
+        cache-read-only: ${{ inputs.local-cache-read-only }}
+        cache-encryption-key: ${{ inputs.cache-encryption-key }}
     - name: Run ${{ inputs.arguments }}
       if: ${{ inputs.arguments != '' }}
       env:
-        JAVA_HOME: ${{ steps.setup-gradle-jdk.outputs.path }}
-        ORG_GRADLE_PROJECT_org.gradle.java.installations.auto-download: 'false'
+        INPUTS_ARGUMENTS: ${{ inputs.arguments }}
+        INPUTS_ATTEMPT_DELAY: ${{ inputs.attempt-delay }}
+        INPUTS_ATTEMPT_LIMIT: ${{ inputs.attempt-limit }}
+        DAEMON_JDK: ${{ steps.gradle_jdk.outputs.path }}
+        JDK_CI: ${{ steps.java_toolchain.outputs.java_home }}
+        JDK25_HOME: ${{ steps.fray_jdk.outputs.path }}
+        GRAALVM_HOME: ${{ steps.java_toolchain.outputs.graalvm_home }}
+        ORG_GRADLE_PROJECT_graalvm: ${{ steps.java_toolchain.outputs.graalvm }}
+        ORG_GRADLE_PROJECT_javaVendor: ${{ steps.java_toolchain.outputs.vendor }}
+        ORG_GRADLE_PROJECT_javaVersion: ${{ steps.java_toolchain.outputs.version }}
+        ORG_GRADLE_PROJECT_earlyAccess: ${{ steps.java_toolchain.outputs.early_access }}
+        ORG_GRADLE_PROJECT_javaDistribution: ${{ steps.java_toolchain.outputs.distribution }}
+        ORG_GRADLE_PROJECT_lint: ${{ inputs.lint }}
       shell: bash
       run: |
         echo "::add-matcher::.github/problem-matcher.json"
-        for ((i=1; i<=${{ inputs.attempt-limit }}; i++)); do
-          ./gradlew $(echo "${{ inputs.arguments }}" | tr -d '\n') && break
-          if [ $i -lt ${{ inputs.attempt-limit }} ]; then
-            echo "Attempt $i failed. Retrying in ${{ inputs.attempt-delay }} seconds..."
-            sleep ${{ inputs.attempt-delay }}
+        AUTO_DOWNLOAD=$([[ "$ORG_GRADLE_PROJECT_graalvm" == "true" ]] && echo true || echo false)
+        for ((i=1; i<=$INPUTS_ATTEMPT_LIMIT; i++)); do
+          ./gradlew -Dorg.gradle.java.installations.auto-download=$AUTO_DOWNLOAD \
+            --warning-mode all --no-problems-report \
+            -Dscan.tag.${GITHUB_WORKFLOW// /_} \
+            ${INPUTS_ARGUMENTS//$'\n'/ } && break
+          if [ $i -lt $INPUTS_ATTEMPT_LIMIT ]; then
+            echo "Attempt $i failed. Retrying in $INPUTS_ATTEMPT_DELAY seconds..."
+            sleep $INPUTS_ATTEMPT_DELAY
           else
             echo "All attempts failed."
             exit 1
           fi
         done
+    - name: Restore to toolchain JDK (${{ steps.gradle_toolchain.outputs.version }})
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      if: always()
+      with:
+        java-version: ${{ steps.gradle_toolchain.outputs.version }}
+        distribution: temurin
+        cache-jdk: true

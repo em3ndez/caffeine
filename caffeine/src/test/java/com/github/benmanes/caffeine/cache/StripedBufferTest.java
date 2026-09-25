@@ -15,122 +15,201 @@
  */
 package com.github.benmanes.caffeine.cache;
 
+import static com.github.benmanes.caffeine.cache.Buffer.FAILED;
+import static com.github.benmanes.caffeine.cache.Buffer.FULL;
+import static com.github.benmanes.caffeine.cache.Buffer.SUCCESS;
 import static com.github.benmanes.caffeine.cache.StripedBuffer.MAXIMUM_TABLE_SIZE;
 import static com.github.benmanes.caffeine.cache.StripedBuffer.NCPU;
 import static com.google.common.truth.Truth.assertThat;
+import static java.util.Objects.requireNonNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
 
-import org.testng.Assert;
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.Mockito;
 
 import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @SuppressWarnings("ClassEscapesDefinedScope")
-public final class StripedBufferTest {
-  static final Integer ELEMENT = 1;
+final class StripedBufferTest {
+  private static final Integer ELEMENT = 1;
 
-  @Test(dataProvider = "buffers")
-  public void init(FakeBuffer<Integer> buffer) {
+  @ParameterizedTest @MethodSource("buffers")
+  void init_null(FakeBuffer<Integer> buffer) {
     assertThat(buffer.table).isNull();
 
-    var result = buffer.offer(ELEMENT);
+    int result = buffer.offer(ELEMENT);
     assertThat(buffer.table).hasLength(1);
-    assertThat(result).isEqualTo(Buffer.SUCCESS);
+    assertThat(result).isEqualTo(SUCCESS);
+  }
+
+  @ParameterizedTest @MethodSource("buffers")
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  void init_empty(FakeBuffer<Integer> buffer) {
+    buffer.table = new Buffer[0];
+
+    int result = buffer.offer(ELEMENT);
+    assertThat(buffer.table).hasLength(1);
+    assertThat(result).isEqualTo(SUCCESS);
   }
 
   @Test
-  public void expand() {
-    var buffer = new FakeBuffer<Integer>(Buffer.FAILED);
-    assertThat(buffer.offer(ELEMENT)).isEqualTo(Buffer.SUCCESS);
+  void expand() {
+    var buffer = new FakeBuffer<Integer>(FAILED);
+    assertThat(buffer.offer(ELEMENT)).isEqualTo(SUCCESS);
 
+    @Var boolean success = false;
     for (int i = 0; i < 64; i++) {
       int result = buffer.offer(ELEMENT);
-      if (result == Buffer.SUCCESS) {
-        return;
-      }
+      success |= (result == SUCCESS);
     }
-    Assert.fail();
+    assertThat(success).isTrue();
+    assertThat(buffer.reads()).isEqualTo(0);
+    assertThat(buffer.writes()).isGreaterThan(1);
+    assertThat(buffer.table).asList().contains(null);
+  }
+
+  @Test
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  void expand_exceeds() {
+    var striped = new FakeBuffer<>(FAILED);
+    var buffer = Mockito.mock(Buffer.class);
+    when(buffer.offer(any())).thenReturn(FAILED);
+    var table = new Buffer[2 * MAXIMUM_TABLE_SIZE];
+    Arrays.fill(table, buffer);
+    striped.table = table;
+
+    assertThat(striped.expandOrRetry(ELEMENT, 0, 1, /* wasUncontended= */ true)).isEqualTo(FAILED);
   }
 
   @Test
   @SuppressWarnings("ThreadPriorityCheck")
-  public void expand_concurrent() {
-    var buffer = new FakeBuffer<Boolean>(Buffer.FAILED);
+  void expand_concurrent() {
+    var invalid = new AtomicReference<Integer>();
+    var buffer = new FakeBuffer<Boolean>(FAILED);
     ConcurrentTestHarness.timeTasks(10 * NCPU, () -> {
       for (int i = 0; i < 1000; i++) {
-        assertThat(buffer.offer(Boolean.TRUE)).isAnyOf(Buffer.SUCCESS, Buffer.FULL, Buffer.FAILED);
+        int added = buffer.offer(true);
+        if ((added != SUCCESS) && (added != FULL) && (added != FAILED)) {
+          invalid.set(added);
+        }
         Thread.yield();
       }
     });
+    assertThat(invalid.get()).isNull();
     assertThat(buffer.table).hasLength(MAXIMUM_TABLE_SIZE);
   }
 
-  @Test(dataProvider = "buffers")
   @SuppressWarnings("ThreadPriorityCheck")
-  public void produce(FakeBuffer<Integer> buffer) {
+  @ParameterizedTest @MethodSource("buffers")
+  void produce(FakeBuffer<Integer> buffer) {
+    var invalid = new AtomicReference<Integer>();
     ConcurrentTestHarness.timeTasks(NCPU, () -> {
       for (int i = 0; i < 10; i++) {
-        assertThat(buffer.offer(ELEMENT)).isAnyOf(Buffer.SUCCESS, Buffer.FULL, Buffer.FAILED);
+        int added = buffer.offer(ELEMENT);
+        if ((added != SUCCESS) && (added != FULL) && (added != FAILED)) {
+          invalid.set(added);
+        }
         Thread.yield();
       }
     });
-    assertThat(buffer.table.length).isAtMost(MAXIMUM_TABLE_SIZE);
+    assertThat(invalid.get()).isNull();
+    assertThat(buffer.table).isNotNull();
+    assertThat(requireNonNull(buffer.table).length).isAtMost(MAXIMUM_TABLE_SIZE);
   }
 
-  @Test(dataProvider = "buffers")
-  public void drain(FakeBuffer<Integer> buffer) {
+  @ParameterizedTest @MethodSource("buffers")
+  void drain(FakeBuffer<Integer> buffer) {
     buffer.drainTo(e -> {});
     assertThat(buffer.drains).isEqualTo(0);
 
     // Expand and drain
-    assertThat(buffer.offer(ELEMENT)).isEqualTo(Buffer.SUCCESS);
+    assertThat(buffer.offer(ELEMENT)).isEqualTo(SUCCESS);
 
     buffer.drainTo(e -> {});
     assertThat(buffer.drains).isEqualTo(1);
   }
 
-  @DataProvider(name = "buffers")
-  public Object[] providesBuffers() {
-    var results = List.of(Buffer.SUCCESS, Buffer.FAILED, Buffer.FULL);
-    var buffers = new ArrayList<Buffer<Integer>>();
-    for (var result : results) {
-      buffers.add(new FakeBuffer<>(result));
+  @Test
+  void counts() {
+    var buffer = new FakeBuffer<Integer>(SUCCESS);
+    assertThat(buffer.writes()).isEqualTo(0);
+    assertThat(buffer.reads()).isEqualTo(0);
+    assertThat(buffer.size()).isEqualTo(0);
+
+    for (int i = 0; i < 64; i++) {
+      assertThat(buffer.offer(ELEMENT)).isEqualTo(SUCCESS);
     }
-    return buffers.toArray();
+    assertThat(buffer.writes()).isEqualTo(64);
+    assertThat(buffer.reads()).isEqualTo(0);
+    assertThat(buffer.size()).isEqualTo(64);
+    buffer.drainTo(e -> {});
+    assertThat(buffer.reads()).isEqualTo(64);
+    assertThat(buffer.size()).isEqualTo(0);
   }
 
-  static final class FakeBuffer<E> extends StripedBuffer<E> {
-    final int result;
-    int drains = 0;
+  @Test
+  void mix64_knownValues() {
+    // Stafford variant 13: verify the specific output for well-known inputs. Any mutation
+    // to the shift amounts, multipliers, or XOR operations changes these outputs.
+    assertThat(StripedBuffer.mix64(0L)).isEqualTo(0L);
+    assertThat(StripedBuffer.mix64(1L)).isEqualTo(0x5692161d100b05e5L);
+    assertThat(StripedBuffer.mix64(-1L)).isEqualTo(0xb4d055fcf2cbbd7bL);
+    assertThat(StripedBuffer.mix64(Long.MAX_VALUE)).isEqualTo(0x5a682afe7965debdL);
+  }
+
+  @Test
+  void casTableBusy_failsWhenAlreadyHeld() {
+    var buffer = new FakeBuffer<Integer>(SUCCESS);
+    assertThat(buffer.casTableBusy()).isTrue();
+    assertThat(buffer.casTableBusy()).isFalse();
+  }
+
+  private static Stream<Buffer<Integer>> buffers() {
+    return Stream.of(new FakeBuffer<>(SUCCESS), new FakeBuffer<>(FAILED), new FakeBuffer<>(FULL));
+  }
+
+  private static final class FakeBuffer<E> extends StripedBuffer<E> {
+    private final int result;
+
+    private int drains;
+    private int writes;
+    private int reads;
 
     FakeBuffer(int result) {
       this.result = result;
+      this.writes = 1;
     }
 
     @Override protected Buffer<E> create(E e) {
-      return new Buffer<E>() {
+      return new Buffer<>() {
         @Override public int offer(E e) {
+          if (result == SUCCESS) {
+            writes++;
+          }
           return result;
         }
         @Override public void drainTo(Consumer<E> consumer) {
+          reads = writes;
           drains++;
         }
-        @Override public long size() {
-          return 0L;
-        }
         @Override public long reads() {
-          return 0L;
+          return reads;
         }
         @Override public long writes() {
-          return 0L;
+          return writes;
         }
       };
     }

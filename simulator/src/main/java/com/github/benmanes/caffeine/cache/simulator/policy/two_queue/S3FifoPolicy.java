@@ -17,9 +17,12 @@ package com.github.benmanes.caffeine.cache.simulator.policy.two_queue;
 
 import static com.github.benmanes.caffeine.cache.simulator.policy.Policy.Characteristic.WEIGHTED;
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
 
 import java.util.LinkedHashSet;
 import java.util.function.IntConsumer;
+
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.AccessEvent;
@@ -28,6 +31,7 @@ import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.MoreObjects;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -38,7 +42,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
  * probationary FIFO queue to evaluate whether a recent arrival should be admitted into the main
  * region based on a frequency threshold. A rejected candidate is placed into a ghost cache, where a
  * cache miss that hits in the ghost cache will cause the entry to be immediately promoted into the
- * main region. The small and main regions uses an n-bit clock eviction policy.
+ * main region. The small and main regions use an n-bit clock eviction policy.
  * <p>
  * This implementation is based on the code provided by the authors in their
  * <a href="https://github.com/cacheMon/libCacheSim">repository</a> and the pseudo code in their
@@ -83,14 +87,14 @@ public final class S3FifoPolicy implements Policy {
     this.maximumSize = settings.maximumSize();
     this.maxFrequency = settings.maximumFrequency();
     this.moveToMainThreshold = settings.moveToMainThreshold();
-    this.maxSmall = (long) (maximumSize * settings.percentSmall());
+    this.maxSmall = Math.max(1, (long) (maximumSize * settings.percentSmall()));
     this.maxGhost = (long) (maximumSize * settings.percentGhost());
     this.maxMain = maximumSize - maxSmall;
   }
 
   @Override
   public void record(AccessEvent event) {
-    Node node;
+    @Var Node node;
     if ((node = dataSmall.get(event.key())) != null) {
       onHit(event, node, change -> sizeSmall += change);
     } else if ((node = dataMain.get(event.key())) != null) {
@@ -172,9 +176,9 @@ public final class S3FifoPolicy implements Policy {
   }
 
   private void evictFromSmall() {
-    boolean evicted = false;
+    @Var boolean evicted = false;
     while (!evicted && !dataSmall.isEmpty()) {
-      var victim = sentinelSmall.prev;
+      var victim = requireNonNull(sentinelSmall.prev);
       policyStats.recordOperation();
       if (victim.frequency > moveToMainThreshold) {
         insertMain(victim.key, victim.weight);
@@ -183,9 +187,9 @@ public final class S3FifoPolicy implements Policy {
         }
       } else {
         insertGhost(victim.key, victim.weight);
+        policyStats.recordEviction();
         evicted = true;
       }
-      policyStats.recordEviction();
       dataSmall.remove(victim.key);
       sizeSmall -= victim.weight;
       victim.remove();
@@ -193,9 +197,9 @@ public final class S3FifoPolicy implements Policy {
   }
 
   private void evictFromMain() {
-    boolean evicted = false;
+    @Var boolean evicted = false;
     while (!evicted && !dataMain.isEmpty()) {
-      var victim = sentinelMain.prev;
+      var victim = requireNonNull(sentinelMain.prev);
       policyStats.recordOperation();
       if (victim.frequency > 0) {
         victim.moveToHead(sentinelMain);
@@ -212,7 +216,7 @@ public final class S3FifoPolicy implements Policy {
 
   private void evictFromGhost() {
     if (!dataGhost.isEmpty()) {
-      var victim = sentinelGhost.prev;
+      var victim = requireNonNull(sentinelGhost.prev);
       dataGhost.remove(victim.key);
       sizeGhost -= victim.weight;
       victim.remove();
@@ -238,9 +242,10 @@ public final class S3FifoPolicy implements Policy {
     checkState(actualSize <= maximumSize, "Total: %s > %s", actualSize, maximumSize);
   }
 
-  private void checkLinks(String label, Long2ObjectMap<Node> data, Node sentinel) {
+  private static void checkLinks(String label, Long2ObjectMap<Node> data, Node sentinel) {
     var forwards = new LinkedHashSet<Node>();
     for (var node = sentinel.next; node != sentinel; node = node.next) {
+      requireNonNull(node);
       checkState(node == data.get(node.key), "%s: %s != %s", label, node, data.get(node.key));
       checkState(forwards.add(node), "%s: loop detected %s", label, forwards);
     }
@@ -249,6 +254,7 @@ public final class S3FifoPolicy implements Policy {
 
     var backwards = new LinkedHashSet<Node>();
     for (var node = sentinel.prev; node != sentinel; node = node.prev) {
+      requireNonNull(node);
       checkState(node == data.get(node.key), "%s: %s != %s", label, node, data.get(node.key));
       checkState(backwards.add(node), "%s: loop detected %s", label, backwards);
     }
@@ -264,8 +270,9 @@ public final class S3FifoPolicy implements Policy {
   static final class Node {
     final long key;
 
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
+
     int weight;
     int frequency;
 
@@ -285,7 +292,7 @@ public final class S3FifoPolicy implements Policy {
       checkState(prev == null);
       checkState(next == null);
 
-      Node head = sentinel.next;
+      Node head = requireNonNull(sentinel.next);
       sentinel.next = this;
       head.prev = this;
       next = head;
@@ -302,7 +309,7 @@ public final class S3FifoPolicy implements Policy {
       next.prev = prev;
 
       // link
-      next = sentinel.next;
+      next = requireNonNull(sentinel.next);
       sentinel.next = this;
       next.prev = this;
       prev = sentinel;

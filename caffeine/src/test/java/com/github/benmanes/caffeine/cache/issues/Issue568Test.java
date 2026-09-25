@@ -13,12 +13,16 @@
  */
 package com.github.benmanes.caffeine.cache.issues;
 
+import static com.github.benmanes.caffeine.testing.Awaits.awaitFullGc;
+
 import java.lang.ref.Reference;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.testng.annotations.Test;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -30,8 +34,8 @@ import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
  *
  * @author jhorvitz@google.com (Justin Horvitz)
  */
-@Test(groups = "isolated")
-public class Issue568Test {
+@Isolated
+final class Issue568Test {
 
   /**
    * When an entry is updated then a concurrent reader should observe either the old or new value.
@@ -41,7 +45,7 @@ public class Issue568Test {
    * assist the garbage collector.
    */
   @Test
-  public void intermittentNull() throws InterruptedException {
+  void intermittentNull() throws InterruptedException {
     Cache<String, String> cache = Caffeine.newBuilder()
         .executor(ConcurrentTestHarness.executor)
         .weakValues()
@@ -51,7 +55,7 @@ public class Issue568Test {
     String val = "val";
     cache.put("key", "val");
 
-    var error = new AtomicReference<RuntimeException>();
+    var error = new AtomicReference<@Nullable RuntimeException>();
     var threads = new ArrayList<Thread>();
     for (int i = 0; i < 10; i++) {
       int name = i;
@@ -73,8 +77,9 @@ public class Issue568Test {
     for (Thread thread : threads) {
       thread.join();
     }
-    if (error.get() != null) {
-      throw error.get();
+    var e = error.get();
+    if (e != null) {
+      throw e;
     }
   }
 
@@ -87,8 +92,9 @@ public class Issue568Test {
    * containing a non-null key, non-null value, and collected removal cause.
    */
   @Test
-  public void resurrect() throws InterruptedException {
-    var error = new AtomicReference<RuntimeException>();
+  @SuppressWarnings("ExtractMethodRecommender")
+  void resurrect() throws InterruptedException {
+    var error = new AtomicReference<@Nullable RuntimeException>();
     Cache<String, Object> cache = Caffeine.newBuilder()
         .weakValues()
         .executor(ConcurrentTestHarness.executor)
@@ -110,7 +116,7 @@ public class Issue568Test {
             break;
           }
           if (Math.random() < .01) {
-            System.gc();
+            awaitFullGc();
             cache.cleanUp();
           } else if ((cache.getIfPresent(key) == null) && !missing.getAndSet(true)) {
             cache.put(key, new Object());
@@ -125,8 +131,9 @@ public class Issue568Test {
     for (var thread : threads) {
       thread.join();
     }
-    if (error.get() != null) {
-      throw error.get();
+    var e = error.get();
+    if (e != null) {
+      throw e;
     }
   }
 }

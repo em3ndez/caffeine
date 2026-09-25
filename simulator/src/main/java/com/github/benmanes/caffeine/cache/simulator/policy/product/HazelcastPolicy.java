@@ -21,11 +21,12 @@ import static java.util.Locale.US;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
 import java.util.EnumSet;
+import java.util.Properties;
 import java.util.Set;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
+import com.github.benmanes.caffeine.cache.simulator.policy.AccessEvent;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
-import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.CaseFormat;
@@ -40,6 +41,7 @@ import com.hazelcast.internal.nearcache.impl.DefaultNearCache;
 import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.internal.serialization.SerializationService;
 import com.hazelcast.partition.PartitioningStrategy;
+import com.hazelcast.spi.properties.HazelcastProperties;
 import com.typesafe.config.Config;
 
 /**
@@ -48,7 +50,7 @@ import com.typesafe.config.Config;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @PolicySpec(name = "product.Hazelcast")
-public final class HazelcastPolicy implements KeyOnlyPolicy {
+public final class HazelcastPolicy implements Policy {
   private final NearCache<Long, Boolean> cache;
   private final PolicyStats policyStats;
   private final int maximumSize;
@@ -65,7 +67,8 @@ public final class HazelcastPolicy implements KeyOnlyPolicy {
             .setEvictionPolicy(policy)
             .setSize(maximumSize));
     cache = new DefaultNearCache<>("simulation", config, DummySerializationService.INSTANCE,
-        /* TaskScheduler */ null, getClass().getClassLoader(), /* HazelcastProperties */ null);
+        /* scheduler= */ null, getClass().getClassLoader(),
+        new HazelcastProperties(new Properties()));
     cache.initialize();
   }
 
@@ -78,13 +81,11 @@ public final class HazelcastPolicy implements KeyOnlyPolicy {
   }
 
   @Override
-  public void record(long key) {
-    Object value = cache.get(key);
+  public void record(AccessEvent event) {
+    Long key = event.longKey();
+    var value = cache.get(key);
     if (value == null) {
-      if (cache.size() == maximumSize) {
-        policyStats.recordEviction();
-      }
-      cache.put(key, /* keyData */ null, Boolean.TRUE, /* valueDate */ null);
+      cache.put(key, /* keyData= */ null, true, /* valueDate= */ null);
       policyStats.recordMiss();
     } else {
       policyStats.recordHit();
@@ -101,10 +102,10 @@ public final class HazelcastPolicy implements KeyOnlyPolicy {
     var stats = cache.getNearCacheStats();
     cache.destroy();
 
+    policyStats.addEvictions(stats.getEvictions());
     checkState(stats.getOwnedEntryCount() <= maximumSize);
     checkState(stats.getHits() == policyStats.hitCount());
     checkState(stats.getMisses() == policyStats.missCount());
-    checkState(stats.getEvictions() == policyStats.evictionCount());
   }
 
   public static final class HazelcastSettings extends BasicSettings {
@@ -143,7 +144,7 @@ public final class HazelcastPolicy implements KeyOnlyPolicy {
       return (T) data;
     }
     @Override public ManagedContext getManagedContext() {
-      return null;
+      throw new UnsupportedOperationException();
     }
     @Override public <B extends Data> B trimSchema(Data data) {
       return (B) data;

@@ -15,9 +15,15 @@
  */
 package com.github.benmanes.caffeine.cache;
 
+import static java.lang.invoke.ConstantBootstraps.fieldVarHandle;
+
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.function.Consumer;
+
+import org.jspecify.annotations.Nullable;
+
+import com.google.errorprone.annotations.Var;
 
 /**
  * A striped, non-blocking, bounded buffer.
@@ -36,8 +42,10 @@ final class BoundedBuffer<E> extends StripedBuffer<E> {
    * publishes the element. The producer does not retry or block when unsuccessful due to a failed
    * CAS or the buffer being full.
    *
-   * The consumer reads the counts and takes the available elements. The clearing of the elements
-   * and the next read count are lazily set.
+   * The consumer reads the counts and takes the available elements, clearing each slot with a
+   * release store. The read count is advanced with a release store too, so that a producer which
+   * observes the advanced count also observes the cleared slots; otherwise a late clear could
+   * overwrite a reused slot and strand the ring buffer.
    *
    * This implementation is striped to further increase concurrency by rehashing and dynamically
    * adding new buffers when contention is detected, up to an internal maximum. When rehashing in
@@ -57,7 +65,7 @@ final class BoundedBuffer<E> extends StripedBuffer<E> {
   static final class RingBuffer<E> extends BBHeader.ReadAndWriteCounterRef implements Buffer<E> {
     static final VarHandle BUFFER = MethodHandles.arrayElementVarHandle(Object[].class);
 
-    final Object[] buffer;
+    final @Nullable Object[] buffer;
 
     public RingBuffer(E e) {
       buffer = new Object[BUFFER_SIZE];
@@ -66,6 +74,7 @@ final class BoundedBuffer<E> extends StripedBuffer<E> {
     }
 
     @Override
+    @SuppressWarnings("Varifier")
     public int offer(E e) {
       long head = readCounter;
       long tail = writeCounterOpaque();
@@ -76,14 +85,15 @@ final class BoundedBuffer<E> extends StripedBuffer<E> {
       if (casWriteCounter(tail, tail + 1)) {
         int index = (int) (tail & MASK);
         BUFFER.setRelease(buffer, index, e);
-        return Buffer.SUCCESS;
+        return ((size + 1) >= BUFFER_SIZE) ? Buffer.FULL : Buffer.SUCCESS;
       }
       return Buffer.FAILED;
     }
 
     @Override
+    @SuppressWarnings("Varifier")
     public void drainTo(Consumer<E> consumer) {
-      long head = readCounter;
+      @Var long head = readCounter;
       long tail = writeCounterOpaque();
       long size = (tail - head);
       if (size == 0) {
@@ -92,7 +102,7 @@ final class BoundedBuffer<E> extends StripedBuffer<E> {
       do {
         int index = (int) (head & MASK);
         @SuppressWarnings("unchecked")
-        E e = (E) BUFFER.getAcquire(buffer, index);
+        var e = (E) BUFFER.getAcquire(buffer, index);
         if (e == null) {
           // not published yet
           break;
@@ -101,7 +111,7 @@ final class BoundedBuffer<E> extends StripedBuffer<E> {
         consumer.accept(e);
         head++;
       } while (head != tail);
-      setReadCounterOpaque(head);
+      setReadCounterRelease(head);
     }
 
     @Override
@@ -117,9 +127,12 @@ final class BoundedBuffer<E> extends StripedBuffer<E> {
 }
 
 /** The namespace for field padding through inheritance. */
+@SuppressWarnings({"IdentifierName", "MultiVariableDeclaration"})
 final class BBHeader {
 
-  @SuppressWarnings("PMD.AbstractClassWithoutAbstractMethod")
+  private BBHeader() {}
+
+  @SuppressWarnings({"PMD.AbstractClassWithoutAbstractMethod", "unused"})
   abstract static class PadReadCounter {
     byte p000, p001, p002, p003, p004, p005, p006, p007;
     byte p008, p009, p010, p011, p012, p013, p014, p015;
@@ -143,6 +156,7 @@ final class BBHeader {
     volatile long readCounter;
   }
 
+  @SuppressWarnings("unused")
   abstract static class PadWriteCounter extends ReadCounterRef {
     byte p120, p121, p122, p123, p124, p125, p126, p127;
     byte p128, p129, p130, p131, p132, p133, p134, p135;
@@ -163,12 +177,15 @@ final class BBHeader {
 
   /** Enforces a memory layout to avoid false sharing by padding the write counter. */
   abstract static class ReadAndWriteCounterRef extends PadWriteCounter {
-    static final VarHandle READ, WRITE;
+    static final VarHandle READ = fieldVarHandle(MethodHandles.lookup(),
+        "readCounter", VarHandle.class, ReadCounterRef.class, long.class);
+    static final VarHandle WRITE = fieldVarHandle(MethodHandles.lookup(),
+        "writeCounter", VarHandle.class, ReadAndWriteCounterRef.class, long.class);
 
     volatile long writeCounter;
 
-    void setReadCounterOpaque(long count) {
-      READ.setOpaque(this, count);
+    void setReadCounterRelease(long count) {
+      READ.setRelease(this, count);
     }
 
     long writeCounterOpaque() {
@@ -177,16 +194,6 @@ final class BBHeader {
 
     boolean casWriteCounter(long expect, long update) {
       return WRITE.weakCompareAndSet(this, expect, update);
-    }
-
-    static {
-      var lookup = MethodHandles.lookup();
-      try {
-        READ = lookup.findVarHandle(ReadCounterRef.class, "readCounter", long.class);
-        WRITE = lookup.findVarHandle(ReadAndWriteCounterRef.class, "writeCounter", long.class);
-      } catch (ReflectiveOperationException e) {
-        throw new ExceptionInInitializerError(e);
-      }
     }
   }
 }

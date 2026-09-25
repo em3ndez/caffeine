@@ -15,21 +15,31 @@
  */
 package com.github.benmanes.caffeine.cache.simulator.report.csv;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static java.util.Locale.US;
 import static java.util.Objects.requireNonNull;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.text.NumberFormat;
-import java.util.SortedMap;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.Optional;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 
-import com.google.common.collect.HashBasedTable;
-import com.google.common.collect.Table;
-import com.univocity.parsers.csv.CsvParser;
-import com.univocity.parsers.csv.CsvParserSettings;
-import com.univocity.parsers.csv.CsvWriter;
-import com.univocity.parsers.csv.CsvWriterSettings;
+import com.google.common.collect.HashMultiset;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSortedMap;
+import com.google.common.collect.Multiset;
+
+import de.siegmar.fastcsv.reader.CsvReader;
+import de.siegmar.fastcsv.writer.CsvWriter;
 
 /**
  * A utility that combines multiple CSV reports that vary by the maximum cache size into a single
@@ -37,15 +47,15 @@ import com.univocity.parsers.csv.CsvWriterSettings;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class CombinedCsvReport implements Runnable {
-  private final SortedMap<Long, Path> inputFiles;
-  private final Path outputFile;
-  private final String metric;
+public record CombinedCsvReport(ImmutableMap<Long, Path> inputFiles,
+    String metric, Path outputFile) implements Runnable {
+  private static final String POLICY_KEY = "Policy";
 
-  public CombinedCsvReport(SortedMap<Long, Path> inputFiles, String metric, Path outputFile) {
-    this.inputFiles = requireNonNull(inputFiles);
-    this.outputFile = requireNonNull(outputFile);
-    this.metric = metric.replace('_', ' ');
+  @SuppressWarnings("Var")
+  public CombinedCsvReport {
+    inputFiles = ImmutableSortedMap.copyOf(inputFiles);
+    metric = metric.replace('_', ' ');
+    requireNonNull(outputFile);
   }
 
   @Override
@@ -53,49 +63,79 @@ public final class CombinedCsvReport implements Runnable {
     writeReport(tabulate());
   }
 
-  /** Returns the combined results for the policy, maximum size, and the metric being compared. */
-  private Table</* policy */ String, /* size */ Long, /* metric */ String> tabulate() {
-    Table<String, Long, String> results = HashBasedTable.create();
+  /** Returns the policy order and metric values, validating the inputs before writing the report. */
+  private Table tabulate() {
+    var results = new TreeMap<Label, String>();
+    var columns = new LinkedHashSet<String>();
+    var policies = new LinkedHashSet<String>();
+    var duplicatesByInput = new ArrayList<ImmutableList<String>>();
     inputFiles.forEach((maximumSize, path) -> {
-      var records = newCsvParser().parseAllRecords(path.toFile());
-      for (var record : records) {
-        results.put(record.getString("Policy"), maximumSize, record.getValue(metric, ""));
+      try (var reader = CsvReader.builder().ofNamedCsvRecord(path)) {
+        var names = ImmutableList.<String>builder();
+        for (var record : reader) {
+          var column = resolveMetric(record.getHeader());
+          var label = new Label(record.getField(POLICY_KEY), maximumSize);
+          results.put(label, column.map(record::getField).orElse(""));
+          columns.addAll(record.getHeader());
+          names.add(label.policy());
+        }
+        var policiesInFile = names.build();
+        var duplicates = HashMultiset.create(policiesInFile).entrySet().stream()
+            .filter(entry -> entry.getCount() > 1)
+            .map(Multiset.Entry::getElement)
+            .collect(toImmutableList());
+        duplicatesByInput.add(duplicates);
+        policies.addAll(policiesInFile);
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
       }
     });
-    return results;
+    checkArgument(columns.stream().anyMatch(column -> column.equalsIgnoreCase(metric)),
+        "Metric '%s' not found; available: %s", metric, columns.stream()
+            .filter(column -> !column.equals(POLICY_KEY)).collect(toImmutableList()));
+    for (var duplicates : duplicatesByInput) {
+      checkState(duplicates.isEmpty(),
+          "Policies share a display name so their rows would collapse: %s", duplicates);
+    }
+    return new Table(ImmutableList.copyOf(policies), ImmutableMap.copyOf(results));
+  }
+
+  /** Returns the metric's column name ignoring case, or empty if this report omitted it. */
+  private Optional<String> resolveMetric(Collection<String> header) {
+    return header.stream().filter(column -> column.equalsIgnoreCase(metric)).findFirst();
   }
 
   /** Writes a combined report with the headers: policy, maximumSize, and the metric. */
-  private void writeReport(Table<String, Long, String> table) {
-    var policies = newCsvParser()
-        .parseAllRecords(inputFiles.values().iterator().next().toFile()).stream()
-        .map(record -> record.getString("Policy"))
-        .collect(toImmutableList());
+  private void writeReport(Table table) {
     var formatter = NumberFormat.getInstance(US);
     var headers = Stream
-        .concat(Stream.of("Policy"), inputFiles.keySet().stream().map(formatter::format))
-        .toArray(String[]::new);
-    var writer = newWriter(headers);
-    for (var policy : policies) {
-      writer.addValue("Policy", policy);
-      for (Long size : inputFiles.keySet()) {
-        writer.addValue(formatter.format(size), table.get(policy, size));
+        .concat(Stream.of(POLICY_KEY), inputFiles.keySet().stream().map(formatter::format))
+        .collect(toImmutableList());
+    try (var writer = CsvWriter.builder().build(outputFile)) {
+      writer.writeRecord(headers);
+      for (var policy : table.policies()) {
+        var values = new ArrayList<String>();
+        values.add(policy);
+        for (long size : inputFiles.keySet()) {
+          values.add(table.values().getOrDefault(new Label(policy, size), ""));
+        }
+        writer.writeRecord(values);
       }
-      writer.writeValuesToRow();
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
     }
-    writer.close();
   }
 
-  private CsvParser newCsvParser() {
-    var settings = new CsvParserSettings();
-    settings.setHeaderExtractionEnabled(true);
-    return new CsvParser(settings);
-  }
+  /** The first-seen policy order and metric values across all input reports. */
+  private record Table(ImmutableList<String> policies, ImmutableMap<Label, String> values) {}
 
-  private CsvWriter newWriter(String[] headers) {
-    var settings = new CsvWriterSettings();
-    settings.setHeaderWritingEnabled(true);
-    settings.setHeaders(headers);
-    return new CsvWriter(outputFile.toFile(), settings);
+  private record Label(String policy, long size) implements Comparable<Label> {
+    Label {
+      requireNonNull(policy);
+    }
+    @Override public int compareTo(Label label) {
+      int ordering = policy.compareTo(label.policy);
+      return (ordering == 0) ? Long.compare(size, label.size) : ordering;
+    }
   }
 }

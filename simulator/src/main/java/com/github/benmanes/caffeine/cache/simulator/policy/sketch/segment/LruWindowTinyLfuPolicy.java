@@ -16,19 +16,23 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.sketch.segment;
 
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
 import java.util.List;
 import java.util.Set;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
-import com.github.benmanes.caffeine.cache.simulator.admission.Admittor;
-import com.github.benmanes.caffeine.cache.simulator.admission.TinyLfu;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admission;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admitter;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -44,7 +48,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 public final class LruWindowTinyLfuPolicy implements KeyOnlyPolicy {
   private final Long2ObjectMap<Node> data;
   private final PolicyStats policyStats;
-  private final Admittor admittor;
+  private final Admitter admitter;
   private final Node headWindow;
   private final Node headMain;
   private final int maxWindow;
@@ -56,7 +60,7 @@ public final class LruWindowTinyLfuPolicy implements KeyOnlyPolicy {
   public LruWindowTinyLfuPolicy(double percentMain, LruWindowTinyLfuSettings settings) {
     this.policyStats = new PolicyStats(name() + " (%.0f%%)", 100 * (1.0d - percentMain));
     int maximumSize = Math.toIntExact(settings.maximumSize());
-    this.admittor = new TinyLfu(settings.config(), policyStats);
+    this.admitter = Admission.TINYLFU.from(settings.config(), policyStats);
     this.maxMain = (int) (maximumSize * percentMain);
     this.data = new Long2ObjectOpenHashMap<>();
     this.maxWindow = maximumSize - maxMain;
@@ -66,7 +70,7 @@ public final class LruWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   /** Returns all variations of this policy based on the configuration parameters. */
   public static Set<Policy> policies(Config config) {
-    LruWindowTinyLfuSettings settings = new LruWindowTinyLfuSettings(config);
+    var settings = new LruWindowTinyLfuSettings(config);
     return settings.percentMain().stream()
         .map(percentMain -> new LruWindowTinyLfuPolicy(percentMain, settings))
         .collect(toUnmodifiableSet());
@@ -79,9 +83,9 @@ public final class LruWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   @Override
   public void record(long key) {
+    @Var var node = data.get(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
-    admittor.record(key);
+    admitter.record(key);
 
     if (node == null) {
       node = new Node(key, Status.WINDOW);
@@ -108,7 +112,7 @@ public final class LruWindowTinyLfuPolicy implements KeyOnlyPolicy {
       return;
     }
 
-    Node candidate = headWindow.next;
+    Node candidate = requireNonNull(headWindow.next);
     candidate.remove();
     sizeWindow--;
 
@@ -117,8 +121,8 @@ public final class LruWindowTinyLfuPolicy implements KeyOnlyPolicy {
     sizeMain++;
 
     if (sizeMain > maxMain) {
-      Node victim = headMain.next;
-      Node evict = admittor.admit(candidate.key, victim.key) ? victim : candidate;
+      Node victim = requireNonNull(headMain.next);
+      Node evict = admitter.admit(candidate.key, victim.key) ? victim : candidate;
       data.remove(evict.key);
       evict.remove();
       sizeMain--;
@@ -142,9 +146,9 @@ public final class LruWindowTinyLfuPolicy implements KeyOnlyPolicy {
   static final class Node {
     final long key;
 
-    Status status;
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
+    @Nullable Status status;
 
     /** Creates a new sentinel node. */
     public Node() {
@@ -166,6 +170,7 @@ public final class LruWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void appendToTail(Node head) {
+      requireNonNull(head.prev);
       Node tail = head.prev;
       head.prev = this;
       tail.next = this;
@@ -175,6 +180,9 @@ public final class LruWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       prev.next = next;
       next.prev = prev;
       next = prev = null;

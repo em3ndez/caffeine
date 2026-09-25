@@ -21,14 +21,18 @@ import java.lang.ref.ReferenceQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.References.LookupKeyReference;
 import com.github.benmanes.caffeine.cache.References.WeakKeyReference;
+import com.google.errorprone.annotations.Var;
 
 /**
  * A factory for cache nodes optimized for a particular configuration.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@FunctionalInterface
 interface NodeFactory<K, V> {
   MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
   MethodType FACTORY = MethodType.methodType(void.class);
@@ -54,12 +58,8 @@ interface NodeFactory<K, V> {
   }
 
   /** Returns a node optimized for the specified features. */
-  Node<K, V> newNode(K key, ReferenceQueue<K> keyReferenceQueue, V value,
-      ReferenceQueue<V> valueReferenceQueue, int weight, long now);
-
-  /** Returns a node optimized for the specified features. */
   Node<K, V> newNode(Object keyReference, V value,
-      ReferenceQueue<V> valueReferenceQueue, int weight, long now);
+      @Nullable ReferenceQueue<V> valueReferenceQueue, int weight, long now);
 
   /**
    * Returns a key suitable for inserting into the cache. If the cache holds keys strongly then the
@@ -136,7 +136,7 @@ interface NodeFactory<K, V> {
 
   @SuppressWarnings("unchecked")
   static <K, V> NodeFactory<K, V> loadFactory(String className) {
-    var factory = FACTORIES.get(className);
+    @Var var factory = FACTORIES.get(className);
     if (factory == null) {
       factory = FACTORIES.computeIfAbsent(className, NodeFactory::newFactory);
     }
@@ -157,10 +157,10 @@ interface NodeFactory<K, V> {
   }
 
   final class RetiredWeakKey extends WeakKeyReference<Object> {
-    RetiredWeakKey() { super(/* key */ null, /* referenceQueue */ null); }
+    RetiredWeakKey() { super(/* key= */ null, /* queue= */ null); }
   }
   final class DeadWeakKey extends WeakKeyReference<Object> {
-    DeadWeakKey() { super(/* key */ null, /* referenceQueue */ null); }
+    DeadWeakKey() { super(/* key= */ null, /* queue= */ null); }
   }
   final class RetiredStrongKey {}
   final class DeadStrongKey {}

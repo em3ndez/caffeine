@@ -15,101 +15,890 @@
  */
 package com.github.benmanes.caffeine.jcache.integration;
 
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.ENTRIES;
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.KEY_1;
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.KEY_2;
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.VALUE_1;
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.VALUE_2;
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.await;
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.getStatistics;
+import static com.github.benmanes.caffeine.jcache.JCacheFixture.nullRef;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
+import static java.lang.Thread.State.BLOCKED;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Named.named;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
 
+import javax.cache.Cache;
+import javax.cache.CacheException;
+import javax.cache.configuration.MutableCacheEntryListenerConfiguration;
+import javax.cache.configuration.MutableConfiguration;
+import javax.cache.event.CacheEntryCreatedListener;
+import javax.cache.event.CacheEntryEvent;
+import javax.cache.event.CacheEntryExpiredListener;
+import javax.cache.event.CacheEntryRemovedListener;
+import javax.cache.event.CacheEntryUpdatedListener;
+import javax.cache.event.EventType;
+import javax.cache.expiry.CreatedExpiryPolicy;
+import javax.cache.expiry.Duration;
 import javax.cache.integration.CacheWriter;
 import javax.cache.integration.CacheWriterException;
+import javax.cache.processor.EntryProcessor;
+import javax.cache.processor.EntryProcessorException;
 
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mockito;
-import org.testng.annotations.Test;
 
-import com.github.benmanes.caffeine.jcache.AbstractJCacheTest;
+import com.github.benmanes.caffeine.jcache.EntryProxy;
+import com.github.benmanes.caffeine.jcache.JCacheFixture;
 import com.github.benmanes.caffeine.jcache.configuration.CaffeineConfiguration;
+import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.MoreExecutors;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@Test(singleThreaded = true)
-public final class CacheWriterTest extends AbstractJCacheTest {
-  private CloseableCacheWriter writer = Mockito.mock();
+final class CacheWriterTest {
 
-  @Override
-  protected CaffeineConfiguration<Integer, Integer> getConfiguration() {
-    Mockito.reset(writer);
-    var configuration = new CaffeineConfiguration<Integer, Integer>();
-    configuration.setCacheWriterFactory(() -> writer);
-    configuration.setWriteThrough(true);
-    return configuration;
+  private static JCacheFixture jcacheFixture(CloseableCacheWriter writer) {
+    return JCacheFixture.builder()
+        .configure(config -> {
+          config.setCacheWriterFactory(() -> writer);
+          config.setWriteThrough(true);
+        }).build();
+  }
+
+  private static JCacheFixture statisticsFixture(CloseableCacheWriter writer) {
+    return JCacheFixture.builder()
+        .configure(config -> {
+          config.setCacheWriterFactory(() -> writer);
+          config.setWriteThrough(true);
+          config.setStatisticsEnabled(true);
+        }).build();
+  }
+
+  /** A fixture that publishes mutation events synchronously to {@code listener}. */
+  private static JCacheFixture eventFixture(
+      CloseableCacheWriter writer, RecordingMutationListener listener) {
+    var listenerConfig = new MutableCacheEntryListenerConfiguration<>(
+        /* listenerFactory= */ () -> listener, /* filterFactory= */ null,
+        /* isOldValueRequired= */ false, /* isSynchronous= */ true);
+    return JCacheFixture.builder()
+        .configure(config -> {
+          config.setCacheWriterFactory(() -> writer);
+          config.setWriteThrough(true);
+          config.setStatisticsEnabled(true);
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+          config.addCacheEntryListenerConfiguration(listenerConfig);
+        }).build();
   }
 
   @Test
-  public void put_fails() {
-    doThrow(CacheWriterException.class).when(writer).write(any());
-    assertThrows(CacheWriterException.class, () -> jcache.put(KEY_1, VALUE_1));
+  void put() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+      verify(writer).write(new EntryProxy<>(KEY_1, VALUE_1));
+      verifyNoMoreInteractions(writer);
+    }
   }
 
   @Test
-  public void putAll_fails() {
-    doThrow(CacheWriterException.class).when(writer).writeAll(any());
-    var map = new HashMap<Integer, Integer>();
-    map.put(KEY_1, VALUE_1);
-
-    assertThrows(CacheWriterException.class, () -> jcache.putAll(map));
-    assertThat(map).containsExactly(KEY_1, VALUE_1);
+  void put_fails() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      doThrow(CacheWriterException.class).when(writer).write(any());
+      assertThrows(CacheWriterException.class, () -> fixture.jcache().put(KEY_1, VALUE_1));
+    }
   }
 
   @Test
-  public void putAll_fails_immutable() {
-    doThrow(CacheWriterException.class).when(writer).writeAll(any());
-    var map = Map.of(KEY_1, VALUE_1);
+  void putAll() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().putAll(ENTRIES);
 
-    assertThrows(CacheWriterException.class, () -> jcache.putAll(map));
-    assertThat(map).containsExactly(KEY_1, VALUE_1);
+      var entries = toCacheEntries(ENTRIES);
+      verify(writer).writeAll(entries);
+      verifyNoMoreInteractions(writer);
+    }
   }
 
   @Test
-  public void remove_fails() {
-    jcache.put(KEY_1, VALUE_1);
-
-    doThrow(CacheWriterException.class).when(writer).delete(any());
-    assertThrows(CacheWriterException.class, () -> jcache.remove(KEY_1));
+  void putAll_empty() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().putAll(Map.of());
+      verifyNoInteractions(writer);
+    }
   }
 
   @Test
-  public void removeAll_fails() {
-    doThrow(CacheWriterException.class).when(writer).deleteAll(any());
-    var keys = new HashSet<Integer>();
-    keys.add(KEY_1);
+  void putAll_fails() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      doThrow(CacheWriterException.class).when(writer).writeAll(any());
+      var map = new HashMap<Integer, Integer>();
+      map.put(KEY_1, VALUE_1);
 
-    assertThrows(CacheWriterException.class, () -> jcache.removeAll(keys));
+      assertThrows(CacheWriterException.class, () -> fixture.jcache().putAll(map));
+      assertThat(map).containsExactly(KEY_1, VALUE_1);
+    }
   }
 
   @Test
-  public void close_fails() throws IOException {
-    doThrow(IOException.class).when(writer).close();
-    jcache.close();
+  void putAll_fails_immutable() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      doThrow(CacheWriterException.class).when(writer).writeAll(any());
+      var map = Map.of(KEY_1, VALUE_1);
 
-    verify(writer, atLeastOnce()).close();
+      assertThrows(CacheWriterException.class, () -> fixture.jcache().putAll(map));
+      assertThat(map).containsExactly(KEY_1, VALUE_1);
+    }
   }
 
   @Test
-  public void disabled() {
+  void putAll_fails_propagatesSameWriterException() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      var failure = new CacheWriterException("writeAll");
+      doThrow(failure).when(writer).writeAll(any());
+
+      // the writer's own exception propagates unwrapped, not re-wrapped in a fresh CacheWriterException
+      var actual = assertThrows(CacheWriterException.class,
+          () -> fixture.jcache().putAll(Map.of(KEY_1, VALUE_1)));
+      assertThat(actual).isSameInstanceAs(failure);
+    }
+  }
+
+  @ParameterizedTest @MethodSource("writerFailures")
+  void putAll_partialSuccess_storesWrittenEntriesOnly(Exception failure) throws IOException {
+    try (CloseableCacheWriter writer = Mockito.mock();
+         var fixture = jcacheFixture(writer)) {
+      // writeAll writes KEY_1 (removing it from the batch) then fails, leaving KEY_2 unwritten;
+      // only the written entry is committed to the cache
+      doAnswer(invocation -> {
+        Collection<Cache.Entry<? extends Integer, ? extends Integer>> entries =
+            invocation.getArgument(0);
+        entries.removeIf(entry -> entry.getKey().equals(KEY_1));
+        throw failure;
+      }).when(writer).writeAll(any());
+
+      var map = new HashMap<Integer, Integer>();
+      map.put(KEY_1, VALUE_1);
+      map.put(KEY_2, VALUE_2);
+
+      assertThrows(CacheWriterException.class, () -> fixture.jcache().putAll(map));
+      assertThat(fixture.jcache().containsKey(KEY_1)).isTrue();
+      assertThat(fixture.jcache().containsKey(KEY_2)).isFalse();
+    }
+  }
+
+  @ParameterizedTest @MethodSource("writerFailures")
+  void removeAll_partialSuccess_removesDeletedEntriesOnly(Exception failure) throws IOException {
+    try (CloseableCacheWriter writer = Mockito.mock();
+         var fixture = jcacheFixture(writer)) {
+      fixture.jcache().putAll(Map.of(KEY_1, VALUE_1, KEY_2, VALUE_2));
+
+      // deleteAll deletes KEY_1 (removing it from the batch) then fails, leaving KEY_2 in the store;
+      // only the deleted entry is removed from the cache
+      doAnswer(invocation -> {
+        Collection<?> keys = invocation.getArgument(0);
+        keys.remove(KEY_1);
+        throw failure;
+      }).when(writer).deleteAll(any());
+
+      assertThrows(CacheWriterException.class,
+          () -> fixture.jcache().removeAll(Set.of(KEY_1, KEY_2)));
+      assertThat(fixture.jcache().containsKey(KEY_1)).isFalse();
+      assertThat(fixture.jcache().containsKey(KEY_2)).isTrue();
+    }
+  }
+
+  static Stream<Arguments> writerFailures() {
+    // a checked exception may be thrown through the interface by another JVM language
+    return Stream.of(
+        arguments(named("CacheWriterException", new CacheWriterException())),
+        arguments(named("RuntimeException", new IllegalStateException())),
+        arguments(named("checked Exception", new IOException())));
+  }
+
+  @Test
+  void putIfAbsent_expiredPrior_failingWriter_singleExpiry() {
+    var expiredCount = new AtomicInteger();
+    CacheEntryExpiredListener<Integer, Integer> expiredListener =
+        events -> events.forEach(event -> expiredCount.incrementAndGet());
+    CacheWriter<Integer, Integer> writer = Mockito.mock();
+    var jcacheFixture = JCacheFixture.builder()
+        .configure(config -> {
+          config.setCacheWriterFactory(() -> writer);
+          config.setWriteThrough(true);
+          config.setStatisticsEnabled(true);
+          config.setExpiryPolicyFactory(
+              CreatedExpiryPolicy.factoryOf(new Duration(TimeUnit.MINUTES, 1)));
+          // a long native expiry keeps the jcache-expired entry physically present, so putIfAbsent
+          // exercises its own lazy-expiry path rather than seeing a natively-reaped absent entry
+          config.setExpireAfterWrite(OptionalLong.of(TimeUnit.HOURS.toNanos(1)));
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              /* listenerFactory= */ () -> expiredListener, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+        });
+    try (var fixture = jcacheFixture.build();
+         var cache = fixture.jcache()) {
+      cache.put(KEY_1, VALUE_1);
+      fixture.advancePastExpiry();
+
+      // the failed putIfAbsent must not publish or evict the expired prior; only the follow-up get
+      // reaps it, so exactly one EXPIRED event and one eviction occur for the single expiration
+      doThrow(CacheWriterException.class).when(writer).write(any());
+      assertThrows(CacheWriterException.class, () -> cache.putIfAbsent(KEY_1, VALUE_2));
+
+      assertThat(cache.get(KEY_1)).isNull();
+      assertThat(expiredCount.get()).isEqualTo(1);
+      assertThat(getStatistics(cache).getCacheEvictions()).isEqualTo(1L);
+    }
+  }
+
+  @Test
+  void putIfAbsent_nonSerializableValue_doesNotWrite() {
+    CacheWriter<Integer, Object> writer = Mockito.mock();
+    var config = new MutableConfiguration<Integer, Object>()
+        .setStoreByValue(true)
+        .setWriteThrough(true)
+        .setCacheWriterFactory(() -> writer);
+    try (var fixture = JCacheFixture.builder().build();
+         var cache = fixture.cacheManager().createCache("non-serializable", config)) {
+      // copyOf(value) fails before the writer runs, so a failed store-by-value putIfAbsent leaves
+      // the write-through store untouched
+      assertThrows(CacheException.class,
+          () -> cache.putIfAbsent(KEY_1, new Object()));
+      verifyNoInteractions(writer);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("invokeExpiredPriorOps")
+  void invoke_expiredPrior_failingWriter_singleExpiry(
+      EntryProcessor<Integer, Integer, @Nullable Void> processor) {
+    var expiredCount = new AtomicInteger();
+    CacheEntryExpiredListener<Integer, Integer> expiredListener =
+        events -> events.forEach(event -> expiredCount.incrementAndGet());
+    CacheWriter<Integer, Integer> writer = Mockito.mock();
+    var jcacheFixture = JCacheFixture.builder()
+        .configure(config -> {
+          config.setCacheWriterFactory(() -> writer);
+          config.setWriteThrough(true);
+          config.setStatisticsEnabled(true);
+          config.setExpiryPolicyFactory(
+              CreatedExpiryPolicy.factoryOf(new Duration(TimeUnit.MINUTES, 1)));
+          // a long native expiry keeps the jcache-expired entry physically present, so invoke
+          // exercises its lazy expired-prior path rather than seeing a natively-reaped absent entry
+          config.setExpireAfterWrite(OptionalLong.of(TimeUnit.HOURS.toNanos(1)));
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+          config.addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+              /* listenerFactory= */ () -> expiredListener, /* filterFactory= */ null,
+              /* isOldValueRequired= */ false, /* isSynchronous= */ true));
+        });
+    try (var fixture = jcacheFixture.build();
+         var cache = fixture.jcache()) {
+      cache.put(KEY_1, VALUE_1);
+      fixture.advancePastExpiry();
+
+      // the expired prior is published and its eviction counted before the processor runs, and its
+      // removal commits even though the writer then fails, so the follow-up get finds nothing left
+      // to reap: exactly one EXPIRED event and one eviction for the single expiration
+      doThrow(CacheWriterException.class).when(writer).write(any());
+      doThrow(CacheWriterException.class).when(writer).delete(any());
+      assertThrows(EntryProcessorException.class,
+          () -> cache.<@Nullable Void>invoke(KEY_1, processor));
+
+      assertThat(cache.get(KEY_1)).isNull();
+      assertThat(expiredCount.get()).isEqualTo(1);
+      assertThat(getStatistics(cache).getCacheEvictions()).isEqualTo(1L);
+    }
+  }
+
+  static Stream<Arguments> invokeExpiredPriorOps() {
+    EntryProcessor<Integer, Integer, @Nullable Void> setValue = (entry, args) -> {
+      entry.setValue(VALUE_2);
+      return nullRef();
+    };
+    EntryProcessor<Integer, Integer, @Nullable Void> remove = (entry, args) -> {
+      entry.remove();
+      return nullRef();
+    };
+    return Stream.of(
+        arguments(named("setValue", setValue)),
+        arguments(named("remove", remove)));
+  }
+
+  @Test
+  void replace() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+      assertThat(fixture.jcache().replace(KEY_1, VALUE_2)).isTrue();
+
+      verify(writer).write(new EntryProxy<>(KEY_1, VALUE_1));
+      verify(writer).write(new EntryProxy<>(KEY_1, VALUE_2));
+      verifyNoMoreInteractions(writer);
+    }
+  }
+
+  @Test
+  void replace_fails() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+
+      doThrow(CacheWriterException.class).when(writer).write(any());
+      assertThrows(CacheWriterException.class, () ->
+          fixture.jcache().replace(KEY_1, VALUE_2));
+    }
+  }
+
+  @Test
+  void replaceConditionally() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+      assertThat(fixture.jcache().replace(KEY_1, VALUE_1, VALUE_2)).isTrue();
+
+      verify(writer).write(new EntryProxy<>(KEY_1, VALUE_1));
+      verify(writer).write(new EntryProxy<>(KEY_1, VALUE_2));
+      verifyNoMoreInteractions(writer);
+    }
+  }
+
+  @Test
+  void replaceConditionally_fails() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+
+      doThrow(CacheWriterException.class).when(writer).write(any());
+      assertThrows(CacheWriterException.class, () ->
+          fixture.jcache().replace(KEY_1, VALUE_1, VALUE_2));
+    }
+  }
+
+  @Test
+  void remove() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+      assertThat(fixture.jcache().remove(KEY_1)).isTrue();
+
+      verify(writer).write(new EntryProxy<>(KEY_1, VALUE_1));
+      verify(writer).delete(KEY_1);
+      verifyNoMoreInteractions(writer);
+    }
+  }
+
+  @Test
+  void remove_fails() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+
+      doThrow(CacheWriterException.class).when(writer).delete(any());
+      assertThrows(CacheWriterException.class, () -> fixture.jcache().remove(KEY_1));
+    }
+  }
+
+  @Test
+  void removeConditionally() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+      fixture.jcache().remove(KEY_1, VALUE_1);
+
+      verify(writer).write(new EntryProxy<>(KEY_1, VALUE_1));
+      verify(writer).delete(KEY_1);
+      verifyNoMoreInteractions(writer);
+    }
+  }
+
+  @Test
+  void removeConditionally_fails() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+
+      doThrow(CacheWriterException.class).when(writer).delete(any());
+      assertThrows(CacheWriterException.class, () -> fixture.jcache().remove(KEY_1, VALUE_1));
+    }
+  }
+
+  @Test
+  void invoke_loadThenRemove_writesDelete() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      // getValue() reads through the loader for the absent key; the subsequent remove() makes the
+      // dominant action DELETED, so the loaded entry is written through as a delete and discarded
+      var result = fixture.jcacheLoading().invoke(KEY_1, (entry, args) -> {
+        entry.getValue();
+        entry.remove();
+        return nullRef();
+      });
+      assertThat(result).isNull();
+      assertThat(fixture.jcacheLoading().containsKey(KEY_1)).isFalse();
+      verify(writer).delete(KEY_1);
+      verifyNoMoreInteractions(writer);
+    }
+  }
+
+  @Test
+  void removeAll() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().putAll(ENTRIES);
+
+      var entries = toCacheEntries(ENTRIES);
+      verify(writer).writeAll(entries);
+
+      fixture.jcache().removeAll(ENTRIES.keySet());
+      verify(writer).deleteAll(ENTRIES.keySet());
+      verifyNoMoreInteractions(writer);
+    }
+  }
+
+  @Test
+  void removeAll_empty() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().putAll(ENTRIES);
+
+      var entries = toCacheEntries(ENTRIES);
+      verify(writer).writeAll(entries);
+
+      fixture.jcache().removeAll(Set.of());
+      verifyNoMoreInteractions(writer);
+    }
+  }
+
+  @Test
+  void removeAll_fails() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      doThrow(CacheWriterException.class).when(writer).deleteAll(any());
+      var keys = new HashSet<Integer>();
+      keys.add(KEY_1);
+
+      assertThrows(CacheWriterException.class, () -> fixture.jcache().removeAll(keys));
+    }
+  }
+
+  @Test
+  void removeAll_fails_propagatesSameWriterException() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().put(KEY_1, VALUE_1);
+      var failure = new CacheWriterException("deleteAll");
+      doThrow(failure).when(writer).deleteAll(any());
+
+      // the writer's own exception propagates unwrapped, not re-wrapped in a fresh CacheWriterException
+      var actual = assertThrows(CacheWriterException.class,
+          () -> fixture.jcache().removeAll(Set.of(KEY_1)));
+      assertThat(actual).isSameInstanceAs(failure);
+    }
+  }
+
+  @Test
+  void removeAll_racingInsert() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer);
+         var cache = fixture.jcache()) {
+      cache.put(KEY_1, VALUE_1);
+
+      // deleteAll runs between the key snapshot and the removal loop; a key inserted there must
+      // survive removeAll() and stay out of the writer's delete set (else the store retains it and
+      // a later read-through resurrects it)
+      doAnswer(invocation -> {
+        cache.put(KEY_2, VALUE_2);
+        return null;
+      }).when(writer).deleteAll(any());
+
+      cache.removeAll();
+
+      assertThat(cache.containsKey(KEY_1)).isFalse();
+      assertThat(cache.containsKey(KEY_2)).isTrue();
+      verify(writer).deleteAll(Set.of(KEY_1));
+    }
+  }
+
+  @Test
+  void removeAll_nonClearingWriter_stillEmptiesCache() {
+    // A CacheWriter.deleteAll that does not remove the deleted keys from the passed collection (as
+    // a naive or mock writer will not) is treated as a full success, so removeAll empties the
+    // cache. This intentionally diverges from the reference implementation, which honors the
+    // residual collection even on success and would leave the entries mapped -- matching it would
+    // make removeAll a no-op for the common non-clearing writer. The residual is honored only on
+    // the throw path (removeAll_fails), where it distinguishes the partially-deleted keys.
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer);
+         var cache = fixture.jcache()) {
+      cache.putAll(ENTRIES);
+
+      // Prove the entries are actually stored first: a regression that made putAll's own
+      // non-clearing writer treatment a no-op would otherwise satisfy the isFalse() check below
+      // vacuously, since an empty cache also reports every key absent.
+      for (var key : ENTRIES.keySet()) {
+        assertThat(cache.containsKey(key)).isTrue();
+      }
+
+      cache.removeAll(ENTRIES.keySet());
+
+      for (var key : ENTRIES.keySet()) {
+        assertThat(cache.containsKey(key)).isFalse();
+      }
+    }
+  }
+
+  @Test
+  void putAll_nonClearingWriter_stillStores() {
+    // The putAll twin of removeAll_nonClearingWriter_stillEmptiesCache: a CacheWriter.writeAll
+    // that does not remove the written entries from the passed collection (as a naive or mock
+    // writer will not) is treated as a full success, so putAll stores every entry. This is the
+    // same code shape and rationale as the deleteAll ruling above, applied to writeAll.
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer);
+         var cache = fixture.jcache()) {
+      cache.putAll(ENTRIES);
+
+      for (var entry : ENTRIES.entrySet()) {
+        assertThat(cache.get(entry.getKey())).isEqualTo(entry.getValue());
+      }
+    }
+  }
+
+  /**
+   * Per the integration contract, a {@link CacheWriter} failure must abort the operation without
+   * mutating the cache or recording a statistic, so every update path must agree that no put is
+   * counted. The {@code invoke} path historically recorded the put before calling the writer,
+   * leaving a phantom {@code CachePuts} increment on failure.
+   */
+  @ParameterizedTest
+  @MethodSource("updateOps")
+  void writeOp_failingWriter_noPutsRecorded(Consumer<Cache<Integer, Integer>> op) {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = statisticsFixture(writer);
+         var cache = fixture.jcache()) {
+      cache.put(KEY_1, VALUE_1);
+      long puts = getStatistics(cache).getCachePuts();
+
+      doThrow(CacheWriterException.class).when(writer).write(any());
+      doThrow(CacheWriterException.class).when(writer).writeAll(any());
+      assertThrows(CacheException.class, () -> op.accept(cache));
+
+      assertThat(getStatistics(cache).getCachePuts()).isEqualTo(puts);
+      assertThat(cache.get(KEY_1)).isEqualTo(VALUE_1);
+    }
+  }
+
+  /**
+   * The counter-only sibling of {@code writeOp_failingWriter_noPutsRecorded}: every writer call
+   * precedes its mutation-event publication, so a live writer failure must suppress the CREATED
+   * or UPDATED event too, not merely the put counter. No prior test installed a mutation listener
+   * while a writer rejected a write.
+   */
+  @ParameterizedTest
+  @MethodSource("updateOps")
+  void writeOp_failingWriter_suppressesMutationEvent(Consumer<Cache<Integer, Integer>> op) {
+    CloseableCacheWriter writer = Mockito.mock();
+    var listener = new RecordingMutationListener();
+    try (var fixture = eventFixture(writer, listener);
+         var cache = fixture.jcache()) {
+      cache.put(KEY_1, VALUE_1);
+      listener.events.clear();
+
+      doThrow(CacheWriterException.class).when(writer).write(any());
+      doThrow(CacheWriterException.class).when(writer).writeAll(any());
+      assertThrows(CacheException.class, () -> op.accept(cache));
+
+      assertThat(listener.events).isEmpty();
+      assertThat(cache.get(KEY_1)).isEqualTo(VALUE_1);
+    }
+  }
+
+  @ParameterizedTest
+  @MethodSource("updateOps")
+  void writeOp_writerInterrupted_restoresInterruptStatus(Consumer<Cache<Integer, Integer>> op) {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer);
+         var cache = fixture.jcache()) {
+      cache.put(KEY_1, VALUE_1);
+      doAnswer(invocation -> { throw new InterruptedException(); }).when(writer).write(any());
+      doAnswer(invocation -> { throw new InterruptedException(); }).when(writer).writeAll(any());
+
+      // the writer's interruption is wrapped, so the thread's interrupt status must carry it
+      boolean interrupted;
+      try {
+        assertThrows(CacheException.class, () -> op.accept(cache));
+      } finally {
+        interrupted = Thread.interrupted();
+      }
+      assertThat(interrupted).isTrue();
+      assertThat(cache.get(KEY_1)).isEqualTo(VALUE_1);
+    }
+  }
+
+  /** A successful write-through update must still count the put after notifying the writer. */
+  @ParameterizedTest
+  @MethodSource("updateOps")
+  void writeOp_writerSucceeds_recordsPut(Consumer<Cache<Integer, Integer>> op) {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = statisticsFixture(writer);
+         var cache = fixture.jcache()) {
+      cache.put(KEY_1, VALUE_1);
+      long puts = getStatistics(cache).getCachePuts();
+
+      op.accept(cache);
+
+      assertThat(getStatistics(cache).getCachePuts()).isEqualTo(puts + 1);
+      assertThat(cache.get(KEY_1)).isEqualTo(VALUE_2);
+    }
+  }
+
+  static Stream<Arguments> updateOps() {
+    return Stream.of(
+        arguments(named("put", (Consumer<Cache<Integer, Integer>>) c -> c.put(KEY_1, VALUE_2))),
+        arguments(named("putAll",
+            (Consumer<Cache<Integer, Integer>>) c -> c.putAll(Map.of(KEY_1, VALUE_2)))),
+        arguments(named("getAndPut",
+            (Consumer<Cache<Integer, Integer>>) c -> c.getAndPut(KEY_1, VALUE_2))),
+        arguments(named("replace",
+            (Consumer<Cache<Integer, Integer>>) c -> c.replace(KEY_1, VALUE_2))),
+        arguments(named("replaceConditionally",
+            (Consumer<Cache<Integer, Integer>>) c -> c.replace(KEY_1, VALUE_1, VALUE_2))),
+        arguments(named("getAndReplace",
+            (Consumer<Cache<Integer, Integer>>) c -> c.getAndReplace(KEY_1, VALUE_2))),
+        arguments(named("invoke", (Consumer<Cache<Integer, Integer>>) c ->
+            c.invoke(KEY_1, (entry, args) -> {
+              entry.setValue(VALUE_2);
+              return nullRef();
+            }))));
+  }
+
+  /**
+   * Per the integration contract, a {@link CacheWriter} failure must abort the operation without
+   * mutating the cache or recording a statistic, so every removal path must agree that no removal
+   * is counted.
+   */
+  @ParameterizedTest
+  @MethodSource("removalOps")
+  void removeOp_failingWriter_noRemovalsRecorded(Consumer<Cache<Integer, Integer>> op) {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = statisticsFixture(writer);
+         var cache = fixture.jcache()) {
+      cache.put(KEY_1, VALUE_1);
+      long removals = getStatistics(cache).getCacheRemovals();
+
+      doThrow(CacheWriterException.class).when(writer).delete(any());
+      doThrow(CacheWriterException.class).when(writer).deleteAll(any());
+      assertThrows(CacheException.class, () -> op.accept(cache));
+
+      assertThat(getStatistics(cache).getCacheRemovals()).isEqualTo(removals);
+      assertThat(cache.get(KEY_1)).isEqualTo(VALUE_1);
+    }
+  }
+
+  /**
+   * The event-publication sibling of {@code removeOp_failingWriter_noRemovalsRecorded}: a live
+   * writer failure must suppress the REMOVED event too, since the writer call precedes
+   * publication on every removal path.
+   */
+  @ParameterizedTest
+  @MethodSource("removalOps")
+  void removeOp_failingWriter_suppressesMutationEvent(Consumer<Cache<Integer, Integer>> op) {
+    CloseableCacheWriter writer = Mockito.mock();
+    var listener = new RecordingMutationListener();
+    try (var fixture = eventFixture(writer, listener);
+         var cache = fixture.jcache()) {
+      cache.put(KEY_1, VALUE_1);
+      listener.events.clear();
+
+      doThrow(CacheWriterException.class).when(writer).delete(any());
+      doThrow(CacheWriterException.class).when(writer).deleteAll(any());
+      assertThrows(CacheException.class, () -> op.accept(cache));
+
+      assertThat(listener.events).isEmpty();
+      assertThat(cache.get(KEY_1)).isEqualTo(VALUE_1);
+    }
+  }
+
+  static Stream<Arguments> removalOps() {
+    return Stream.of(
+        arguments(named("remove", (Consumer<Cache<Integer, Integer>>) c -> c.remove(KEY_1))),
+        arguments(named("removeConditionally",
+            (Consumer<Cache<Integer, Integer>>) c -> c.remove(KEY_1, VALUE_1))),
+        arguments(named("getAndRemove",
+            (Consumer<Cache<Integer, Integer>>) c -> c.getAndRemove(KEY_1))),
+        arguments(named("removeAll",
+            (Consumer<Cache<Integer, Integer>>) c -> c.removeAll(Set.of(KEY_1)))),
+        arguments(named("invoke", (Consumer<Cache<Integer, Integer>>) c ->
+            c.invoke(KEY_1, (entry, args) -> {
+              entry.remove();
+              return nullRef();
+            }))),
+        arguments(named("iteratorRemove", (Consumer<Cache<Integer, Integer>>) c -> {
+          var iterator = c.iterator();
+          iterator.next();
+          iterator.remove();
+        })));
+  }
+
+  @ParameterizedTest
+  @MethodSource("removeThroughOps")
+  void removeThrough_racingSameKeyPut_noStoreCacheDivergence(Consumer<Cache<Integer, Integer>> op)
+      throws InterruptedException, ExecutionException, IOException {
+    // remove(K)/getAndRemove(K) must delete-through and remove from the cache atomically under the
+    // per-key lock; otherwise a same-key put racing between the store delete and the cache removal
+    // strands the store's newer value while the cache goes absent. With the writer's delete under
+    // the bin lock, the racing put is serialized (blocks until the removal commits), so the store
+    // and cache always agree; with the writer outside the lock (the bug) the put commits between
+    // the two steps and the store keeps VALUE_2 while the cache is empty.
+    try (CloseableCacheWriter writer = Mockito.mock();
+         var fixture = jcacheFixture(writer);
+         var cache = fixture.jcache()) {
+      var store = new ConcurrentHashMap<Integer, Integer>();
+      doAnswer(invocation -> {
+        Cache.Entry<Integer, Integer> entry = invocation.getArgument(0);
+        store.put(entry.getKey(), entry.getValue());
+        return null;
+      }).when(writer).write(any());
+
+      cache.put(KEY_1, VALUE_1);
+
+      var put = new FutureTask<>(() -> cache.put(KEY_1, VALUE_2), /* result= */ null);
+      var racingPut = new Thread(put);
+      racingPut.setDaemon(true);
+      doAnswer(invocation -> {
+        // The put must attempt to interleave before the deletion releases the per-key lock
+        store.remove(KEY_1);
+        racingPut.start();
+        await().until(() -> (racingPut.getState() == BLOCKED) || put.isDone());
+        return null;
+      }).when(writer).delete(KEY_1);
+
+      op.accept(cache);
+      await().until(put::isDone);
+      put.get();
+
+      assertThat(cache.get(KEY_1)).isEqualTo(VALUE_2);
+      assertThat(store).containsExactly(KEY_1, VALUE_2);
+    }
+  }
+
+  static Stream<Arguments> removeThroughOps() {
+    return Stream.of(
+        arguments(named("remove", (Consumer<Cache<Integer, Integer>>) c -> c.remove(KEY_1))),
+        arguments(named("getAndRemove",
+            (Consumer<Cache<Integer, Integer>>) c -> c.getAndRemove(KEY_1))));
+  }
+
+  @Test
+  void clear() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      fixture.jcache().putAll(ENTRIES);
+
+      var entries = toCacheEntries(ENTRIES);
+      verify(writer).writeAll(entries);
+
+      fixture.jcache().clear();
+      verifyNoMoreInteractions(writer);
+    }
+  }
+
+  @Test
+  void close_fails() throws IOException {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      doThrow(IOException.class).when(writer).close();
+      fixture.jcache().close();
+
+      verify(writer, atLeastOnce()).close();
+    }
+  }
+
+  @Test
+  void hasCacheWriter() {
+    CloseableCacheWriter writer = Mockito.mock();
+    try (var fixture = jcacheFixture(writer)) {
+      var noWriter = new CaffeineConfiguration<>(fixture.jcacheConfiguration())
+          .setCacheWriterFactory(null);
+      assertThat(noWriter.hasCacheWriter()).isFalse();
+      assertThat(fixture.jcacheConfiguration().hasCacheWriter()).isTrue();
+    }
+  }
+
+  @Test
+  void disabled() {
     DisabledCacheWriter.get().write(null);
     DisabledCacheWriter.get().writeAll(null);
     DisabledCacheWriter.get().delete(null);
     DisabledCacheWriter.get().deleteAll(null);
   }
 
-  interface CloseableCacheWriter extends CacheWriter<Integer, Integer>, Closeable {}
+  private static ImmutableList<Cache.Entry<? extends Integer, ? extends Integer>> toCacheEntries(
+      Map<Integer, Integer> map) {
+    return map.entrySet().stream()
+        .map(entry -> new EntryProxy<>(entry.getKey(), entry.getValue()))
+        .collect(toImmutableList());
+  }
+
+  private interface CloseableCacheWriter extends CacheWriter<Integer, Integer>, Closeable {}
+
+  /** Records the event type of every CREATED/UPDATED/REMOVED mutation event delivered. */
+  private static final class RecordingMutationListener implements
+      CacheEntryCreatedListener<Integer, Integer>, CacheEntryUpdatedListener<Integer, Integer>,
+      CacheEntryRemovedListener<Integer, Integer> {
+    final List<EventType> events = new ArrayList<>();
+
+    @Override public void onCreated(
+        Iterable<CacheEntryEvent<? extends Integer, ? extends Integer>> evts) {
+      evts.forEach(event -> events.add(event.getEventType()));
+    }
+    @Override public void onUpdated(
+        Iterable<CacheEntryEvent<? extends Integer, ? extends Integer>> evts) {
+      evts.forEach(event -> events.add(event.getEventType()));
+    }
+    @Override public void onRemoved(
+        Iterable<CacheEntryEvent<? extends Integer, ? extends Integer>> evts) {
+      evts.forEach(event -> events.add(event.getEventType()));
+    }
+  }
 }

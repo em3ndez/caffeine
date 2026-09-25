@@ -15,12 +15,12 @@
  */
 package com.github.benmanes.caffeine.cache.simulator;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Locale.US;
 import static java.util.Objects.requireNonNull;
 
 import java.util.stream.LongStream;
 
-import com.github.benmanes.caffeine.cache.simulator.BasicSettings.SyntheticSettings.HotspotSettings;
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings.TraceSettings;
 import com.github.benmanes.caffeine.cache.simulator.parser.TraceReader.KeyOnlyTraceReader;
 
@@ -45,33 +45,34 @@ public final class Synthetic {
 
   /** Returns a sequence of events based on the setting's distribution. */
   public static KeyOnlyTraceReader generate(TraceSettings settings) {
-    int events = settings.synthetic().events();
-    switch (settings.synthetic().distribution().toLowerCase(US)) {
-      case "counter":
-        return counter(settings.synthetic().counter().start(), events);
-      case "repeating":
-        return repeating(settings.synthetic().repeating().items(), events);
-      case "uniform":
-        var uniform = settings.synthetic().uniform();
-        return uniform(uniform.lowerBound(), uniform.upperBound(), events);
-      case "exponential":
-        return exponential(settings.synthetic().exponential().mean(), events);
-      case "hotspot":
-        HotspotSettings hotspot = settings.synthetic().hotspot();
-        return Synthetic.hotspot(hotspot.lowerBound(), hotspot.upperBound(),
-            hotspot.hotOpnFraction(), hotspot.hotsetFraction(), events);
-      case "zipfian":
-        return zipfian(settings.synthetic().zipfian().items(),
+    long events = settings.synthetic().events();
+    return switch (settings.synthetic().distribution().toLowerCase(US)) {
+      case "counter" ->
+        counter(settings.synthetic().counter().start(), events);
+      case "repeating" ->
+        repeating(settings.synthetic().repeating().items(), events);
+      case "uniform" ->
+        uniform(settings.synthetic().uniform().lowerBound(),
+            settings.synthetic().uniform().upperBound(), events);
+      case "exponential" ->
+        exponential(settings.synthetic().exponential().mean(), events);
+      case "hotspot" -> {
+        var hotspot = settings.synthetic().hotspot();
+        yield hotspot(hotspot.lowerBound(), hotspot.upperBound(),
+            hotspot.hotsetFraction(), hotspot.hotOpnFraction(), events);
+      }
+      case "zipfian" ->
+        zipfian(settings.synthetic().zipfian().items(),
             settings.synthetic().zipfian().constant(), events);
-      case "scrambled-zipfian":
-        return scrambledZipfian(settings.synthetic().zipfian().items(),
+      case "scrambled-zipfian" ->
+        scrambledZipfian(settings.synthetic().zipfian().items(),
             settings.synthetic().zipfian().constant(), events);
-      case "skewed-zipfian-latest":
-        return skewedZipfianLatest(settings.synthetic().zipfian().items(), events);
-      default:
+      case "skewed-zipfian-latest" ->
+        skewedZipfianLatest(settings.synthetic().zipfian().items(), events);
+      default ->
         throw new IllegalStateException("Unknown distribution: "
             + settings.synthetic().distribution());
-    }
+    };
   }
 
   /**
@@ -80,7 +81,7 @@ public final class Synthetic {
    * @param start the number that the counter starts from
    * @param events the number of events in the distribution
    */
-  public static KeyOnlyTraceReader counter(int start, int events) {
+  public static KeyOnlyTraceReader counter(long start, long events) {
     return generate(new CounterGenerator(start), events);
   }
 
@@ -90,8 +91,9 @@ public final class Synthetic {
    * @param items the number of items in the distribution
    * @param events the number of events in the distribution
    */
-  public static KeyOnlyTraceReader repeating(int items, int events) {
-    return generate(new SequentialGenerator(0, items), events);
+  public static KeyOnlyTraceReader repeating(long items, long events) {
+    checkArgument(items > 0, "items must be positive: %s", items);
+    return generate(new SequentialGenerator(0L, items - 1), events);
   }
 
   /**
@@ -103,7 +105,7 @@ public final class Synthetic {
    * @param events the number of events in the distribution
    * @return a stream of cache events
    */
-  public static KeyOnlyTraceReader uniform(int lowerBound, int upperBound, int events) {
+  public static KeyOnlyTraceReader uniform(long lowerBound, long upperBound, long events) {
     return generate(new UniformLongGenerator(lowerBound, upperBound), events);
   }
 
@@ -114,7 +116,7 @@ public final class Synthetic {
    * @param mean mean arrival rate of gamma (a half life of 1/gamma)
    * @param events the number of events in the distribution
    */
-  public static KeyOnlyTraceReader exponential(double mean, int events) {
+  public static KeyOnlyTraceReader exponential(double mean, long events) {
     return generate(new ExponentialGenerator(mean), events);
   }
 
@@ -131,8 +133,8 @@ public final class Synthetic {
    * @param hotOpnFraction percentage of operations accessing the hot set
    * @param events the number of events in the distribution
    */
-  public static KeyOnlyTraceReader hotspot(int lowerBound, int upperBound,
-      double hotsetFraction, double hotOpnFraction, int events) {
+  public static KeyOnlyTraceReader hotspot(long lowerBound, long upperBound,
+      double hotsetFraction, double hotOpnFraction, long events) {
     return generate(new HotspotIntegerGenerator(lowerBound,
         upperBound, hotsetFraction, hotOpnFraction), events);
   }
@@ -147,7 +149,9 @@ public final class Synthetic {
    * @param constant the skew factor for the distribution
    * @param events the number of events in the distribution
    */
-  public static KeyOnlyTraceReader scrambledZipfian(int items, double constant, int events) {
+  public static KeyOnlyTraceReader scrambledZipfian(long items, double constant, long events) {
+    checkArgument((constant > 0) && (constant < 1),
+        "The zipfian constant must be in the range (0, 1) but was %s", constant);
     return generate(new ScrambledZipfianGenerator(0, items - 1, constant), events);
   }
 
@@ -158,7 +162,7 @@ public final class Synthetic {
    * @param items the number of items in the distribution
    * @param events the number of events in the distribution
    */
-  public static KeyOnlyTraceReader skewedZipfianLatest(int items, int events) {
+  public static KeyOnlyTraceReader skewedZipfianLatest(long items, long events) {
     return generate(new SkewedLatestGenerator(new CounterGenerator(items)), events);
   }
 
@@ -170,13 +174,15 @@ public final class Synthetic {
    * @param constant the skew factor for the distribution
    * @param events the number of events in the distribution
    */
-  public static KeyOnlyTraceReader zipfian(int items, double constant, int events) {
+  public static KeyOnlyTraceReader zipfian(long items, double constant, long events) {
+    checkArgument((constant > 0) && (constant < 1),
+        "The zipfian constant must be in the range (0, 1) but was %s", constant);
     return generate(new ZipfianGenerator(items, constant), events);
   }
 
   /** Returns a sequence of items constructed by the generator. */
   private static KeyOnlyTraceReader generate(NumberGenerator generator, long count) {
     requireNonNull(generator);
-    return () -> LongStream.range(0, count).map(ignored -> generator.nextValue().longValue());
+    return () -> LongStream.range(0, count).map(_ -> generator.nextValue().longValue());
   }
 }

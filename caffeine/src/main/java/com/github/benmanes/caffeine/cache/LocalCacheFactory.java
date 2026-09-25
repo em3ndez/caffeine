@@ -21,31 +21,39 @@ import java.lang.invoke.MethodType;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
+
+import com.google.errorprone.annotations.Var;
 
 /**
  * A factory for caches optimized for a particular configuration.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@FunctionalInterface
 interface LocalCacheFactory {
   MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
   MethodType FACTORY = MethodType.methodType(
       void.class, Caffeine.class, AsyncCacheLoader.class, boolean.class);
   MethodType FACTORY_CALL = FACTORY.changeReturnType(BoundedLocalCache.class);
   ConcurrentMap<String, LocalCacheFactory> FACTORIES = new ConcurrentHashMap<>();
+  String EXPIRES_AFTER_ACCESS_NANOS = "expiresAfterAccessNanos";
+  String EXPIRES_AFTER_WRITE_NANOS = "expiresAfterWriteNanos";
+  String REFRESH_AFTER_WRITE_NANOS = "refreshAfterWriteNanos";
+  String WEIGHTED_SIZE = "weightedSize";
+  String MAXIMUM = "maximum";
 
   /** Returns a cache optimized for this configuration. */
   <K, V> BoundedLocalCache<K, V> newInstance(Caffeine<K, V> builder,
-      @Nullable AsyncCacheLoader<? super K, V> cacheLoader, boolean async) throws Throwable;
+      @Nullable AsyncCacheLoader<? super K, V> cacheLoader, boolean isAsync) throws Throwable;
 
   /** Returns a cache optimized for this configuration. */
   static <K, V> BoundedLocalCache<K, V> newBoundedLocalCache(Caffeine<K, V> builder,
-      @Nullable AsyncCacheLoader<? super K, V> cacheLoader, boolean async) {
+      @Nullable AsyncCacheLoader<? super K, V> cacheLoader, boolean isAsync) {
     var className = getClassName(builder);
     var factory = loadFactory(className);
     try {
-      return factory.newInstance(builder, cacheLoader, async);
+      return factory.newInstance(builder, cacheLoader, isAsync);
     } catch (RuntimeException | Error e) {
       throw e;
     } catch (Throwable t) {
@@ -92,7 +100,7 @@ interface LocalCacheFactory {
   }
 
   static LocalCacheFactory loadFactory(String className) {
-    var factory = FACTORIES.get(className);
+    @Var var factory = FACTORIES.get(className);
     if (factory == null) {
       factory = FACTORIES.computeIfAbsent(className, LocalCacheFactory::newFactory);
     }

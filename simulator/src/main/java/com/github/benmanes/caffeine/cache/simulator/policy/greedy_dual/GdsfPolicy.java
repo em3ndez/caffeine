@@ -23,12 +23,15 @@ import java.util.NavigableSet;
 import java.util.Set;
 import java.util.TreeSet;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.AccessEvent;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -38,10 +41,10 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
  * Greedy Dual Size Frequency (GDSF) algorithm.
  * <p>
  * The algorithm is explained by the authors in
- * <a href="http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.304.6514&rep=rep1&type=pdf">
+ * <a href="https://eclass.uoa.gr/modules/document/file.php/D245/2015/HPL-98-69R1_GDS.pdf">
  * Improving Web Servers and Proxies Performance with GDSF Caching Policies</a> and
- * <a href="http://web.cs.iastate.edu/~ciardo/pubs/2001HPCN-GreedyDualFreqSize.pdf">Role of Aging,
- * Frequency, and Size in Web Cache Replacement Policies</a>.
+ * <a href="https://dl.acm.org/doi/10.5555/645565.658748">Role of Aging, Frequency, and Size in Web
+ * Cache Replacement Policies</a>.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
@@ -70,7 +73,7 @@ public final class GdsfPolicy implements Policy {
 
   @Override
   public void record(AccessEvent event) {
-    Node node = data.get(event.key());
+    var node = data.get(event.key());
     if (node == null) {
       policyStats.recordWeightedMiss(event.weight());
       onMiss(event);
@@ -97,7 +100,7 @@ public final class GdsfPolicy implements Policy {
     priorityQueue.add(node);
   }
 
-  private double priorityOf(AccessEvent event, int frequency) {
+  private double priorityOf(AccessEvent event, long frequency) {
     // As defined in "Improving Web Servers and Proxies Performance with GDSF Caching Policies"
     double cost = event.isPenaltyAware() ? event.missPenalty() : 1.0;
     return clock + frequency * (cost / event.weight());
@@ -108,7 +111,7 @@ public final class GdsfPolicy implements Policy {
     //  – Fr(f) is set to one.
     //  – Pr(f) is computed using Eq. 1 and f is enqueued accordingly.
     //  – Used is increased by Size(f).
-    Node candidate = new Node(event.key(), event.weight(), priorityOf(event, 1));
+    var candidate = new Node(event.key(), event.weight(), priorityOf(event, 1));
     data.put(candidate.key, candidate);
     priorityQueue.add(candidate);
     size += candidate.weight;
@@ -152,7 +155,7 @@ public final class GdsfPolicy implements Policy {
   }
 
   private Set<Node> getVictims(long weightDifference) {
-    long weightedSize = 0L;
+    @Var long weightedSize = 0L;
     var victims = new LinkedHashSet<Node>();
     for (Node node : priorityQueue) {
       victims.add(node);
@@ -182,11 +185,11 @@ public final class GdsfPolicy implements Policy {
     checkState(priorityQueue.containsAll(data.values()), "Data != PriorityQueue");
   }
 
-  private static final class Node implements Comparable<Node> {
+  static final class Node implements Comparable<Node> {
     final long key;
 
     double priority;
-    int frequency;
+    long frequency;
     int weight;
 
     public Node(long key, int weight, double priority) {
@@ -203,14 +206,8 @@ public final class GdsfPolicy implements Policy {
     }
 
     @Override
-    public boolean equals(Object o) {
-      if (o == this) {
-        return true;
-      } else if (!(o instanceof Node)) {
-        return false;
-      }
-      var node = (Node) o;
-      return (key == node.key) && (priority == node.priority);
+    public boolean equals(@Nullable Object o) {
+      return (o instanceof Node node) && (compareTo(node) == 0);
     }
 
     @Override

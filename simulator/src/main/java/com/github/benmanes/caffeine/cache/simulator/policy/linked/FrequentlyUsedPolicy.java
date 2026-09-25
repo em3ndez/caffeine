@@ -22,14 +22,16 @@ import static java.util.stream.Collectors.toUnmodifiableSet;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.admission.Admission;
-import com.github.benmanes.caffeine.cache.simulator.admission.Admittor;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admitter;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -46,14 +48,14 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
   final Long2ObjectMap<Node> data;
   final EvictionPolicy policy;
   final FrequencyNode freq0;
-  final Admittor admittor;
+  final Admitter admitter;
   final int maximumSize;
 
   public FrequentlyUsedPolicy(Admission admission, EvictionPolicy policy, Config config) {
-    BasicSettings settings = new BasicSettings(config);
+    var settings = new BasicSettings(config);
     this.policyStats = new PolicyStats(admission.format(policy.label()));
     this.maximumSize = Math.toIntExact(settings.maximumSize());
-    this.admittor = admission.from(config, policyStats);
+    this.admitter = admission.from(config, policyStats);
     this.data = new Long2ObjectOpenHashMap<>();
     this.policy = requireNonNull(policy);
     this.freq0 = new FrequencyNode();
@@ -61,7 +63,7 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
 
   /** Returns all variations of this policy based on the configuration parameters. */
   public static Set<Policy> policies(Config config, EvictionPolicy policy) {
-    BasicSettings settings = new BasicSettings(config);
+    var settings = new BasicSettings(config);
     return settings.admission().stream().map(admission ->
       new FrequentlyUsedPolicy(admission, policy, config)
     ).collect(toUnmodifiableSet());
@@ -74,9 +76,9 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
 
   @Override
   public void record(long key) {
+    var node = data.get(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
-    admittor.record(key);
+    admitter.record(key);
     if (node == null) {
       onMiss(key);
     } else {
@@ -89,9 +91,8 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
     policyStats.recordHit();
 
     int newCount = node.freq.count + 1;
-    FrequencyNode freqN = (node.freq.next.count == newCount)
-        ? node.freq.next
-        : new FrequencyNode(newCount, node.freq);
+    var next = requireNonNull(node.freq.next);
+    FrequencyNode freqN = (next.count == newCount) ? next : new FrequencyNode(newCount, node.freq);
     node.remove();
     if (node.freq.isEmpty()) {
       node.freq.remove();
@@ -102,10 +103,9 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
 
   /** Adds the entry, creating an initial frequency list of 1 if necessary, and evicts if needed. */
   private void onMiss(long key) {
-    FrequencyNode freq1 = (freq0.next.count == 1)
-        ? freq0.next
-        : new FrequencyNode(1, freq0);
-    Node node = new Node(key, freq1);
+    var next = requireNonNull(freq0.next);
+    FrequencyNode freq1 = (next.count == 1) ? next : new FrequencyNode(1, freq0);
+    var node = new Node(freq1, key);
     policyStats.recordMiss();
     data.put(key, node);
     node.append();
@@ -116,7 +116,7 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
   private void evict(Node candidate) {
     if (data.size() > maximumSize) {
       Node victim = nextVictim(candidate);
-      boolean admit = admittor.admit(candidate.key, victim.key);
+      boolean admit = admitter.admit(candidate.key, victim.key);
       if (admit) {
         evictEntry(victim);
       } else {
@@ -134,17 +134,18 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
   Node nextVictim(Node candidate) {
     if (policy == EvictionPolicy.MFU) {
       // highest, never the candidate
-      return freq0.prev.nextNode.next;
+      var prev = requireNonNull(freq0.prev);
+      return requireNonNull(prev.nextNode.next);
     }
 
     // find the lowest that is not the candidate
-    Node victim = freq0.next.nextNode.next;
+    @Var Node victim = requireNonNull(freq0.next).nextNode.next;
     if (victim == candidate) {
       victim = (victim.next == victim.prev)
-          ? victim.freq.next.nextNode.next
+          ? requireNonNull(victim.freq.next).nextNode.next
           : victim.next;
     }
-    return victim;
+    return requireNonNull(victim);
   }
 
   /** Removes the entry. */
@@ -169,8 +170,8 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
     final int count;
     final Node nextNode;
 
-    FrequencyNode prev;
-    FrequencyNode next;
+    @Nullable FrequencyNode prev;
+    @Nullable FrequencyNode next;
 
     public FrequencyNode() {
       nextNode = new Node(this);
@@ -180,6 +181,7 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
     }
 
     public FrequencyNode(int count, FrequencyNode prev) {
+      requireNonNull(prev.next);
       nextNode = new Node(this);
       this.prev = prev;
       this.next = prev.next;
@@ -194,6 +196,9 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       prev.next = next;
       next.prev = prev;
       next = prev = null;
@@ -212,8 +217,8 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
     final long key;
 
     FrequencyNode freq;
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
 
     public Node(FrequencyNode freq) {
       this.key = Long.MIN_VALUE;
@@ -222,7 +227,7 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
       this.next = this;
     }
 
-    public Node(long key, FrequencyNode freq) {
+    public Node(FrequencyNode freq, long key) {
       this.next = null;
       this.prev = null;
       this.freq = freq;
@@ -231,14 +236,17 @@ public final class FrequentlyUsedPolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void append() {
-      prev = freq.nextNode.prev;
-      next = freq.nextNode;
+      prev = requireNonNull(freq.nextNode.prev);
+      next = requireNonNull(freq.nextNode);
       prev.next = this;
       next.prev = this;
     }
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       prev.next = next;
       next.prev = prev;
       next = prev = null;

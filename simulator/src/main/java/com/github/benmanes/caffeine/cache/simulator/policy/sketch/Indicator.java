@@ -32,23 +32,20 @@ import com.typesafe.config.ConfigFactory;
  * @author ohadey@gmail.com (Ohad Eytan)
  */
 public final class Indicator {
-  private final int k;
-  private final int ssSize;
-  private final Hinter hinter;
-  private final EstSkew estSkew;
   private final PeriodicResetCountMin4 sketch;
+  private final EstSkew estSkew;
+  private final Hinter hinter;
+  private final int k;
 
   private long sample;
 
   public Indicator(Config config) {
+    var settings = new IndicatorSettings(config);
     this.sketch = new PeriodicResetCountMin4(
         ConfigFactory.parseString("maximum-size = 5000").withFallback(config));
-    IndicatorSettings settings = new IndicatorSettings(config);
-    this.sample = 0;
-    this.k = settings.k();
-    this.ssSize = settings.ssSize();
-    this.estSkew = new EstSkew();
+    this.estSkew = new EstSkew(settings.ssSize());
     this.hinter = new Hinter();
+    this.k = settings.k();
   }
 
   public void record(long key) {
@@ -69,6 +66,11 @@ public final class Indicator {
     return sample;
   }
 
+  @SuppressWarnings("unused")
+  public int[] getFreqs() {
+    return hinter.freq;
+  }
+
   public double getSkew() {
     return estSkew.estSkew(k);
   }
@@ -82,15 +84,15 @@ public final class Indicator {
     return (getHint() * (skew < 1 ? 1 - Math.pow(skew, 3) : 0)) / 15.0;
   }
 
-  private static final class Hinter {
+  static final class Hinter {
     final int[] freq = new int[16];
 
     int sum;
     int count;
 
     public void increment(int i) {
-      sum += i;
       count++;
+      sum += i;
       freq[i]++;
     }
 
@@ -100,15 +102,18 @@ public final class Indicator {
     }
 
     public double getAverage() {
-      return sum / (double) count;
+      return (count == 0) ? 0.0 : (sum / (double) count);
     }
   }
 
-  private final class EstSkew {
+  static final class EstSkew {
+    final int ssSize;
+
     StreamSummary<Long> stream;
 
-    public EstSkew() {
+    public EstSkew(int ssSize) {
       this.stream = new StreamSummary<>(ssSize);
+      this.ssSize = ssSize;
     }
 
     public void record(long key) {
@@ -116,7 +121,7 @@ public final class Indicator {
     }
 
     public void reset() {
-      this.stream = new StreamSummary<>(ssSize);
+      stream = new StreamSummary<>(ssSize);
     }
 
     public IntStream getTopK(int k) {
@@ -124,15 +129,11 @@ public final class Indicator {
     }
 
     public double estSkew(int k) {
-      SimpleRegression regression = new SimpleRegression();
       int[] idx = { 1 };
+      var regression = new SimpleRegression();
       getTopK(k).forEachOrdered(freq -> regression.addData(Math.log(idx[0]++), Math.log(freq)));
       return -regression.getSlope();
     }
-  }
-
-  public int[] getFreqs() {
-    return hinter.freq;
   }
 
   static final class IndicatorSettings extends BasicSettings {

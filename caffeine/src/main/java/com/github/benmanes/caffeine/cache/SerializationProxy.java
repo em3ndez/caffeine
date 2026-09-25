@@ -20,7 +20,7 @@ import static com.github.benmanes.caffeine.cache.Caffeine.UNSET_INT;
 import java.io.Serializable;
 import java.time.Duration;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Serializes the configuration of the cache, reconstituting it as a {@link Cache},
@@ -38,11 +38,11 @@ final class SerializationProxy<K, V> implements Serializable {
   boolean weakValues;
   boolean softValues;
   boolean isRecordingStats;
-  long refreshAfterWriteNanos;
-  long expiresAfterWriteNanos;
-  long expiresAfterAccessNanos;
   long maximumSize = UNSET_INT;
   long maximumWeight = UNSET_INT;
+  long refreshAfterWriteNanos = UNSET_INT;
+  long expiresAfterWriteNanos = UNSET_INT;
+  long expiresAfterAccessNanos = UNSET_INT;
 
   @Nullable Ticker ticker;
   @Nullable Expiry<?, ?> expiry;
@@ -52,7 +52,7 @@ final class SerializationProxy<K, V> implements Serializable {
   @Nullable RemovalListener<?, ?> evictionListener;
 
   Caffeine<Object, Object> recreateCaffeine() {
-    Caffeine<Object, Object> builder = Caffeine.newBuilder();
+    var builder = Caffeine.newBuilder();
     if (ticker != null) {
       builder.ticker(ticker);
     }
@@ -62,22 +62,24 @@ final class SerializationProxy<K, V> implements Serializable {
     if (maximumSize != UNSET_INT) {
       builder.maximumSize(maximumSize);
     }
+    if (maximumWeight != UNSET_INT) {
+      builder.maximumWeight(maximumWeight);
+    }
     if (weigher != null) {
       @SuppressWarnings("unchecked")
       var castedWeigher = (Weigher<Object, Object>) weigher;
-      builder.maximumWeight(maximumWeight);
       builder.weigher(castedWeigher);
     }
     if (expiry != null) {
       builder.expireAfter(expiry);
     }
-    if (expiresAfterWriteNanos > 0) {
+    if (expiresAfterWriteNanos != UNSET_INT) {
       builder.expireAfterWrite(Duration.ofNanos(expiresAfterWriteNanos));
     }
-    if (expiresAfterAccessNanos > 0) {
+    if (expiresAfterAccessNanos != UNSET_INT) {
       builder.expireAfterAccess(Duration.ofNanos(expiresAfterAccessNanos));
     }
-    if (refreshAfterWriteNanos > 0) {
+    if (refreshAfterWriteNanos != UNSET_INT) {
       builder.refreshAfterWrite(Duration.ofNanos(refreshAfterWriteNanos));
     }
     if (weakKeys) {
@@ -99,13 +101,13 @@ final class SerializationProxy<K, V> implements Serializable {
   }
 
   Object readResolve() {
-    Caffeine<Object, Object> builder = recreateCaffeine();
+    var builder = recreateCaffeine();
     if (async) {
       if (cacheLoader == null) {
         return builder.buildAsync();
       }
       @SuppressWarnings("unchecked")
-      AsyncCacheLoader<K, V> loader = (AsyncCacheLoader<K, V>) cacheLoader;
+      var loader = (AsyncCacheLoader<K, V>) cacheLoader;
       return builder.buildAsync(loader);
     }
 
@@ -113,7 +115,7 @@ final class SerializationProxy<K, V> implements Serializable {
       return builder.build();
     }
     @SuppressWarnings("unchecked")
-    CacheLoader<K, V> loader = (CacheLoader<K, V>) cacheLoader;
+    var loader = (CacheLoader<K, V>) cacheLoader;
     return builder.build(loader);
   }
 }

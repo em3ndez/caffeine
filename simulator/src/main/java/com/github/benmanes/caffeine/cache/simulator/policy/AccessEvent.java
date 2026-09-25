@@ -18,9 +18,15 @@ package com.github.benmanes.caffeine.cache.simulator.policy;
 import static com.google.common.base.Preconditions.checkArgument;
 
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReferenceArray;
+
+import org.jspecify.annotations.Nullable;
 
 import com.google.common.base.MoreObjects;
 import com.google.errorprone.annotations.Immutable;
+import com.google.errorprone.annotations.Var;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * The key and metadata for accessing a cache.
@@ -38,6 +44,11 @@ public class AccessEvent {
   /** Returns the key. */
   public long key() {
     return key;
+  }
+
+  /** Returns the object key. */
+  public Long longKey() {
+    return LongInterner.boxed(key);
   }
 
   /** Returns the weight of the entry. */
@@ -61,17 +72,12 @@ public class AccessEvent {
   }
 
   @Override
-  public boolean equals(Object o) {
-    if (o == this) {
-      return true;
-    } else if (!(o instanceof AccessEvent)) {
-      return false;
-    }
-    AccessEvent event = (AccessEvent) o;
-    return (key() == event.key())
+  public boolean equals(@Nullable Object o) {
+    return (o instanceof AccessEvent event)
+        && (key() == event.key())
         && (weight() == event.weight())
-        && (hitPenalty() == event.hitPenalty())
-        && (missPenalty() == event.missPenalty());
+        && (Double.compare(hitPenalty(), event.hitPenalty()) == 0)
+        && (Double.compare(missPenalty(), event.missPenalty()) == 0);
   }
 
   @Override
@@ -104,19 +110,36 @@ public class AccessEvent {
     return new PenaltiesAccessEvent(key, hitPenalty, missPenalty);
   }
 
+  private static final class LongInterner {
+    static final AtomicReferenceArray<@Nullable Long> cache = new AtomicReferenceArray<>(1 << 20);
+    static final int MASK = cache.length() - 1;
+
+    static Long boxed(long l) {
+      int index = Long.hashCode(l) & MASK;
+      @Var Long boxed = cache.get(index);
+      if ((boxed == null) || (boxed != l)) {
+        boxed = l;
+        LongInterner.cache.set(index, boxed);
+      }
+      return boxed;
+    }
+  }
+
+  @SuppressFBWarnings("EQ_DOESNT_OVERRIDE_EQUALS")
   private static final class WeightedAccessEvent extends AccessEvent {
     private final int weight;
 
     WeightedAccessEvent(long key, int weight) {
       super(key);
       this.weight = weight;
-      checkArgument(weight >= 0);
+      checkArgument(weight > 0, "weight must be positive: %s", weight);
     }
     @Override public int weight() {
       return weight;
     }
   }
 
+  @SuppressFBWarnings("EQ_DOESNT_OVERRIDE_EQUALS")
   private static final class PenaltiesAccessEvent extends AccessEvent {
     private final double missPenalty;
     private final double hitPenalty;

@@ -21,50 +21,52 @@ import static com.github.benmanes.caffeine.cache.Specifications.vRefQueueType;
 import javax.lang.model.element.Modifier;
 
 import com.github.benmanes.caffeine.cache.Feature;
-import com.squareup.javapoet.FieldSpec;
-import com.squareup.javapoet.MethodSpec;
-import com.squareup.javapoet.TypeName;
+import com.github.benmanes.caffeine.cache.Rule;
+import com.palantir.javapoet.FieldSpec;
+import com.palantir.javapoet.MethodSpec;
+import com.palantir.javapoet.TypeName;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class AddKeyValueStrength extends LocalCacheRule {
+public final class AddKeyValueStrength implements Rule<LocalCacheContext> {
 
   @Override
-  protected boolean applies() {
+  public boolean applies(LocalCacheContext context) {
     return true;
   }
 
   @Override
-  protected void execute() {
-    addKeyStrength();
-    addValueStrength();
+  public void execute(LocalCacheContext context) {
+    addKeyStrength(context);
+    addValueStrength(context);
   }
 
-  private void addKeyStrength() {
+  private static void addKeyStrength(LocalCacheContext context) {
     if (context.generateFeatures.contains(Feature.WEAK_KEYS)) {
-      addStrength("collectKeys", "keyReferenceQueue", kRefQueueType);
+      addStrength(context, "collectKeys", "keyReferenceQueue", kRefQueueType);
     }
   }
 
-  private void addValueStrength() {
+  private static void addValueStrength(LocalCacheContext context) {
     if (context.generateFeatures.contains(Feature.INFIRM_VALUES)) {
-      addStrength("collectValues", "valueReferenceQueue", vRefQueueType);
+      addStrength(context, "collectValues", "valueReferenceQueue", vRefQueueType);
     }
   }
 
   /** Adds the reference strength methods for the key or value. */
-  private void addStrength(String collectName, String queueName, TypeName type) {
-    context.cache.addMethod(MethodSpec.methodBuilder(queueName)
+  private static void addStrength(LocalCacheContext context,
+      String collectName, String queueName, TypeName type) {
+    context.classSpec.addMethod(MethodSpec.methodBuilder(queueName)
         .addModifiers(context.protectedFinalModifiers())
         .returns(type)
         .addStatement("return $N", queueName)
         .build());
-    context.cache.addField(FieldSpec.builder(type, queueName, Modifier.FINAL)
+    context.classSpec.addField(FieldSpec.builder(type, queueName, Modifier.FINAL)
         .initializer("new $T()", type)
         .build());
-    context.cache.addMethod(MethodSpec.methodBuilder(collectName)
-        .addModifiers(context.protectedFinalModifiers())
+    context.classSpec.addMethod(MethodSpec.methodBuilder(collectName)
+        .addModifiers(context.publicFinalModifiers())
         .addStatement("return true")
         .returns(boolean.class)
         .build());

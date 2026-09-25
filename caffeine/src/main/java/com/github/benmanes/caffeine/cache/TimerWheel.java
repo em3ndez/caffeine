@@ -16,6 +16,7 @@
 package com.github.benmanes.caffeine.cache;
 
 import static com.github.benmanes.caffeine.cache.Caffeine.ceilingPowerOfTwo;
+import static java.util.Objects.requireNonNull;
 
 import java.lang.ref.ReferenceQueue;
 import java.util.ConcurrentModificationException;
@@ -23,7 +24,10 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.concurrent.TimeUnit;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
+
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import com.google.errorprone.annotations.Var;
 
 /**
  * A hierarchical timer wheel to add, remove, and fire expiration events in amortized O(1) time. The
@@ -54,7 +58,6 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
       ceilingPowerOfTwo(TimeUnit.HOURS.toNanos(1)),   // 1.22h
       ceilingPowerOfTwo(TimeUnit.DAYS.toNanos(1)),    // 1.63d
       BUCKETS[3] * ceilingPowerOfTwo(TimeUnit.DAYS.toNanos(1)), // 6.5d
-      BUCKETS[3] * ceilingPowerOfTwo(TimeUnit.DAYS.toNanos(1)), // 6.5d
   };
   static final long[] SHIFT = {
       Long.numberOfTrailingZeros(SPANS[0]),
@@ -65,11 +68,14 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
   };
 
   final Node<K, V>[][] wheel;
+  final Node<K, V> pending;
 
+  boolean advancing;
   long nanos;
 
   @SuppressWarnings({"rawtypes", "unchecked"})
   TimerWheel() {
+    pending = new Sentinel<>();
     wheel = new Node[BUCKETS.length][];
     for (int i = 0; i < wheel.length; i++) {
       wheel[i] = new Node[BUCKETS[i]];
@@ -80,37 +86,55 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
   }
 
   /**
-   * Advances the timer and evicts entries that have expired.
+   * Advances the timer and evicts entries that have expired, up to the {@code limit} number of
+   * evictions, and returns the unused budget. When the limit is reached the timer is rewound so
+   * that the next advance processes the remaining backlog.
    *
    * @param cache the instance that the entries belong to
    * @param currentTimeNanos the current time, in nanoseconds
+   * @param limit the maximum number of entries to evict
+   * @return the unused portion of the eviction budget; zero if the limit was reached
    */
-  @SuppressWarnings("PMD.UnusedAssignment")
-  public void advance(BoundedLocalCache<K, V> cache, long currentTimeNanos) {
+  @CanIgnoreReturnValue
+  public int advance(BoundedLocalCache<K, V> cache, long currentTimeNanos, @Var int limit) {
+    if (advancing) {
+      return limit;
+    }
+
+    advancing = true;
     long previousTimeNanos = nanos;
     nanos = currentTimeNanos;
 
-    // If wrapping then temporarily shift the clock for a positive comparison. We assume that the
-    // advancements never exceed a total running time of Long.MAX_VALUE nanoseconds (292 years)
-    // so that an overflow only occurs due to using an arbitrary origin time (System.nanoTime()).
-    if ((previousTimeNanos < 0) && (currentTimeNanos > 0)) {
-      previousTimeNanos += Long.MAX_VALUE;
-      currentTimeNanos += Long.MAX_VALUE;
+    // If wrapping from negative to non-negative then shift for the delta computation so that
+    // the unsigned tick difference is correct. The raw previousTicks is used for the bucket
+    // start to stay consistent with how schedule() places timers.
+    @Var long previousDelta = previousTimeNanos;
+    @Var long currentDelta = currentTimeNanos;
+    if ((previousTimeNanos < 0) && (currentTimeNanos >= 0)) {
+      previousDelta += Long.MIN_VALUE;
+      currentDelta += Long.MIN_VALUE;
     }
 
     try {
       for (int i = 0; i < SHIFT.length; i++) {
-        long previousTicks = (previousTimeNanos >>> SHIFT[i]);
-        long currentTicks = (currentTimeNanos >>> SHIFT[i]);
-        long delta = (currentTicks - previousTicks);
+        long delta = ((currentDelta >>> SHIFT[i]) - (previousDelta >>> SHIFT[i]));
         if (delta <= 0L) {
           break;
         }
-        expire(cache, i, previousTicks, delta);
+        long previousTicks = (previousTimeNanos >>> SHIFT[i]);
+        limit = expire(cache, i, previousTicks, delta, limit);
+        if (limit == 0) {
+          // The backlog was not fully drained, so rewind to process it on the next advance
+          nanos = previousTimeNanos;
+          break;
+        }
       }
+      return limit;
     } catch (Throwable t) {
       nanos = previousTimeNanos;
       throw t;
+    } finally {
+      advancing = false;
     }
   }
 
@@ -122,43 +146,60 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
    * @param previousTicks the previous number of ticks
    * @param delta the number of additional ticks
    */
-  void expire(BoundedLocalCache<K, V> cache, int index, long previousTicks, long delta) {
+  @SuppressWarnings("Varifier")
+  int expire(BoundedLocalCache<K, V> cache, int index,
+      long previousTicks, long delta, @Var int limit) {
     Node<K, V>[] timerWheel = wheel[index];
     int mask = timerWheel.length - 1;
 
-    // We assume that the delta does not overflow an integer and cause negative steps. This can
-    // occur only if the advancement exceeds 2^61 nanoseconds (73 years).
-    int steps = Math.min(1 + (int) delta, timerWheel.length);
+    int steps = (int) Math.min(1 + delta, timerWheel.length);
     int start = (int) (previousTicks & mask);
     int end = start + steps;
 
     for (int i = start; i < end; i++) {
       Node<K, V> sentinel = timerWheel[i & mask];
-      Node<K, V> prev = sentinel.getPreviousInVariableOrder();
-      Node<K, V> node = sentinel.getNextInVariableOrder();
-      sentinel.setPreviousInVariableOrder(sentinel);
-      sentinel.setNextInVariableOrder(sentinel);
-
-      while (node != sentinel) {
-        Node<K, V> next = node.getNextInVariableOrder();
-        node.setPreviousInVariableOrder(null);
-        node.setNextInVariableOrder(null);
-
-        try {
-          if (((node.getVariableTime() - nanos) > 0)
-              || !cache.evictEntry(node, RemovalCause.EXPIRED, nanos)) {
-            schedule(node);
+      transfer(sentinel, pending);
+      try {
+        @Var Node<K, V> node;
+        while ((node = pending.getNextInVariableOrder()) != pending) {
+          deschedule(node);
+          try {
+            if ((node.getVariableTime() - nanos) > 0) {
+              schedule(node);
+            } else if (cache.evictEntry(node, RemovalCause.EXPIRED, nanos)) {
+              if (--limit == 0) {
+                // Leave the unprocessed remainder for the next advance to process
+                return 0;
+              }
+            } else {
+              schedule(node);
+            }
+          } catch (Throwable t) {
+            link(pending, node);
+            throw t;
           }
-          node = next;
-        } catch (Throwable t) {
-          node.setPreviousInVariableOrder(sentinel.getPreviousInVariableOrder());
-          node.setNextInVariableOrder(next);
-          sentinel.getPreviousInVariableOrder().setNextInVariableOrder(node);
-          sentinel.setPreviousInVariableOrder(prev);
-          throw t;
         }
+      } finally {
+        transfer(pending, sentinel);
       }
     }
+    return limit;
+  }
+
+  /** Moves the entries held by one list to the tail of another. */
+  void transfer(Node<K, V> from, Node<K, V> to) {
+    Node<K, V> first = from.getNextInVariableOrder();
+    if (first == from) {
+      return;
+    }
+    Node<K, V> last = from.getPreviousInVariableOrder();
+    from.setPreviousInVariableOrder(from);
+    from.setNextInVariableOrder(from);
+
+    first.setPreviousInVariableOrder(to.getPreviousInVariableOrder());
+    to.getPreviousInVariableOrder().setNextInVariableOrder(first);
+    last.setNextInVariableOrder(to);
+    to.setPreviousInVariableOrder(last);
   }
 
   /**
@@ -200,8 +241,13 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
    * @param time the time when the event fires
    * @return the sentinel at the head of the bucket
    */
-  Node<K, V> findBucket(long time) {
-    long duration = time - nanos;
+  @SuppressWarnings("Varifier")
+  Node<K, V> findBucket(@Var long time) {
+    long duration = Math.max(0L, time - nanos);
+    if (duration == 0L) {
+      time = nanos;
+    }
+
     int length = wheel.length - 1;
     for (int i = 0; i < length; i++) {
       if (duration < SPANS[i + 1]) {
@@ -233,25 +279,25 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
   }
 
   /** Returns the duration until the next bucket expires, or {@link Long#MAX_VALUE} if none. */
-  @SuppressWarnings("IntLongMath")
+  @SuppressWarnings({"IntLongMath", "Varifier"})
   public long getExpirationDelay() {
     for (int i = 0; i < SHIFT.length; i++) {
       Node<K, V>[] timerWheel = wheel[i];
       long ticks = (nanos >>> SHIFT[i]);
 
       long spanMask = SPANS[i] - 1;
-      int start = (int) (ticks & spanMask);
-      int end = start + timerWheel.length;
       int mask = timerWheel.length - 1;
+      int start = (int) (ticks & mask);
+      int end = start + timerWheel.length;
       for (int j = start; j < end; j++) {
         Node<K, V> sentinel = timerWheel[(j & mask)];
         Node<K, V> next = sentinel.getNextInVariableOrder();
         if (next == sentinel) {
           continue;
         }
-        long buckets = (j - start);
-        long delay = (buckets << SHIFT[i]) - (nanos & spanMask);
-        delay = (delay > 0) ? delay : SPANS[i];
+        // an occupied current bucket is revisited when the wheel next ticks
+        long buckets = Math.max(1, j - start);
+        @Var long delay = (buckets << SHIFT[i]) - (nanos & spanMask);
 
         for (int k = i + 1; k < SHIFT.length; k++) {
           long nextDelay = peekAhead(k);
@@ -269,16 +315,18 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
    *
    * @param index the timing wheel being operated on
    */
+  @SuppressWarnings("Varifier")
   long peekAhead(int index) {
     long ticks = (nanos >>> SHIFT[index]);
     Node<K, V>[] timerWheel = wheel[index];
 
     long spanMask = SPANS[index] - 1;
     int mask = timerWheel.length - 1;
-    int probe = (int) ((ticks + 1) & mask);
-    Node<K, V> sentinel = timerWheel[probe];
-    Node<K, V> next = sentinel.getNextInVariableOrder();
-    return (next == sentinel) ? Long.MAX_VALUE : (SPANS[index] - (nanos & spanMask));
+    Node<K, V> current = timerWheel[(int) (ticks & mask)];
+    Node<K, V> upcoming = timerWheel[(int) ((ticks + 1) & mask)];
+    boolean empty = (current.getNextInVariableOrder() == current)
+        && (upcoming.getNextInVariableOrder() == upcoming);
+    return empty ? Long.MAX_VALUE : (SPANS[index] - (nanos & spanMask));
   }
 
   /**
@@ -325,18 +373,17 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
     }
 
     @Override
-    @SuppressWarnings("NullAway")
     public Node<K, V> next() {
       if (!hasNext()) {
         throw new NoSuchElementException();
       }
       current = next;
       next = null;
-      return current;
+      return requireNonNull(current);
     }
 
     @Nullable Node<K, V> computeNext() {
-      var node = (current == null) ? sentinel() : current;
+      @Var var node = (current == null) ? sentinel() : current;
       for (;;) {
         node = traverse(node);
         if (node != sentinel()) {
@@ -392,6 +439,7 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
       return wheel[wheelIndex][bucketIndex()];
     }
     int bucketIndex() {
+      @SuppressWarnings("Varifier")
       int ticks = (int) (nanos >>> SHIFT[wheelIndex]);
       int bucketMask = wheel[wheelIndex].length - 1;
       int bucketOffset = (ticks & bucketMask) + 1;
@@ -428,6 +476,7 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
       return node.getPreviousInVariableOrder();
     }
     int bucketIndex() {
+      @SuppressWarnings("Varifier")
       int ticks = (int) (nanos >>> SHIFT[wheelIndex]);
       int bucketMask = wheel[wheelIndex].length - 1;
       int bucketOffset = (ticks & bucketMask);
@@ -447,20 +496,21 @@ final class TimerWheel<K, V> implements Iterable<Node<K, V>> {
     @Override public Node<K, V> getPreviousInVariableOrder() {
       return prev;
     }
-    @SuppressWarnings("NullAway")
+    @SuppressWarnings({"DataFlowIssue", "NullAway"})
     @Override public void setPreviousInVariableOrder(@Nullable Node<K, V> prev) {
       this.prev = prev;
     }
     @Override public Node<K, V> getNextInVariableOrder() {
       return next;
     }
-    @SuppressWarnings("NullAway")
+    @SuppressWarnings({"DataFlowIssue", "NullAway"})
     @Override public void setNextInVariableOrder(@Nullable Node<K, V> next) {
       this.next = next;
     }
 
     @Override public @Nullable K getKey() { return null; }
     @Override public Object getKeyReference() { throw new UnsupportedOperationException(); }
+    @Override public Object getKeyReferenceOrNull() { throw new UnsupportedOperationException(); }
     @Override public @Nullable V getValue() { return null; }
     @Override public Object getValueReference() { throw new UnsupportedOperationException(); }
     @Override public void setValue(V value, @Nullable ReferenceQueue<V> referenceQueue) {}

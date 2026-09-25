@@ -18,6 +18,10 @@ package com.github.benmanes.caffeine.cache;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
 /**
  * A semi-persistent mapping from keys to values. Values are automatically loaded by the cache
  * asynchronously and are stored in the cache until either evicted or manually invalidated.
@@ -27,9 +31,13 @@ import java.util.concurrent.CompletableFuture;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  * @param <K> the type of keys maintained by this cache
- * @param <V> the type of mapped values
+ * @param <V> the type of mapped values. A loading function may return null values only if the
+ *     cache declares a nullable value type. The cache may return {@code Future} instances with null
+ *     values if a loading function returns null or a bulk load omits the requested key. (Null
+ *     values are still never <i>stored</i> in the cache.)
  */
-public interface AsyncLoadingCache<K, V> extends AsyncCache<K, V> {
+@NullMarked
+public interface AsyncLoadingCache<K, V extends @Nullable Object> extends AsyncCache<K, V> {
 
   /**
    * Returns the future associated with the {@code key} in this cache, obtaining that value from
@@ -55,13 +63,13 @@ public interface AsyncLoadingCache<K, V> extends AsyncCache<K, V> {
    * with newly loaded entries; it will never contain null keys or values. If any of the
    * asynchronous computations fail, those entries will be automatically removed from this cache.
    * <p>
-   * Caches loaded by a {@link AsyncCacheLoader} supporting bulk loading will issue a single request
-   * to {@link AsyncCacheLoader#asyncLoadAll} for all keys that are not already present in the
-   * cache. If another call to {@link #get} tries to load the value for a key in {@code keys}, that
-   * thread retrieves a future that is completed by this bulk computation. Caches that do not use a
-   * {@link AsyncCacheLoader} with an optimized bulk load implementation will sequentially load each
-   * key by making individual {@link AsyncCacheLoader#asyncLoad} calls. Note that multiple threads
-   * can concurrently load values for distinct keys.
+   * Caches loaded by an {@link AsyncCacheLoader} supporting bulk loading will issue a single
+   * request to {@link AsyncCacheLoader#asyncLoadAll} for all keys that are not already present in
+   * the cache. If another call to {@link #get} tries to load the value for a key in {@code keys},
+   * that thread retrieves a future that is completed by this bulk computation. Caches that do not
+   * use a {@link AsyncCacheLoader} with an optimized bulk load implementation will sequentially
+   * load each key by making individual {@link AsyncCacheLoader#asyncLoad} calls. Note that multiple
+   * threads can concurrently load values for distinct keys.
    * <p>
    * Note that duplicate elements in {@code keys}, as determined by {@link Object#equals}, will be
    * ignored.
@@ -75,7 +83,7 @@ public interface AsyncLoadingCache<K, V> extends AsyncCache<K, V> {
    *         {@link AsyncCacheLoader#asyncLoadAll} returns {@code null}, or fails when constructing
    *         the future, in which case the mapping is left unestablished
    */
-  CompletableFuture<Map<K, V>> getAll(Iterable<? extends K> keys);
+  CompletableFuture<Map<K, @NonNull V>> getAll(Iterable<? extends K> keys);
 
   /**
    * Returns a view of the entries stored in this cache as a synchronous {@link LoadingCache}. A

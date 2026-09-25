@@ -15,61 +15,94 @@
  */
 package com.github.benmanes.caffeine.cache;
 
-import static com.github.benmanes.caffeine.cache.RemovalCause.EXPLICIT;
+import static com.github.benmanes.caffeine.cache.AsyncCacheSubject.assertThat;
+import static com.github.benmanes.caffeine.cache.CacheContext.intern;
+import static com.github.benmanes.caffeine.cache.CacheContextSubject.assertThat;
 import static com.github.benmanes.caffeine.cache.RemovalCause.REPLACED;
-import static com.github.benmanes.caffeine.cache.testing.AsyncCacheSubject.assertThat;
-import static com.github.benmanes.caffeine.cache.testing.CacheContext.intern;
-import static com.github.benmanes.caffeine.cache.testing.CacheContextSubject.assertThat;
 import static com.github.benmanes.caffeine.testing.Awaits.await;
 import static com.github.benmanes.caffeine.testing.CollectionSubject.assertThat;
 import static com.github.benmanes.caffeine.testing.FutureSubject.assertThat;
 import static com.github.benmanes.caffeine.testing.IntSubject.assertThat;
+import static com.github.benmanes.caffeine.testing.LoggingEvents.logEvents;
 import static com.github.benmanes.caffeine.testing.MapSubject.assertThat;
+import static com.github.benmanes.caffeine.testing.Nullness.nullBiFunction;
+import static com.github.benmanes.caffeine.testing.Nullness.nullCollection;
+import static com.github.benmanes.caffeine.testing.Nullness.nullFunction;
+import static com.github.benmanes.caffeine.testing.Nullness.nullFuture;
+import static com.github.benmanes.caffeine.testing.Nullness.nullKey;
+import static com.github.benmanes.caffeine.testing.Nullness.nullMap;
+import static com.github.benmanes.caffeine.testing.Nullness.nullValue;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.truth.Truth.assertThat;
+import static java.lang.Thread.State.BLOCKED;
+import static java.lang.Thread.State.WAITING;
+import static java.util.Objects.requireNonNull;
 import static java.util.function.Function.identity;
-import static org.junit.Assert.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.slf4j.event.Level.ERROR;
+import static org.slf4j.event.Level.TRACE;
 import static org.slf4j.event.Level.WARN;
 
+import java.io.IOException;
+import java.time.Duration;
+import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
-import org.testng.annotations.Listeners;
-import org.testng.annotations.Test;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
+import com.github.benmanes.caffeine.cache.CacheSpec.CacheExecutor;
+import com.github.benmanes.caffeine.cache.CacheSpec.CacheExpiry;
+import com.github.benmanes.caffeine.cache.CacheSpec.CacheWeigher;
+import com.github.benmanes.caffeine.cache.CacheSpec.Compute;
+import com.github.benmanes.caffeine.cache.CacheSpec.Expire;
+import com.github.benmanes.caffeine.cache.CacheSpec.ExecutorFailure;
+import com.github.benmanes.caffeine.cache.CacheSpec.Implementation;
+import com.github.benmanes.caffeine.cache.CacheSpec.Listener;
+import com.github.benmanes.caffeine.cache.CacheSpec.Loader;
+import com.github.benmanes.caffeine.cache.CacheSpec.Maximum;
+import com.github.benmanes.caffeine.cache.CacheSpec.Population;
+import com.github.benmanes.caffeine.cache.CacheSpec.ReferenceType;
+import com.github.benmanes.caffeine.cache.CacheSpec.Stats;
 import com.github.benmanes.caffeine.cache.LocalAsyncCache.AsyncBulkCompleter.NullMapCompletionException;
-import com.github.benmanes.caffeine.cache.testing.CacheContext;
-import com.github.benmanes.caffeine.cache.testing.CacheProvider;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.CacheExecutor;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.ExecutorFailure;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Listener;
-import com.github.benmanes.caffeine.cache.testing.CacheSpec.Population;
-import com.github.benmanes.caffeine.cache.testing.CacheValidationListener;
-import com.github.benmanes.caffeine.cache.testing.CheckMaxLogLevel;
-import com.github.benmanes.caffeine.cache.testing.CheckNoEvictions;
-import com.github.benmanes.caffeine.cache.testing.CheckNoStats;
+import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
+import com.github.benmanes.caffeine.testing.ExpectedError;
 import com.github.benmanes.caffeine.testing.Int;
-import com.github.valfirst.slf4jtest.TestLoggerFactory;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import com.google.common.primitives.Ints;
 
 /**
@@ -77,60 +110,60 @@ import com.google.common.primitives.Ints;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@CheckNoEvictions @CheckMaxLogLevel(WARN)
-@Listeners(CacheValidationListener.class)
-@Test(dataProviderClass = CacheProvider.class)
-public final class AsyncCacheTest {
+@CheckNoEvictions @CheckMaxLogLevel(TRACE)
+final class AsyncCacheTest {
 
   /* --------------- getIfPresent --------------- */
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getIfPresent_nullKey(AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThrows(NullPointerException.class, () -> cache.getIfPresent(null));
+  void getIfPresent_nullKey(AsyncCache<Int, Int> cache) {
+    assertThrows(NullPointerException.class, () -> cache.getIfPresent(nullKey()));
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getIfPresent_absent(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getIfPresent_absent(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThat(cache.getIfPresent(context.absentKey())).isNull();
     assertThat(context).stats().hits(0).misses(1).success(0).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING },
       population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
-  public void getIfPresent_present(AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThat(cache.getIfPresent(context.firstKey())).isNotNull();
-    assertThat(cache.getIfPresent(context.middleKey())).isNotNull();
-    assertThat(cache.getIfPresent(context.lastKey())).isNotNull();
+  void getIfPresent_present(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.getIfPresent(context.firstKey()))
+        .succeedsWith(context.original().get(context.firstKey()));
+    assertThat(cache.getIfPresent(context.middleKey()))
+        .succeedsWith(context.original().get(context.middleKey()));
+    assertThat(cache.getIfPresent(context.lastKey()))
+        .succeedsWith(context.original().get(context.lastKey()));
     assertThat(context).stats().hits(3).misses(0).success(0).failures(0);
   }
 
   /* --------------- getFunc --------------- */
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getFunc_nullKey(AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThrows(NullPointerException.class, () -> cache.get(null, key -> null));
+  @ParameterizedTest
+  void getFunc_nullKey(AsyncCache<Int, @Nullable Int> cache) {
+    assertThrows(NullPointerException.class, () -> cache.get(nullKey(), key -> null));
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getFunc_nullLoader(AsyncCache<Int, Int> cache, CacheContext context) {
-    Function<Int, Int> mappingFunction = null;
-    assertThrows(NullPointerException.class, () -> cache.get(context.absentKey(), mappingFunction));
+  @ParameterizedTest
+  void getFunc_nullLoader(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThrows(NullPointerException.class, () -> cache.get(context.absentKey(), nullFunction()));
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getFunc_nullKeyAndLoader(AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThrows(NullPointerException.class, () -> cache.get(null, (Function<Int, Int>) null));
+  @ParameterizedTest
+  void getFunc_nullKeyAndLoader(AsyncCache<Int, Int> cache) {
+    assertThrows(NullPointerException.class, () -> cache.get(nullKey(), nullFunction()));
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getFunc_absent_null(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void getFunc_absent_null(AsyncCache<Int, @Nullable Int> cache, CacheContext context) {
     Int key = context.absentKey();
     var valueFuture = cache.get(key, k -> null);
     assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
@@ -139,9 +172,10 @@ public final class AsyncCacheTest {
     assertThat(cache).doesNotContainKey(key);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(executor = CacheExecutor.THREADED, executorFailure = ExecutorFailure.IGNORED)
-  public void getFunc_absent_null_async(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getFunc_absent_null_async(
+      AsyncCache<Int, @Nullable Int> cache, CacheContext context) {
     Int key = context.absentKey();
     var ready = new AtomicBoolean();
     var done = new AtomicBoolean();
@@ -162,24 +196,26 @@ public final class AsyncCacheTest {
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getFunc_absent_failure(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getFunc_absent_failure(AsyncCache<Int, Int> cache, CacheContext context) {
     var valueFuture = cache.get(context.absentKey(), k -> { throw new IllegalStateException(); });
     assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
 
     assertThat(valueFuture).hasCompletedExceptionally();
     assertThat(cache).doesNotContainKey(context.absentKey());
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow())
-        .hasCauseThat().isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withUnderlyingCause(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
   @CacheSpec(executor = CacheExecutor.THREADED, executorFailure = ExecutorFailure.IGNORED)
-  public void getFunc_absent_failure_async(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getFunc_absent_failure_async(AsyncCache<Int, Int> cache, CacheContext context) {
     Int key = context.absentKey();
     var done = new AtomicBoolean();
     var valueFuture = cache.get(key, k -> {
@@ -196,9 +232,9 @@ public final class AsyncCacheTest {
     assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(executor = CacheExecutor.THREADED, executorFailure = ExecutorFailure.IGNORED)
-  public void getFunc_absent_cancelled(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getFunc_absent_cancelled(AsyncCache<Int, @Nullable Int> cache, CacheContext context) {
     var done = new AtomicBoolean();
     var valueFuture = cache.get(context.absentKey(), k -> {
       await().until(done::get);
@@ -216,18 +252,18 @@ public final class AsyncCacheTest {
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getFunc_absent(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void getFunc_absent(AsyncCache<Int, Int> cache, CacheContext context) {
     Int key = context.absentKey();
     var value = cache.get(key, k -> context.absentValue());
     assertThat(value).succeedsWith(context.absentValue());
     assertThat(context).stats().hits(0).misses(1).success(1).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
-  public void getFunc_present(AsyncCache<Int, Int> cache, CacheContext context) {
-    Function<Int, Int> loader = key -> { throw new RuntimeException(); };
+  void getFunc_present(AsyncCache<Int, Int> cache, CacheContext context) {
+    Function<Int, Int> loader = key -> { throw new AssertionError(); };
     assertThat(cache.get(context.firstKey(), loader))
         .succeedsWith(context.original().get(context.firstKey()));
     assertThat(cache.get(context.middleKey(), loader))
@@ -240,29 +276,44 @@ public final class AsyncCacheTest {
   /* --------------- getBiFunc --------------- */
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_nullKey(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void getBiFunc_nullKey(AsyncCache<Int, Int> cache) {
     assertThrows(NullPointerException.class, () ->
-        cache.get(null, (key, executor) -> CompletableFuture.completedFuture(null)));
+        cache.get(nullKey(), (key, executor) -> CompletableFuture.completedFuture(null)));
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_nullLoader(AsyncCache<Int, Int> cache, CacheContext context) {
-    BiFunction<Int, Executor, CompletableFuture<Int>> mappingFunction = null;
-    assertThrows(NullPointerException.class, () -> cache.get(context.absentKey(), mappingFunction));
+  @ParameterizedTest
+  void getBiFunc_nullLoader(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThrows(NullPointerException.class, () ->
+        cache.get(context.absentKey(), nullBiFunction()));
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
+  void getBiFunc_present_nullLoader(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThrows(NullPointerException.class, () ->
+        cache.get(context.firstKey(), nullBiFunction()));
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_nullKeyAndLoader(AsyncCache<Int, Int> cache, CacheContext context) {
-    BiFunction<Int, Executor, CompletableFuture<Int>> mappingFunction = null;
-    assertThrows(NullPointerException.class, () -> cache.get(null, mappingFunction));
+  @ParameterizedTest
+  void getBiFunc_nullKeyAndLoader(AsyncCache<Int, Int> cache) {
+    assertThrows(NullPointerException.class, () -> cache.get(nullKey(), nullBiFunction()));
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_throwsException(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void getBiFunc_throwsCheckedException(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThrows(IOException.class, () -> cache.get(context.absentKey(),
+        (key, executor) -> { throw uncheckedThrow(new IOException()); }));
+    assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
+    assertThat(cache).doesNotContainKey(context.absentKey());
+  }
+
+  @CacheSpec
+  @ParameterizedTest
+  void getBiFunc_throwsRuntimeException(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThrows(IllegalStateException.class, () ->
         cache.get(context.absentKey(), (key, executor) -> { throw new IllegalStateException(); }));
     assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
@@ -270,24 +321,25 @@ public final class AsyncCacheTest {
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_throwsError(AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThrows(UnknownError.class, () ->
-        cache.get(context.absentKey(), (key, executor) -> { throw new UnknownError(); }));
+  @ParameterizedTest
+  void getBiFunc_throwsError(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThrows(ExpectedError.class, () ->
+        cache.get(context.absentKey(), (key, executor) -> { throw ExpectedError.INSTANCE; }));
     assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
     assertThat(cache).doesNotContainKey(context.absentKey());
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_absent_null(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void getBiFunc_absent_null(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThrows(NullPointerException.class, () ->
-        cache.get(context.absentKey(), (k, executor) -> null));
+        cache.get(context.absentKey(), (k, executor) -> nullFuture()));
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_absent_failure_before(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getBiFunc_absent_failure_before(AsyncCache<Int, Int> cache, CacheContext context) {
     var failedFuture = new CompletableFuture<Int>();
     failedFuture.completeExceptionally(new IllegalStateException());
 
@@ -297,16 +349,18 @@ public final class AsyncCacheTest {
 
     assertThat(valueFuture).hasCompletedExceptionally();
     assertThat(cache).doesNotContainKey(key);
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_absent_failure_after(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getBiFunc_absent_failure_after(AsyncCache<Int, Int> cache, CacheContext context) {
     var failedFuture = new CompletableFuture<Int>();
 
     Int key = context.absentKey();
@@ -316,16 +370,17 @@ public final class AsyncCacheTest {
 
     assertThat(valueFuture).hasCompletedExceptionally();
     assertThat(cache).doesNotContainKey(key);
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_absent_cancelled(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void getBiFunc_absent_cancelled(AsyncCache<Int, Int> cache, CacheContext context) {
     var cancelledFuture = cache.get(context.absentKey(),
         (k, executor) -> new CompletableFuture<>());
     cancelledFuture.cancel(true);
@@ -335,19 +390,19 @@ public final class AsyncCacheTest {
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getBiFunc_absent(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void getBiFunc_absent(AsyncCache<Int, Int> cache, CacheContext context) {
     Int key = context.absentKey();
-    var value = cache.get(key, (k, executor) -> context.absentValue().asFuture());
+    var value = cache.get(key, (k, executor) -> context.absentValue().toFuture());
     assertThat(value).succeedsWith(context.absentValue());
     assertThat(context).stats().hits(0).misses(1).success(1).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
-  public void getBiFunc_present(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getBiFunc_present(AsyncCache<Int, Int> cache, CacheContext context) {
     BiFunction<Int, Executor, CompletableFuture<Int>> loader =
-        (key, executor) -> { throw new RuntimeException(); };
+        (key, executor) -> { throw new AssertionError(); };
     assertThat(cache.get(context.firstKey(), loader))
         .succeedsWith(context.original().get(context.firstKey()));
     assertThat(cache.get(context.middleKey(), loader))
@@ -360,60 +415,70 @@ public final class AsyncCacheTest {
   /* --------------- getAllFunc --------------- */
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_nullKeys(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_nullKeys(AsyncCache<Int, Int> cache) {
     assertThrows(NullPointerException.class, () ->
-        cache.getAll(null, keys -> { throw new AssertionError(); }));
+        cache.getAll(nullCollection(), keys -> { throw new AssertionError(); }));
   }
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_nullKeys_nullFunction(
-      AsyncCache<Int, Int> cache, CacheContext context) {
-    Function<Set<? extends Int>, Map<Int, Int>> mappingFunction = null;
-    assertThrows(NullPointerException.class, () -> cache.getAll(null, mappingFunction));
+  void getAllFunction_nullKeys_nullFunction(AsyncCache<Int, Int> cache) {
+    assertThrows(NullPointerException.class, () -> cache.getAll(nullCollection(), nullFunction()));
   }
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_nullFunction(AsyncCache<Int, Int> cache, CacheContext context) {
-    Function<Set<? extends Int>, Map<Int, Int>> mappingFunction = null;
+  void getAllFunction_nullFunction(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThrows(NullPointerException.class, () ->
-        cache.getAll(context.original().keySet(), mappingFunction));
+        cache.getAll(context.original().keySet(), nullFunction()));
   }
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_nullKey(AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThrows(NullPointerException.class, () ->
-        cache.getAll(Collections.singletonList(null), keys -> { throw new AssertionError(); }));
+  void getAllFunction_nullKey(AsyncCache<Int, Int> cache, CacheContext context) {
+    var key1 = Iterables.get(context.absentKeys(), 0);
+    var key2 = Iterables.get(context.absentKeys(), 1);
+    var inputs = List.of(
+        Collections.singleton(nullKey()),
+        Arrays.asList(key1, nullKey()),
+        Arrays.asList(nullKey(), key1, key2),
+        Arrays.asList(key1, nullKey(), key2),
+        Arrays.asList(key1, key2, nullKey()));
+    for (var keys : inputs) {
+      assertThrows(NullPointerException.class, () -> cache.getAll(
+          keys, keysToLoad -> { throw new AssertionError(); }));
+      assertThat(cache).doesNotContainKey(key1);
+      assertThat(cache).doesNotContainKey(key2);
+    }
   }
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_iterable_empty(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_iterable_empty(AsyncCache<Int, Int> cache) {
     var result = cache.getAll(List.of(), keys -> { throw new AssertionError(); }).join();
     assertThat(result).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_nullLookup(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_nullLookup(AsyncCache<Int, Int> cache, CacheContext context) {
     var result = cache.getAll(context.firstMiddleLastKeys(),
-        keys -> Maps.asMap(keys, Int::negate)).join();
+        keys -> Maps.toMap(keys, Int::negate)).join();
     assertThat(result.containsValue(null)).isFalse();
     assertThat(result.containsKey(null)).isFalse();
     assertThat(result.get(null)).isNull();
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllFunction_immutable_keys(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllFunction_immutable_keys(AsyncCache<Int, Int> cache, CacheContext context) {
     var future = cache.getAll(context.absentKeys(), keys -> {
       keys.clear();
       return Map.of();
@@ -423,50 +488,84 @@ public final class AsyncCacheTest {
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllFunction_immutable_result(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void getAllFunction_immutable_result(AsyncCache<Int, Int> cache, CacheContext context) {
     var result = cache.getAll(context.firstMiddleLastKeys(),
         keys -> keys.stream().collect(toImmutableMap(identity(), identity()))).join();
     assertThrows(UnsupportedOperationException.class, result::clear);
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllFunction_absent_null(AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThat(cache.getAll(context.absentKeys(), keys -> null))
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllFunction_absent_null(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThat(cache.getAll(context.absentKeys(), keys -> nullMap()))
         .failsWith(NullMapCompletionException.class);
     assertThat(context).stats().hits(0).misses(context.absentKeys().size()).success(0).failures(1);
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllFunction_absent_failure(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllFunction_absent_failure(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThat(cache.getAll(context.absentKeys(), keys -> { throw new IllegalStateException(); }))
         .failsWith(CompletionException.class)
         .hasCauseThat().isInstanceOf(IllegalStateException.class);
     int misses = context.absentKeys().size();
     assertThat(context).stats().hits(0).misses(misses).success(0).failures(1);
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow())
-        .hasCauseThat().isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withUnderlyingCause(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
-  @Test(dataProvider = "caches")
+  @CacheSpec
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllFunction_absent_badMap(AsyncCache<Int, Int> cache, CacheContext context) {
+    // A misbehaving result map must fail the batch, not strand the requested proxies.
+    Map<Int, Int> badMap = new AbstractMap<>() {
+      @Override public Set<Entry<Int, Int>> entrySet() {
+        throw new IllegalStateException();
+      }
+    };
+    assertThat(cache.getAll(context.absentKeys(), keys -> badMap))
+        .failsWith(CompletionException.class)
+        .hasCauseThat().isInstanceOf(IllegalStateException.class);
+    for (var key : context.absentKeys()) {
+      assertThat(cache).doesNotContainKey(key);
+    }
+  }
+
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_absent(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_absent(AsyncCache<Int, Int> cache, CacheContext context) {
     var result = cache.getAll(context.absentKeys(), keys -> context.absent()).join();
     int count = context.absentKeys().size();
     assertThat(result).hasSize(count);
     assertThat(context).stats().hits(0).misses(count).success(1).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @CacheSpec
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllFunction_absent_nullMapping(AsyncCache<Int, Int> cache, CacheContext context) {
+    // A null value is not a valid mapping, so the batch is rejected rather than silently dropped
+    context.absent().put(context.absentKey(), nullValue());
+    assertThat(cache.getAll(context.absentKeys(), keys -> context.absent()))
+        .failsWith(CompletionException.class)
+        .hasCauseThat().isInstanceOf(NullPointerException.class);
+    int count = context.absentKeys().size();
+    assertThat(context).stats().hits(0).misses(count).success(0).failures(1);
+    assertThat(cache).hasSize(context.initialSize());
+  }
+
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_present_partial(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_present_partial(AsyncCache<Int, Int> cache, CacheContext context) {
     var expect = new HashMap<Int, Int>();
     expect.put(context.firstKey(), context.firstKey().negate());
     expect.put(context.middleKey(), context.middleKey().negate());
@@ -480,10 +579,10 @@ public final class AsyncCacheTest {
     assertThat(context).stats().hits(expect.size()).misses(0).success(0).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING },
       executor = { CacheExecutor.DIRECT, CacheExecutor.THREADED })
-  public void getAllFunction_exceeds(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_exceeds(AsyncCache<Int, Int> cache, CacheContext context) {
     var result = cache.getAll(context.absentKeys(), keys -> {
       var moreKeys = new ArrayList<Int>(keys);
       for (int i = 0; i < 10; i++) {
@@ -497,9 +596,25 @@ public final class AsyncCacheTest {
     assertThat(context).stats().hits(0).misses(result.size()).success(1).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @CacheSpec
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllFunction_exceeds_nullMapping(AsyncCache<Int, Int> cache, CacheContext context) {
+    // A null value anywhere in the result, even an unrequested extra, rejects the whole batch
+    context.absent().put(context.absentKey(), nullValue());
+    var expectedKeys = Sets.filter(context.absentKeys(), key -> !context.absentKey().equals(key));
+    assertThat(cache.getAll(expectedKeys, keys -> context.absent()))
+        .failsWith(CompletionException.class)
+        .hasCauseThat().isInstanceOf(NullPointerException.class);
+    int count = expectedKeys.size();
+    assertThat(context).stats().hits(0).misses(count).success(0).failures(1);
+    assertThat(cache).hasSize(context.initialSize());
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_different(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_different(AsyncCache<Int, Int> cache, CacheContext context) {
     var actual = Maps.uniqueIndex(context.absentKeys(), Int::negate);
     var result = cache.getAll(context.absentKeys(), keys -> actual).join();
 
@@ -509,10 +624,10 @@ public final class AsyncCacheTest {
     assertThat(context).stats().hits(0).misses(actual.size()).success(1).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_duplicates(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_duplicates(AsyncCache<Int, Int> cache, CacheContext context) {
     var absentKeys = ImmutableSet.copyOf(Iterables.limit(context.absentKeys(),
         Ints.saturatedCast(context.maximum().max() - context.initialSize())));
     var keys = Iterables.concat(absentKeys, absentKeys,
@@ -527,10 +642,10 @@ public final class AsyncCacheTest {
     assertThat(result).containsExactlyKeys(keys);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_present_ordered_absent(
+  void getAllFunction_present_ordered_absent(
       AsyncCache<Int, Int> cache, CacheContext context) {
     var keys = new ArrayList<>(context.absentKeys());
     Collections.shuffle(keys);
@@ -541,10 +656,10 @@ public final class AsyncCacheTest {
     assertThat(result).containsExactlyKeys(keys).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_present_ordered_partial(
+  void getAllFunction_present_ordered_partial(
       AsyncCache<Int, Int> cache, CacheContext context) {
     var keys = new ArrayList<>(context.original().keySet());
     keys.addAll(context.absentKeys());
@@ -556,10 +671,10 @@ public final class AsyncCacheTest {
     assertThat(result).containsExactlyKeys(keys).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_present_ordered_present(
+  void getAllFunction_present_ordered_present(
       AsyncCache<Int, Int> cache, CacheContext context) {
     var keys = new ArrayList<>(context.original().keySet());
     Collections.shuffle(keys);
@@ -568,9 +683,9 @@ public final class AsyncCacheTest {
     assertThat(result).containsExactlyKeys(keys).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_present_ordered_exceeds(
+  void getAllFunction_present_ordered_exceeds(
       AsyncCache<Int, Int> cache, CacheContext context) {
     var keys = new ArrayList<>(context.original().keySet());
     keys.addAll(context.absentKeys());
@@ -586,10 +701,10 @@ public final class AsyncCacheTest {
     assertThat(result).containsExactlyKeys(keys).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING },
       executor = CacheExecutor.THREADED)
-  public void getAllFunction_canceled_individual(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_canceled_individual(AsyncCache<Int, Int> cache, CacheContext context) {
     var ready = new AtomicBoolean();
     var bulk = cache.getAll(context.absentKeys(), keysToLoad -> {
       await().untilTrue(ready);
@@ -597,6 +712,7 @@ public final class AsyncCacheTest {
     });
     for (var key : context.absentKeys()) {
       var future = cache.getIfPresent(key);
+      requireNonNull(future);
       future.cancel(true);
       assertThat(future).hasCompletedExceptionally();
     }
@@ -610,16 +726,17 @@ public final class AsyncCacheTest {
     });
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING },
       executor = CacheExecutor.THREADED)
-  public void getAllFunction_canceled_bulk(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_canceled_bulk(AsyncCache<Int, Int> cache, CacheContext context) {
     var ready = new AtomicBoolean();
     var bulk = cache.getAll(context.absentKeys(), keysToLoad -> {
       await().untilTrue(ready);
       return Maps.toMap(keysToLoad, Int::negate);
     });
-    var pending = context.absentKeys().stream().map(cache::getIfPresent).collect(toImmutableList());
+    var pending = context.absentKeys().stream()
+        .map(key -> requireNonNull(cache.getIfPresent(key))).collect(toImmutableList());
 
     bulk.cancel(true);
     ready.set(true);
@@ -632,9 +749,10 @@ public final class AsyncCacheTest {
     }
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllFunction_badLoader(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllFunction_badLoader(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThat(cache.getAll(context.absentKeys(), keysToLoad -> { throw new LoadAllException(); }))
         .failsWith(CompletionException.class).hasCauseThat().isInstanceOf(LoadAllException.class);
     assertThat(cache).hasSize(context.initialSize());
@@ -643,62 +761,62 @@ public final class AsyncCacheTest {
   /* --------------- getAllBiFunc --------------- */
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_nullKeys(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_nullKeys(AsyncCache<Int, Int> cache) {
     assertThrows(NullPointerException.class, () ->
-        cache.getAll(null, (keys, executor) -> { throw new AssertionError(); }));
+        cache.getAll(nullCollection(), (keys, executor) -> { throw new AssertionError(); }));
   }
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_nullKeys_nullBifunction(
-      AsyncCache<Int, Int> cache, CacheContext context) {
-    BiFunction<Set<? extends Int>, Executor, CompletableFuture<Map<Int, Int>>> f = null;
-    assertThrows(NullPointerException.class, () -> cache.getAll(null, f));
+  void getAllBifunction_nullKeys_nullBifunction(AsyncCache<Int, Int> cache) {
+    assertThrows(NullPointerException.class, () ->
+        cache.getAll(nullCollection(), nullBiFunction()));
   }
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_nullBifunction(AsyncCache<Int, Int> cache, CacheContext context) {
-    BiFunction<Set<? extends Int>, Executor, CompletableFuture<Map<Int, Int>>> f = null;
-    assertThrows(NullPointerException.class, () -> cache.getAll(context.original().keySet(), f));
+  void getAllBifunction_nullBifunction(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThrows(NullPointerException.class, () ->
+        cache.getAll(context.original().keySet(), nullBiFunction()));
   }
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_nullKey(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_nullKey(AsyncCache<Int, Int> cache) {
     assertThrows(NullPointerException.class, () -> {
-      cache.getAll(Collections.singletonList(null),
+      cache.getAll(Collections.singletonList(nullKey()),
           (keys, executor) -> { throw new AssertionError(); });
     });
   }
 
   @CheckNoStats
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_iterable_empty(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_iterable_empty(AsyncCache<Int, Int> cache) {
     var result = cache.getAll(List.of(),
         (keys, executor) -> { throw new AssertionError(); }).join();
     assertThat(result).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBiFunction_nullLookup(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBiFunction_nullLookup(AsyncCache<Int, Int> cache, CacheContext context) {
     var result = cache.getAll(context.firstMiddleLastKeys(), (keys, executor) ->
-        CompletableFuture.completedFuture(Maps.asMap(keys, Int::negate))).join();
+        CompletableFuture.completedFuture(Maps.toMap(keys, Int::negate))).join();
     assertThat(result.containsValue(null)).isFalse();
     assertThat(result.containsKey(null)).isFalse();
     assertThat(result.get(null)).isNull();
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllBifunction_immutable_keys(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_immutable_keys(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThrows(UnsupportedOperationException.class, () -> {
       cache.getAll(context.absentKeys(), (keys, executor) -> {
         throw assertThrows(UnsupportedOperationException.class, keys::clear);
@@ -707,8 +825,8 @@ public final class AsyncCacheTest {
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllBifunction_immutable_result(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void getAllBifunction_immutable_result(AsyncCache<Int, Int> cache, CacheContext context) {
     var result = cache.getAll(context.firstMiddleLastKeys(), (keys, executor) -> {
       return CompletableFuture.completedFuture(
           keys.stream().collect(toImmutableMap(identity(), identity())));
@@ -717,38 +835,120 @@ public final class AsyncCacheTest {
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllBifunction_absent_null(AsyncCache<Int, Int> cache, CacheContext context) {
-    var future = CompletableFuture.completedFuture((Map<Int, Int>) null);
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_absent_null(AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = CompletableFuture.completedFuture(nullMap());
     assertThat(cache.getAll(context.absentKeys(), (keys, executor) -> future))
         .failsWith(NullMapCompletionException.class);
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllBifunction_absent_nullValue(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_absent_nullValue(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThrows(NullPointerException.class, () ->
-        cache.getAll(context.absentKeys(), (keys, executor) -> null));
+        cache.getAll(context.absentKeys(), (keys, executor) -> nullFuture()));
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllBifunction_absent_failure(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_absent_failure_checkedException(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = cache.getAll(context.absentKeys(),
+        (keys, executor) -> CompletableFuture.failedFuture(new IOException()));
+    assertThat(future).failsWith(CompletionException.class)
+        .hasCauseThat().isInstanceOf(IOException.class);
+    assertThat(context).stats().hits(0).misses(context.absentKeys().size()).success(0).failures(1);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IOException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @CacheSpec
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_absent_failure_runtimeException(
+      AsyncCache<Int, Int> cache, CacheContext context) {
     var future = cache.getAll(context.absentKeys(),
         (keys, executor) -> CompletableFuture.failedFuture(new IllegalStateException()));
     assertThat(future).failsWith(CompletionException.class)
         .hasCauseThat().isInstanceOf(IllegalStateException.class);
     assertThat(context).stats().hits(0).misses(context.absentKeys().size()).success(0).failures(1);
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllBifunction_absent_throwsException(
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_absent_failure_error(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = cache.getAll(context.absentKeys(),
+        (keys, executor) -> CompletableFuture.failedFuture(ExpectedError.INSTANCE));
+    assertThat(future).failsWith(CompletionException.class)
+        .hasCauseThat().isInstanceOf(ExpectedError.class);
+    assertThat(context).stats().hits(0).misses(context.absentKeys().size()).success(0).failures(1);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(ExpectedError.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @CacheSpec
+  @ParameterizedTest
+  void getAllBifunction_absent_failure_timeout(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = cache.getAll(context.absentKeys(),
+        (keys, executor) -> CompletableFuture.failedFuture(new TimeoutException()));
+    assertThat(future).failsWith(CompletionException.class)
+        .hasCauseThat().isInstanceOf(TimeoutException.class);
+    assertThat(context).stats().hits(0).misses(context.absentKeys().size()).success(0).failures(1);
+    assertThat(logEvents()).isEmpty();
+  }
+
+  @CacheSpec
+  @ParameterizedTest
+  void getAllBifunction_absent_failure_canceled(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = cache.getAll(context.absentKeys(),
+        (keys, executor) -> CompletableFuture.failedFuture(new CancellationException()));
+    assertThat(future).failsWith(CompletionException.class)
+        .hasCauseThat().isInstanceOf(CancellationException.class);
+    assertThat(context).stats().hits(0).misses(context.absentKeys().size()).success(0).failures(1);
+    assertThat(logEvents()).isEmpty();
+  }
+
+  @CacheSpec
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_absent_throwsCheckedException(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var error = assertThrows(CompletionException.class, () -> {
+      cache.getAll(context.absentKeys(),
+          (keys, executor) -> { throw uncheckedThrow(new IOException()); });
+    });
+    assertThat(error).hasCauseThat().isInstanceOf(IOException.class);
+
+    int misses = context.absentKeys().size();
+    assertThat(context).stats().hits(0).misses(misses).success(0).failures(1);
+    assertThat(cache).doesNotContainKey(context.absentKey());
+  }
+
+  @CacheSpec
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_absent_throwsRuntimeException(
       AsyncCache<Int, Int> cache, CacheContext context) {
     assertThrows(IllegalStateException.class, () -> {
       cache.getAll(context.absentKeys(),
@@ -761,19 +961,20 @@ public final class AsyncCacheTest {
   }
 
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void getAllBifunction_absent_throwsError(
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_absent_throwsError(
       AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThrows(UnknownError.class, () ->
-        cache.getAll(context.absentKeys(), (keys, executor) -> { throw new UnknownError(); }));
+    assertThrows(ExpectedError.class, () ->
+        cache.getAll(context.absentKeys(), (keys, executor) -> { throw ExpectedError.INSTANCE; }));
     int misses = context.absentKeys().size();
     assertThat(context).stats().hits(0).misses(misses).success(0).failures(1);
     assertThat(cache).doesNotContainKey(context.absentKey());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_absent(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_absent(AsyncCache<Int, Int> cache, CacheContext context) {
     var future = cache.getAll(context.absentKeys(),
         (keys, executor) -> CompletableFuture.completedFuture(context.absent()));
     assertThat(future).succeedsWith(context.absent());
@@ -782,10 +983,35 @@ public final class AsyncCacheTest {
     assertThat(context).stats().hits(0).misses(count).success(1).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @CacheSpec
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_absent_nullMapping(AsyncCache<Int, Int> cache, CacheContext context) {
+    // A null value is not a valid mapping, so the batch is rejected rather than silently dropped
+    context.absent().put(context.absentKey(), nullValue());
+    assertThat(cache.getAll(context.absentKeys(), (keys, executor) ->
+        CompletableFuture.completedFuture(context.absent())))
+        .failsWith(CompletionException.class)
+        .hasCauseThat().isInstanceOf(NullPointerException.class);
+    int count = context.absentKeys().size();
+    assertThat(context).stats().hits(0).misses(count).success(0).failures(1);
+    assertThat(cache).hasSize(context.initialSize());
+  }
+
+  @CacheSpec
+  @ParameterizedTest
+  void getAllBifunction_absent_emptyMap(AsyncCache<Int, Int> cache, CacheContext context) {
+    var result = cache.getAll(context.absentKeys(), (keys, executor) ->
+        CompletableFuture.completedFuture(Map.of())).join();
+    assertThat(result).isEmpty();
+    int count = context.absentKeys().size();
+    assertThat(context).stats().hits(0).misses(count).success(0).failures(1);
+  }
+
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_present_partial(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_present_partial(AsyncCache<Int, Int> cache, CacheContext context) {
     var expect = new HashMap<Int, Int>();
     expect.put(context.firstKey(), context.firstKey().negate());
     expect.put(context.middleKey(), context.middleKey().negate());
@@ -800,10 +1026,10 @@ public final class AsyncCacheTest {
     assertThat(context).stats().hits(expect.size()).misses(0).success(0).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING },
       executor = { CacheExecutor.DIRECT, CacheExecutor.THREADED })
-  public void getAllBifunction_exceeds(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_exceeds(AsyncCache<Int, Int> cache, CacheContext context) {
     var result = cache.getAll(context.absentKeys(), (keys, executor) -> {
       var moreKeys = new ArrayList<Int>(keys);
       for (int i = 0; i < 10; i++) {
@@ -817,9 +1043,26 @@ public final class AsyncCacheTest {
     assertThat(context).stats().hits(0).misses(result.size()).success(1).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @CacheSpec
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  void getAllBifunction_exceeds_nullMapping(AsyncCache<Int, Int> cache, CacheContext context) {
+    // A null value anywhere in the result, even an unrequested extra, rejects the whole batch
+    context.absent().put(context.absentKey(), nullValue());
+    var expectedKeys = Sets.filter(context.absentKeys(), key -> !context.absentKey().equals(key));
+    assertThat(cache.getAll(expectedKeys, (keys, executor) ->
+        CompletableFuture.completedFuture(context.absent())))
+        .failsWith(CompletionException.class)
+        .hasCauseThat().isInstanceOf(NullPointerException.class);
+    int count = expectedKeys.size();
+    assertThat(context).stats().hits(0).misses(count).success(0).failures(1);
+    assertThat(cache).hasSize(context.initialSize());
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_different(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_different(AsyncCache<Int, Int> cache, CacheContext context) {
     var actual = Maps.uniqueIndex(context.absentKeys(), Int::negate);
     var result = cache.getAll(context.absentKeys(), (keys, executor) -> {
       return CompletableFuture.completedFuture(actual);
@@ -831,10 +1074,10 @@ public final class AsyncCacheTest {
     assertThat(context).stats().hits(0).misses(actual.size()).success(1).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_duplicates(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_duplicates(AsyncCache<Int, Int> cache, CacheContext context) {
     var absentKeys = ImmutableSet.copyOf(Iterables.limit(context.absentKeys(),
         Ints.saturatedCast(context.maximum().max() - context.initialSize())));
     var keys = Iterables.concat(absentKeys, absentKeys,
@@ -850,10 +1093,10 @@ public final class AsyncCacheTest {
         .misses(absentKeys.size()).success(1).failures(0);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_present_ordered_absent(
+  void getAllBifunction_present_ordered_absent(
       AsyncCache<Int, Int> cache, CacheContext context) {
     var keys = new ArrayList<>(context.absentKeys());
     Collections.shuffle(keys);
@@ -866,10 +1109,10 @@ public final class AsyncCacheTest {
     assertThat(result).containsExactlyKeys(keys).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_present_ordered_partial(
+  void getAllBifunction_present_ordered_partial(
       AsyncCache<Int, Int> cache, CacheContext context) {
     var keys = new ArrayList<>(context.original().keySet());
     keys.addAll(context.absentKeys());
@@ -883,10 +1126,10 @@ public final class AsyncCacheTest {
     assertThat(result).containsExactlyKeys(keys).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL },
       removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_present_ordered_present(
+  void getAllBifunction_present_ordered_present(
       AsyncCache<Int, Int> cache, CacheContext context) {
     var keys = new ArrayList<>(context.original().keySet());
     Collections.shuffle(keys);
@@ -896,10 +1139,10 @@ public final class AsyncCacheTest {
     assertThat(result).containsExactlyKeys(keys).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING },
       executor = CacheExecutor.THREADED)
-  public void getAllBifunction_canceled_individual(
+  void getAllBifunction_canceled_individual(
       AsyncCache<Int, Int> cache, CacheContext context) {
     var ready = new AtomicBoolean();
     var bulk = cache.getAll(context.absentKeys(), (keysToLoad, executor) -> {
@@ -910,6 +1153,7 @@ public final class AsyncCacheTest {
     });
     for (var key : context.absentKeys()) {
       var future = cache.getIfPresent(key);
+      requireNonNull(future);
       future.cancel(true);
       assertThat(future).hasCompletedExceptionally();
     }
@@ -923,10 +1167,10 @@ public final class AsyncCacheTest {
     });
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING },
       executor = CacheExecutor.THREADED)
-  public void getAllBifunction_canceled_bulk(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_canceled_bulk(AsyncCache<Int, Int> cache, CacheContext context) {
     var ready = new AtomicBoolean();
     var bulk = cache.getAll(context.absentKeys(), (keysToLoad, executor) -> {
       return CompletableFuture.supplyAsync(() -> {
@@ -934,7 +1178,8 @@ public final class AsyncCacheTest {
         return Maps.toMap(keysToLoad, Int::negate);
       }, executor);
     });
-    var pending = context.absentKeys().stream().map(cache::getIfPresent).collect(toImmutableList());
+    var pending = context.absentKeys().stream()
+        .map(key -> requireNonNull(cache.getIfPresent(key))).collect(toImmutableList());
     bulk.cancel(true);
     ready.set(true);
 
@@ -946,9 +1191,9 @@ public final class AsyncCacheTest {
     }
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_present_ordered_exceeds(
+  void getAllBifunction_present_ordered_exceeds(
       AsyncCache<Int, Int> cache, CacheContext context) {
     var keys = new ArrayList<>(context.original().keySet());
     keys.addAll(context.absentKeys());
@@ -964,17 +1209,18 @@ public final class AsyncCacheTest {
     assertThat(result).containsExactlyKeys(keys).inOrder();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_badLoader(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_badLoader(AsyncCache<Int, Int> cache, CacheContext context) {
     assertThrows(LoadAllException.class, () ->
         cache.getAll(context.absentKeys(), (keys, executor) -> { throw new LoadAllException(); }));
     assertThat(cache).hasSize(context.initialSize());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_early_success(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_early_success(AsyncCache<Int, Int> cache, CacheContext context) {
     var key = context.absentKeys().iterator().next();
     var value = Int.valueOf(Integer.MAX_VALUE);
 
@@ -982,6 +1228,7 @@ public final class AsyncCacheTest {
     var result = cache.getAll(context.absentKeys(), (keysToLoad, executor) -> bulk);
     var future = cache.asMap().get(key);
 
+    requireNonNull(future);
     future.complete(value);
     bulk.complete(context.absent()); // obtrudes the future's value
 
@@ -990,15 +1237,17 @@ public final class AsyncCacheTest {
     assertThat(cache.synchronous().asMap()).containsAtLeastEntriesIn(context.absent());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void getAllBifunction_early_failure(AsyncCache<Int, Int> cache, CacheContext context) {
+  void getAllBifunction_early_failure(AsyncCache<Int, Int> cache, CacheContext context) {
     var key = context.absentKeys().iterator().next();
     var error = new IllegalStateException();
 
     var bulk = new CompletableFuture<Map<Int, Int>>();
     var result = cache.getAll(context.absentKeys(), (keysToLoad, executor) -> bulk);
     var future = cache.asMap().get(key);
+
+    requireNonNull(future);
     future.completeExceptionally(error);
 
     bulk.complete(context.absent());
@@ -1010,117 +1259,402 @@ public final class AsyncCacheTest {
     } else {
       assertThat(result.join()).containsExactlyEntriesIn(context.absent());
     }
-    assertThat(TestLoggerFactory.getLoggingEvents()).isEmpty();
+    assertThat(logEvents()).isEmpty();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, expiry = CacheExpiry.MOCKITO)
+  void getAllBifunction_expiryFails(AsyncCache<Int, Int> cache, CacheContext context) {
+    var error = new IllegalStateException();
+    var pending = new ArrayList<CompletableFuture<Int>>();
+    var absentKeys = List.of(context.absentKey(), Iterables.get(context.absentKeys(), 1));
+    when(context.expiry().expireAfterRead(any(), any(), anyLong(), anyLong()))
+        .thenAnswer(invocation -> {
+          for (var key : absentKeys) {
+            pending.add(requireNonNull(cache.asMap().get(key)));
+          }
+          throw error;
+        }).thenReturn(context.expiryTime().timeNanos());
+
+    var keys = new ArrayList<>(absentKeys);
+    keys.add(context.firstKey());
+    var thrown = assertThrows(IllegalStateException.class, () ->
+        cache.getAll(keys, (keysToLoad, executor) -> { throw new AssertionError(); }));
+    assertThat(thrown).isSameInstanceAs(error);
+
+    assertThat(pending).hasSize(absentKeys.size());
+    for (var future : pending) {
+      assertThat(future).isDone();
+      assertThat(future).failsWith(CompletionException.class)
+          .hasCauseThat().isSameInstanceAs(error);
+    }
+    assertThat(cache).containsExactlyEntriesIn(context.original());
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(0);
+    assertThat(cache.get(context.absentKey(), (key, executor) -> context.absentValue().toFuture()))
+        .succeedsWith(context.absentValue());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.SINGLETON, expiry = CacheExpiry.MOCKITO)
+  void getAllBifunction_expiryFails_replaced(AsyncCache<Int, Int> cache, CacheContext context) {
+    var error = new IllegalStateException();
+    var replacement = context.absentValue().toFuture();
+    var pending = new AtomicReference<@Nullable CompletableFuture<Int>>();
+    when(context.expiry().expireAfterRead(any(), any(), anyLong(), anyLong()))
+        .thenAnswer(invocation -> {
+          pending.set(requireNonNull(cache.asMap().get(context.absentKey())));
+          var writer = CompletableFuture.runAsync(() -> cache.put(context.absentKey(), replacement),
+              ConcurrentTestHarness.executor);
+          await().until(writer::isDone);
+          writer.join();
+          throw error;
+        }).thenReturn(context.expiryTime().timeNanos());
+
+    var keys = List.of(context.absentKey(), context.firstKey());
+    var thrown = assertThrows(IllegalStateException.class, () ->
+        cache.getAll(keys, (keysToLoad, executor) -> { throw new AssertionError(); }));
+    assertThat(thrown).isSameInstanceAs(error);
+
+    var future = requireNonNull(pending.get());
+    assertThat(future).isDone();
+    assertThat(future).failsWith(CompletionException.class)
+        .hasCauseThat().isSameInstanceAs(error);
+    assertThat(cache.asMap().get(context.absentKey())).isSameInstanceAs(replacement);
+    assertThat(cache.synchronous().asMap()).containsAtLeastEntriesIn(context.original());
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(0);
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  @CacheSpec(population = Population.EMPTY, stats = Stats.ENABLED,
+      maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.MOCKITO)
+  void getAll_weigherFails_preservesConcurrentReplacement(
+      AsyncCache<Int, Int> cache, CacheContext context) throws InterruptedException {
+    var entered = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var error = new IllegalStateException();
+    when(context.weigher().weigh(any(), any())).thenAnswer(invocation -> {
+      entered.countDown();
+      assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+      throw error;
+    }).thenReturn(99);
+
+    var key = context.absentKey();
+    var replacement = intern(Int.valueOf(99)).toFuture();
+    var loader = new CompletableFuture<Map<Int, Int>>();
+    var result = cache.getAll(Set.of(key), (keys, executor) -> loader);
+    var completion = CompletableFuture.runAsync(
+        () -> loader.complete(Map.of(key, context.absentValue())), ConcurrentTestHarness.executor);
+    try {
+      assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+      cache.put(key, replacement);
+    } finally {
+      release.countDown();
+      await().until(completion::isDone);
+    }
+    assertThat(completion).succeedsWithNull();
+    assertThat(result).isDone();
+    assertThat(result).failsWith(CompletionException.class)
+        .hasCauseThat().isSameInstanceAs(error);
+
+    cache.synchronous().cleanUp();
+    assertThat(cache.asMap().get(key)).isSameInstanceAs(replacement);
+    assertThat(cache).containsExactlyEntriesIn(Map.of(key, Int.valueOf(99)));
+    assertThat(context).hasWeightedSize(99);
+    assertThat(context).stats().hits(0).misses(1).success(0).failures(1);
   }
 
   /* --------------- put --------------- */
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void put_nullKey(AsyncCache<Int, Int> cache, CacheContext context) {
-    var value = context.absentValue().asFuture();
-    assertThrows(NullPointerException.class, () -> cache.put(null, value));
+  void put_nullKey(AsyncCache<Int, Int> cache, CacheContext context) {
+    var value = context.absentValue().toFuture();
+    assertThrows(NullPointerException.class, () -> cache.put(nullKey(), value));
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void put_nullValue(AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThrows(NullPointerException.class, () -> cache.put(context.absentKey(), null));
+  void put_nullValue(AsyncCache<Int, Int> cache, CacheContext context) {
+    assertThrows(NullPointerException.class, () -> cache.put(context.absentKey(), nullFuture()));
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void put_nullKeyAndValue(AsyncCache<Int, Int> cache, CacheContext context) {
-    assertThrows(NullPointerException.class, () -> cache.put(null, null));
+  void put_nullKeyAndValue(AsyncCache<Int, Int> cache) {
+    assertThrows(NullPointerException.class, () -> cache.put(nullKey(), nullFuture()));
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void put_insert_failure_before(AsyncCache<Int, Int> cache, CacheContext context) {
-    var failedFuture = CompletableFuture.completedFuture((Int) null);
-    failedFuture.completeExceptionally(new IllegalStateException());
+  void put_insert_failure_before(AsyncCache<Int, Int> cache, CacheContext context) {
+    var failedFuture = CompletableFuture.<Int>failedFuture(new IllegalStateException());
 
     cache.put(context.absentKey(), failedFuture);
     assertThat(cache).hasSize(context.initialSize());
     assertThat(cache).doesNotContainKey(context.absentKey());
-    assertThat(TestLoggerFactory.getLoggingEvents()).isEmpty();
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void put_insert_failure_after(AsyncCache<Int, Int> cache, CacheContext context) {
+  void put_insert_failure_after(AsyncCache<Int, Int> cache, CacheContext context) {
     var failedFuture = new CompletableFuture<Int>();
 
     cache.put(context.absentKey(), failedFuture);
     failedFuture.completeExceptionally(new IllegalStateException());
     assertThat(cache).doesNotContainKey(context.absentKey());
     assertThat(cache).hasSize(context.initialSize());
-
-    var event = Iterables.getOnlyElement(TestLoggerFactory.getLoggingEvents());
-    assertThat(event.getFormattedMessage()).isEqualTo("Exception thrown during asynchronous load");
-    assertThat(event.getThrowable().orElseThrow()).isInstanceOf(IllegalStateException.class);
-    assertThat(event.getLevel()).isEqualTo(WARN);
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
-  public void put_insert(AsyncCache<Int, Int> cache, CacheContext context) {
-    var value = context.absentValue().asFuture();
-    cache.put(context.absentKey(), value);
+  void put_insert_failure_after_noLog(AsyncCache<Int, Int> cache, CacheContext context) {
+    var future1 = new CompletableFuture<@Nullable Int>();
+    var future2 = new CompletableFuture<Int>();
+    var future3 = new CompletableFuture<Int>();
+    cache.put(Iterables.get(context.absentKeys(), 0), future1);
+    cache.put(Iterables.get(context.absentKeys(), 1), future2);
+    cache.put(Iterables.get(context.absentKeys(), 3), future3);
+    future1.complete(null);
+    future2.completeExceptionally(new TimeoutException());
+    future3.completeExceptionally(new CancellationException());
+    assertThat(cache).doesNotContainKey(Iterables.get(context.absentKeys(), 0));
+    assertThat(cache).doesNotContainKey(Iterables.get(context.absentKeys(), 1));
+    assertThat(cache).doesNotContainKey(Iterables.get(context.absentKeys(), 2));
+    assertThat(cache).hasSize(context.initialSize());
+    assertThat(logEvents()).isEmpty();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
+  void put_insert_null(AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = CompletableFuture.completedFuture(nullValue());
+
+    cache.put(context.absentKey(), future);
+    assertThat(cache).hasSize(context.initialSize());
+    assertThat(cache).doesNotContainKey(context.absentKey());
+    assertThat(logEvents()).isEmpty();
+  }
+
+  @ParameterizedTest
+  @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
+  void put_insert(AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), future);
     assertThat(cache).hasSize(context.initialSize() + 1);
-    assertThat(context).stats().hits(0).misses(0).success(1).failures(0);
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(0);
+    assertThat(cache.getIfPresent(context.absentKey())).isSameInstanceAs(future);
+
+    future.complete(context.absentValue());
+    assertThat(cache).hasSize(context.initialSize() + 1);
+    assertThat(context).stats().hits(1).misses(0).success(1).failures(0);
     assertThat(cache).containsEntry(context.absentKey(), context.absentValue());
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CacheSpec(removalListener = { Listener.DISABLED, Listener.REJECTING })
+  void put_insert_incomplete(AsyncCache<Int, Int> cache, CacheContext context) {
+    var value = context.absentValue().toFuture();
+    cache.put(context.absentKey(), value);
+    assertThat(cache).hasSize(context.initialSize() + 1);
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(0);
+    assertThat(cache).containsEntry(context.absentKey(), context.absentValue());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, implementation = Implementation.Caffeine,
+      compute = Compute.ASYNC, keys = ReferenceType.STRONG, values = ReferenceType.STRONG,
+      stats = Stats.DISABLED, maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.TEN,
+      loader = Loader.IDENTITY, executor = CacheExecutor.DEFAULT,
+      removalListener = Listener.DISABLED, evictionListener = Listener.DISABLED,
+      expiry = CacheExpiry.MOCKITO, expiryTime = Expire.ONE_MINUTE,
+      expireAfterAccess = Expire.DISABLED, expireAfterWrite = Expire.DISABLED,
+      refreshAfterWrite = Expire.DISABLED)
+  void put_completesBeforeRegistration_finalizesMetadata(CacheContext context) {
+    var future = new CompletableFuture<Int>();
+    var completedOnSubmit = new AtomicBoolean();
+    var dependentsAtCompletion = new AtomicInteger(-1);
+    context.caffeine().executor(task -> {
+      if (completedOnSubmit.compareAndSet(false, true)) {
+        dependentsAtCompletion.set(future.getNumberOfDependents());
+        future.complete(context.absentValue());
+      }
+      task.run();
+    });
+    var cache = context.buildAsync(Loader.IDENTITY);
+    cache.put(context.absentKey(), future);
+    cache.synchronous().cleanUp();
+
+    assertThat(completedOnSubmit.get()).isTrue();
+    assertThat(dependentsAtCompletion.get()).isEqualTo(0);
+    assertThat(future).succeedsWith(context.absentValue());
+    assertThat(cache).containsEntry(context.absentKey(), context.absentValue());
+    assertThat(cache.synchronous().policy().eviction().orElseThrow().weightedSize()).hasValue(10);
+    assertThat(cache.synchronous().policy().expireVariably().orElseThrow()
+        .getExpiresAfter(context.absentKey())).hasValue(Duration.ofMinutes(1));
+    verify(context.expiry()).expireAfterCreate(any(), any(), anyLong());
+    verify(context.expiry(), never()).expireAfterUpdate(any(), any(), anyLong(), anyLong());
+
+    context.ticker().advance(Duration.ofMinutes(2));
+    cache.synchronous().cleanUp();
+    assertThat(cache).isEmpty();
+  }
+
+  @CheckNoStats
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY)
+  void put_readyFuture_doesNotRecordALoad(AsyncCache<Int, Int> cache, CacheContext context) {
+    cache.put(context.absentKey(), context.absentValue().toFuture());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, stats = Stats.ENABLED)
+  void put_inFlightFuture_recordsTheLoad(AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), future);
+    future.complete(context.absentValue());
+
+    assertThat(context).stats().hits(0).misses(0).success(1).failures(0);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, expiry = CacheExpiry.MOCKITO)
+  void put_sameInstance_completionRegisteredOnce(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), future);
+    cache.put(context.absentKey(), future);
+    assertThat(cache).hasSize(context.initialSize() + 1);
+    assertThat(cache.getIfPresent(context.absentKey())).isSameInstanceAs(future);
+
+    // A write records no load, so the finalization the handler performs is what counts it, arriving
+    // as the creation that the async sentinel routes it to
+    future.complete(context.absentValue());
+    assertThat(context).removalNotifications().isEmpty();
+    verify(context.expiry()).expireAfterCreate(any(), any(), anyLong());
+    verify(context.expiry(), never()).expireAfterUpdate(any(), any(), anyLong(), anyLong());
+    assertThat(context).stats().hits(1).misses(0).success(1).failures(0);
+    assertThat(cache).containsEntry(context.absentKey(), context.absentValue());
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY, expiry = CacheExpiry.MOCKITO)
+  void put_reregisteredInstance_completionRegisteredTwice(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var f1 = new CompletableFuture<Int>();
+    var f2 = new CompletableFuture<Int>();
+    cache.put(context.absentKey(), f1);
+    cache.put(context.absentKey(), f2);
+    cache.put(context.absentKey(), f1);
+    assertThat(cache).hasSize(context.initialSize() + 1);
+    assertThat(cache.getIfPresent(context.absentKey())).isSameInstanceAs(f1);
+
+    // Re-inserting a previously registered instance re-registers its completion handler, as the
+    // identity dedup only skips consecutive same-instance puts. A single completion then runs
+    // handleCompletion twice, but the second finalizes nothing: the entry no longer carries the
+    // async sentinel, so the quiet replace preserves its expiration rather than charging the
+    // creation again as an update. The load is still counted once per handler.
+    f1.complete(context.absentValue());
+    verify(context.expiry()).expireAfterCreate(any(), any(), anyLong());
+    verify(context.expiry(), never()).expireAfterUpdate(any(), any(), anyLong(), anyLong());
+    assertThat(context).stats().hits(1).misses(0).success(2).failures(0);
+    assertThat(cache).containsEntry(context.absentKey(), context.absentValue());
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
   @CacheSpec(population = { Population.SINGLETON, Population.FULL })
-  public void put_replace_failure_before(AsyncCache<Int, Int> cache, CacheContext context) {
-    var failedFuture = CompletableFuture.completedFuture((Int) null);
-    failedFuture.completeExceptionally(new IllegalStateException());
+  void put_replace_failure_before(AsyncCache<Int, Int> cache, CacheContext context) {
+    var failedFuture = CompletableFuture.<Int>failedFuture(new IllegalStateException());
 
     cache.put(context.middleKey(), failedFuture);
     assertThat(cache).hasSize(context.initialSize() - 1);
-    assertThat(cache).doesNotContainKey(context.absentKey());
-    assertThat(TestLoggerFactory.getLoggingEvents()).isEmpty();
+    assertThat(cache).doesNotContainKey(context.middleKey());
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
   @CacheSpec(population = { Population.SINGLETON, Population.FULL })
-  public void put_replace_failure_after(AsyncCache<Int, Int> cache, CacheContext context) {
-    var failedFuture = CompletableFuture.completedFuture((Int) null);
+  void put_replace_failure_after(AsyncCache<Int, Int> cache, CacheContext context) {
+    var failedFuture = new CompletableFuture<Int>();
 
     cache.put(context.middleKey(), failedFuture);
     failedFuture.completeExceptionally(new IllegalStateException());
-    assertThat(cache).doesNotContainKey(context.absentKey());
+    assertThat(cache).doesNotContainKey(context.middleKey());
     assertThat(cache).hasSize(context.initialSize() - 1);
-    assertThat(TestLoggerFactory.getLoggingEvents()).isEmpty();
+    assertThat(logEvents()
+        .withMessage("Exception thrown during asynchronous load")
+        .withThrowable(IllegalStateException.class)
+        .withLevel(WARN)
+        .exclusively())
+        .hasSize(1);
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
-  public void put_replace_nullValue(AsyncCache<Int, Int> cache, CacheContext context) {
+  void put_replace_nullValue(AsyncCache<Int, Int> cache, CacheContext context) {
     var removed = new HashMap<Int, Int>();
-    var value = CompletableFuture.completedFuture((Int) null);
+    var value = CompletableFuture.completedFuture(nullValue());
     for (Int key : context.firstMiddleLastKeys()) {
       cache.put(key, value);
       assertThat(cache).doesNotContainKey(key);
-      removed.put(key, context.original().get(key));
+      removed.put(key, requireNonNull(context.original().get(key)));
     }
     int count = context.firstMiddleLastKeys().size();
     assertThat(cache).hasSize(context.initialSize() - count);
-    assertThat(context).removalNotifications().withCause(EXPLICIT)
+    assertThat(context).removalNotifications().withCause(REPLACED)
         .contains(removed).exclusively();
   }
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
   @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
-  public void put_replace_differentValue(AsyncCache<Int, Int> cache, CacheContext context) {
+  void put_replace_differentValue(AsyncCache<Int, Int> cache, CacheContext context) {
     var replaced = new HashMap<Int, Int>();
     for (Int key : context.firstMiddleLastKeys()) {
-      var newValue = context.absentValue().asFuture();
+      var newValue = context.absentValue().toFuture();
       cache.put(key, newValue);
       assertThat(cache).containsEntry(key, newValue);
-      replaced.put(key, context.original().get(key));
+      replaced.put(key, requireNonNull(context.original().get(key)));
+    }
+
+    assertThat(cache).hasSize(context.initialSize());
+    assertThat(context).removalNotifications().withCause(REPLACED)
+        .contains(replaced).exclusively();
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL },
+      executor = CacheExecutor.REJECTING, executorFailure = ExecutorFailure.EXPECTED,
+      removalListener = Listener.CONSUMING)
+  void put_replace_differentValue_rejectingExecutor(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    var replaced = new HashMap<Int, Int>();
+    for (Int key : context.firstMiddleLastKeys()) {
+      var newValue = context.absentValue().toFuture();
+      cache.put(key, newValue);
+      assertThat(cache).containsEntry(key, newValue);
+      replaced.put(key, requireNonNull(context.original().get(key)));
     }
 
     assertThat(cache).hasSize(context.initialSize());
@@ -1130,10 +1664,93 @@ public final class AsyncCacheTest {
 
   /* --------------- misc --------------- */
 
-  @Test(dataProvider = "caches")
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
+  void remove_incomplete(AsyncCache<Int, Int> cache, CacheContext context) {
+    checkRetryWhenIncomplete(cache, context, map ->
+        map.remove(context.firstKey(), context.absentValue()));
+    assertThat(cache).doesNotContainKey(context.firstKey());
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
+  void replace_incomplete(AsyncCache<Int, Int> cache, CacheContext context) {
+    checkRetryWhenIncomplete(cache, context, map ->
+        map.replace(context.firstKey(), context.absentValue()));
+    assertThat(cache).doesNotContainKey(context.firstKey());
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
+  void replaceConditionally_incomplete(AsyncCache<Int, Int> cache, CacheContext context) {
+    checkRetryWhenIncomplete(cache, context, map ->
+        map.replace(context.firstKey(), context.absentValue(), context.absentValue()));
+    assertThat(cache).doesNotContainKey(context.firstKey());
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
+  void computeIfPresent_incomplete(AsyncCache<Int, Int> cache, CacheContext context) {
+    checkRetryWhenIncomplete(cache, context, map ->
+        map.computeIfPresent(context.firstKey(), (k, v) -> context.absentValue()));
+    assertThat(cache).doesNotContainKey(context.firstKey());
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
+  void compute_incomplete(AsyncCache<Int, Int> cache, CacheContext context) {
+    checkRetryWhenIncomplete(cache, context, map ->
+        map.compute(context.firstKey(), (k, v) -> context.absentValue()));
+    assertThat(cache).containsEntry(context.firstKey(), context.absentValue());
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  @CacheSpec(population = { Population.SINGLETON, Population.PARTIAL, Population.FULL })
+  void merge_incomplete(AsyncCache<Int, Int> cache, CacheContext context) {
+    checkRetryWhenIncomplete(cache, context, map ->
+        map.merge(context.firstKey(), context.absentValue(), (v1, v2) -> null));
+    assertThat(cache).containsEntry(context.firstKey(), context.absentValue());
+  }
+
+  private static void checkRetryWhenIncomplete(AsyncCache<Int, Int> cache,
+      CacheContext context, Consumer<Map<Int, Int>> write) {
+    var done = new AtomicBoolean();
+    var started = new AtomicBoolean();
+    var writer = new AtomicReference<@Nullable Thread>();
+    var future = new CompletableFuture<Int>() {
+      @Override public boolean isDone() {
+        return done.get() && super.isDone();
+      }
+    };
+    cache.asMap().compute(context.firstKey(), (k, v) -> {
+      ConcurrentTestHarness.execute(() -> {
+        writer.set(Thread.currentThread());
+        started.set(true);
+        write.accept(cache.synchronous().asMap());
+        done.set(true);
+      });
+      await().untilTrue(started);
+      var threadState = EnumSet.of(BLOCKED, WAITING);
+      await().until(() -> {
+        var thread = writer.get();
+        return (thread != null) && threadState.contains(thread.getState());
+      });
+      return future;
+    });
+    future.completeExceptionally(new Exception());
+    await().untilTrue(done);
+  }
+
+  @ParameterizedTest
   @CacheSpec(population = Population.EMPTY, removalListener = Listener.MOCKITO)
-  public void removalListener_nullValue(AsyncCache<Int, Int> cache, CacheContext context) {
-    var future = new CompletableFuture<Int>();
+  void removalListener_nullValue(AsyncCache<Int, Int> cache, CacheContext context) {
+    var future = new CompletableFuture<@Nullable Int>();
     cache.put(context.absentKey(), future);
     future.complete(null);
 
@@ -1141,13 +1758,202 @@ public final class AsyncCacheTest {
         any(Int.class), any(Int.class), any(RemovalCause.class));
   }
 
+  @ParameterizedTest
+  @CheckMaxLogLevel(WARN)
+  @CacheSpec(population = Population.EMPTY, stats = Stats.ENABLED,
+      maximumSize = Maximum.UNREACHABLE, weigher = CacheWeigher.MOCKITO)
+  void handleCompletion_weigherFails_preservesConcurrentReplacement(
+      AsyncCache<Int, Int> cache, CacheContext context) throws InterruptedException {
+    var entered = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var error = new IllegalStateException();
+    when(context.weigher().weigh(any(), any())).thenAnswer(invocation -> {
+      entered.countDown();
+      assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+      throw error;
+    }).thenReturn(99);
+
+    var key = context.absentKey();
+    var replacement = intern(Int.valueOf(99)).toFuture();
+    var future = new CompletableFuture<Int>();
+    cache.put(key, future);
+    var completion = CompletableFuture.runAsync(
+        () -> future.complete(context.absentValue()), ConcurrentTestHarness.executor);
+    try {
+      assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+      cache.put(key, replacement);
+    } finally {
+      release.countDown();
+      await().until(completion::isDone);
+    }
+    assertThat(completion).succeedsWithNull();
+    assertThat(future).succeedsWith(context.absentValue());
+
+    cache.synchronous().cleanUp();
+    assertThat(cache.asMap().get(key)).isSameInstanceAs(replacement);
+    assertThat(cache).containsExactlyEntriesIn(Map.of(key, Int.valueOf(99)));
+    assertThat(context).hasWeightedSize(99);
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(1);
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(population = Population.EMPTY)
+  void handleCompletion_brokenFuture_inFlight(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    CompletableFuture<Int> future = Mockito.spy();
+    ArgumentCaptor<BiConsumer<@Nullable Int, @Nullable Throwable>> captor =
+        ArgumentCaptor.captor();
+    doReturn(future).when(future).whenComplete(captor.capture());
+    cache.put(context.absentKey(), future);
+
+    assertThat(future.isDone()).isFalse();
+    assertThat(future.isCompletedExceptionally()).isFalse();
+
+    var futureToString = future.toString();
+    captor.getValue().accept(context.absentValue(), /* error */ null);
+
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(1);
+    assertThat(cache).doesNotContainKey(context.absentKey());
+    assertThat(logEvents()
+        .withMessage(msg -> msg.contains("An invalid state was detected"))
+        .withMessage(msg -> msg.contains("key: " + context.absentKey()))
+        .withMessage(msg -> msg.contains("key type: " + Int.class.getName()))
+        .withMessage(msg -> msg.contains("value type: " + Int.class.getName()))
+        .withMessage(msg -> msg.contains("future: " + futureToString))
+        .withThrowable(IllegalStateException.class)
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(population = Population.EMPTY)
+  void handleCompletion_brokenFuture_cancel(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    CompletableFuture<Int> future = Mockito.spy();
+    ArgumentCaptor<BiConsumer<@Nullable Int, @Nullable Throwable>> captor =
+        ArgumentCaptor.captor();
+    doReturn(future).when(future).whenComplete(captor.capture());
+    cache.put(context.absentKey(), future);
+
+    future.cancel(true);
+    assertThat(future).isDone();
+    assertThat(future.isCancelled()).isTrue();
+    assertThat(future).hasCompletedExceptionally();
+
+    var futureToString = future.toString();
+    captor.getValue().accept(context.absentValue(), /* error */ null);
+
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(1);
+    assertThat(cache).doesNotContainKey(context.absentKey());
+    assertThat(logEvents()
+        .withMessage(msg -> msg.contains("An invalid state was detected"))
+        .withMessage(msg -> msg.contains("key: " + context.absentKey()))
+        .withMessage(msg -> msg.contains("key type: " + Int.class.getName()))
+        .withMessage(msg -> msg.contains("value type: " + Int.class.getName()))
+        .withMessage(msg -> msg.contains("future: " + futureToString))
+        .withThrowable(IllegalStateException.class)
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(population = Population.EMPTY)
+  void handleCompletion_brokenFuture_nullValue(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    CompletableFuture<@Nullable Int> future = Mockito.spy();
+    ArgumentCaptor<BiConsumer<@Nullable Int, @Nullable Throwable>> captor =
+        ArgumentCaptor.captor();
+    doReturn(future).when(future).whenComplete(captor.capture());
+    cache.put(context.absentKey(), future);
+
+    future.complete(null);
+    assertThat(future).isDone();
+    assertThat(future.isCancelled()).isFalse();
+    assertThat(future.isCompletedExceptionally()).isFalse();
+
+    var futureToString = future.toString();
+    captor.getValue().accept(context.absentValue(), /* error */ null);
+
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(1);
+    assertThat(cache).doesNotContainKey(context.absentKey());
+    assertThat(logEvents()
+        .withMessage(msg -> msg.contains("An invalid state was detected"))
+        .withMessage(msg -> msg.contains("key: " + context.absentKey()))
+        .withMessage(msg -> msg.contains("key type: " + Int.class.getName()))
+        .withMessage(msg -> msg.contains("value type: " + Int.class.getName()))
+        .withMessage(msg -> msg.contains("future: " + futureToString))
+        .withThrowable(IllegalStateException.class)
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
+  }
+
+  @ParameterizedTest
+  @CacheSpec(population = Population.EMPTY)
+  void handleCompletion_completedWrite_obtrudedNull(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    CompletableFuture<@Nullable Int> future = Mockito.spy();
+    ArgumentCaptor<BiConsumer<@Nullable Int, @Nullable Throwable>> captor =
+        ArgumentCaptor.captor();
+    doReturn(future).when(future).whenComplete(captor.capture());
+    future.complete(context.absentValue());
+    cache.put(context.absentKey(), future);
+
+    // the write stored a completed value, so a result changed afterwards is not a load failure
+    future.obtrudeValue(null);
+    captor.getValue().accept(null, /* error */ null);
+
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(0);
+    assertThat(cache).doesNotContainKey(context.absentKey());
+  }
+
+  @ParameterizedTest
+  @CheckMaxLogLevel(ERROR)
+  @CacheSpec(population = Population.EMPTY)
+  void handleCompletion_completedWrite_brokenFuture(
+      AsyncCache<Int, Int> cache, CacheContext context) {
+    CompletableFuture<Int> future = Mockito.spy();
+    ArgumentCaptor<BiConsumer<@Nullable Int, @Nullable Throwable>> captor =
+        ArgumentCaptor.captor();
+    doReturn(future).when(future).whenComplete(captor.capture());
+    future.complete(context.absentValue());
+    cache.put(context.absentKey(), future);
+
+    future.obtrudeException(new IllegalStateException());
+    captor.getValue().accept(context.absentValue(), /* error */ null);
+
+    assertThat(context).stats().hits(0).misses(0).success(0).failures(0);
+    assertThat(cache).doesNotContainKey(context.absentKey());
+    assertThat(logEvents()
+        .withMessage(msg -> msg.contains("An invalid state was detected"))
+        .withThrowable(IllegalStateException.class)
+        .withLevel(ERROR)
+        .exclusively())
+        .hasSize(1);
+  }
+
   @CacheSpec
-  @Test(dataProvider = "caches")
-  public void serialize(AsyncCache<Int, Int> cache, CacheContext context) {
+  @ParameterizedTest
+  void serialize(AsyncCache<Int, Int> cache) {
     assertThat(cache).isReserialize();
+  }
+
+  @SuppressWarnings({"TypeParameterUnusedInFormals", "unchecked"})
+  private static <E extends Throwable> E uncheckedThrow(Throwable throwable) throws E {
+    throw (E) throwable;
   }
 
   private static final class LoadAllException extends RuntimeException {
     private static final long serialVersionUID = 1L;
+
+    LoadAllException() {
+      super(/* message= */ null, /* cause= */ null,
+          /* enableSuppression= */ false, /* writableStackTrace= */ false);
+    }
   }
 }

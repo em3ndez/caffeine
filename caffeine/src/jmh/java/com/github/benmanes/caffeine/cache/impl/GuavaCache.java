@@ -16,7 +16,8 @@
 package com.github.benmanes.caffeine.cache.impl;
 
 import static com.github.benmanes.caffeine.cache.CacheType.CONCURRENCY_LEVEL;
-import static java.util.Objects.requireNonNull;
+
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.BasicCache;
 import com.google.common.cache.Cache;
@@ -36,12 +37,8 @@ public final class GuavaCache<K, V> implements BasicCache<K, V> {
         .build();
   }
 
-  public GuavaCache(Cache<K, V> cache) {
-    this.cache = requireNonNull(cache);
-  }
-
   @Override
-  public V get(K key) {
+  public @Nullable V get(K key) {
     return cache.getIfPresent(key);
   }
 

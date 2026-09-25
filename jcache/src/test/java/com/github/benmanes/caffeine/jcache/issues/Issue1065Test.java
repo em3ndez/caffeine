@@ -20,30 +20,27 @@ import java.util.Collection;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import javax.cache.Cache;
-import javax.cache.Caching;
 import javax.cache.configuration.FactoryBuilder;
 import javax.cache.configuration.MutableCacheEntryListenerConfiguration;
 import javax.cache.configuration.MutableConfiguration;
 import javax.cache.event.CacheEntryCreatedListener;
 import javax.cache.event.CacheEntryEvent;
 import javax.cache.integration.CacheLoader;
-import javax.cache.spi.CachingProvider;
 
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import com.github.benmanes.caffeine.jcache.spi.CaffeineCachingProvider;
+import com.github.benmanes.caffeine.jcache.JCacheFixture;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Streams;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * Issue #1065: Cache listeners including writes to caches deadlock when used in ForkJoinPool
@@ -72,54 +69,48 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
  * @author monitorjbl (Taylor Jones)
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class Issue1065Test {
+final class Issue1065Test {
   private static final int NUM_THREADS = 5;
-  private static final CachingProvider provider =
-      Caching.getCachingProvider(CaffeineCachingProvider.class.getName());
-
-  Cache<String, String> fallback;
-  Cache<String, String> cache;
-  ExecutorService executor;
-
-  @BeforeMethod
-  public void before() {
-    fallback = provider.getCacheManager()
-        .createCache("fallback", new MutableConfiguration<String, String>());
-    cache = provider.getCacheManager().createCache("primary",
-        new MutableConfiguration<String, String>()
-            .addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
-                FactoryBuilder.factoryOf(new Listener()), FactoryBuilder.factoryOf(event -> true),
-                /* isOldValueRequired */ true, /* isSynchronous */ true))
-            .setCacheLoaderFactory(new FactoryBuilder.SingletonFactory<>(new Loader()))
-            .setReadThrough(true));
-    executor = Executors.newWorkStealingPool(NUM_THREADS);
-  }
-
-  @AfterMethod
-  public void after() {
-    executor.shutdownNow();
-    fallback.close();
-    cache.close();
-  }
 
   @Test
-  public void deadlock() throws Exception {
-    for (int i = 0; i < 500; i++) {
-      var threads = new ConcurrentLinkedQueue<Thread>();
-      var futures = new CompletableFuture<?>[NUM_THREADS];
-      for (int j = 0; j < NUM_THREADS; j++) {
-        futures[j] = CompletableFuture.runAsync(() -> {
-          threads.add(Thread.currentThread());
-          cache.get("key");
-        }, executor);
+  @SuppressWarnings("ResultOfMethodCallIgnored")
+  void deadlock() throws Exception {
+    var executor = Executors.newWorkStealingPool(NUM_THREADS);
+    try (var fixture = JCacheFixture.builder().build();
+        var cache = newCache(fixture)) {
+      for (int i = 0; i < 500; i++) {
+        var threads = new ConcurrentLinkedQueue<Thread>();
+        var futures = new CompletableFuture<?>[NUM_THREADS];
+        for (int j = 0; j < NUM_THREADS; j++) {
+          futures[j] = CompletableFuture.runAsync(() -> {
+            threads.add(Thread.currentThread());
+            cache.get("key");
+          }, executor);
+        }
+        try {
+          CompletableFuture.allOf(futures).get(1, TimeUnit.SECONDS);
+          cache.removeAll();
+        } catch (TimeoutException e) {
+          fail(i, threads);
+        }
       }
-      try {
-        CompletableFuture.allOf(futures).get(1, TimeUnit.SECONDS);
-        cache.removeAll();
-      } catch (TimeoutException e) {
-        fail(i, threads);
-      }
+      executor.shutdown();
+      executor.awaitTermination(1, TimeUnit.MINUTES);
+    } finally {
+      executor.shutdownNow();
     }
+  }
+
+  private static Cache<String, String> newCache(JCacheFixture fixture) {
+    var fallback = fixture.cacheManager()
+        .createCache("fallback", new MutableConfiguration<String, String>());
+    return fixture.cacheManager().createCache("primary",
+        new MutableConfiguration<String, String>()
+            .addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<>(
+                FactoryBuilder.factoryOf(new Listener(fallback)), FactoryBuilder.factoryOf(
+                    event -> true), /* isOldValueRequired= */ true, /* isSynchronous= */ true))
+            .setCacheLoaderFactory(new FactoryBuilder.SingletonFactory<>(new Loader()))
+            .setReadThrough(true));
   }
 
   private static void fail(int iteration, Collection<Thread> threads) {
@@ -133,9 +124,16 @@ public final class Issue1065Test {
     throw failure;
   }
 
-  private final class Listener implements CacheEntryCreatedListener<String, String>, Serializable {
+  @SuppressFBWarnings("NFF_NON_FUNCTIONAL_FIELD")
+  private static final class Listener
+      implements CacheEntryCreatedListener<String, String>, Serializable {
     private static final long serialVersionUID = 1L;
 
+    private final transient Cache<String, String> fallback;
+
+    Listener(Cache<String, String> fallback) {
+      this.fallback = fallback;
+    }
     @Override public void onCreated(
         Iterable<CacheEntryEvent<? extends String, ? extends String>> events) {
       events.forEach(event -> fallback.put(event.getKey(), event.getValue()));

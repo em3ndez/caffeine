@@ -15,31 +15,34 @@
  */
 package com.github.benmanes.caffeine.cache.node;
 
+import static com.github.benmanes.caffeine.cache.RuleContext.varHandleName;
 import static com.github.benmanes.caffeine.cache.Specifications.DEAD_STRONG_KEY;
 import static com.github.benmanes.caffeine.cache.Specifications.DEAD_WEAK_KEY;
 import static com.github.benmanes.caffeine.cache.Specifications.RETIRED_STRONG_KEY;
 import static com.github.benmanes.caffeine.cache.Specifications.RETIRED_WEAK_KEY;
 import static com.github.benmanes.caffeine.cache.Specifications.referenceType;
 
-import com.squareup.javapoet.MethodSpec;
+import com.github.benmanes.caffeine.cache.Rule;
+import com.github.benmanes.caffeine.cache.node.NodeContext.Strength;
+import com.palantir.javapoet.MethodSpec;
 
 /**
  * Adds the health state to the node.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class AddHealth extends NodeRule {
+public final class AddHealth implements Rule<NodeContext> {
 
   @Override
-  protected boolean applies() {
-    return isBaseClass();
+  public boolean applies(NodeContext context) {
+    return context.isBaseClass();
   }
 
   @Override
-  protected void execute() {
+  public void execute(NodeContext context) {
     String retiredArg;
     String deadArg;
-    if (keyStrength() == Strength.STRONG) {
+    if (context.keyStrength() == Strength.STRONG) {
       retiredArg = RETIRED_STRONG_KEY;
       deadArg = DEAD_STRONG_KEY;
     } else {
@@ -47,18 +50,19 @@ public final class AddHealth extends NodeRule {
       deadArg = DEAD_WEAK_KEY;
     }
 
-    context.nodeSubtype.addMethod(MethodSpec.methodBuilder("isAlive")
+    context.classSpec.addMethod(MethodSpec.methodBuilder("isAlive")
         .addStatement("Object key = getKeyReference()")
         .addStatement("return (key != $L) && (key != $L)", retiredArg, deadArg)
         .addModifiers(context.publicFinalModifiers())
         .returns(boolean.class)
         .build());
-    addState("isRetired", "retire", retiredArg, false);
-    addState("isDead", "die", deadArg, true);
+    addState(context, "isRetired", "retire", retiredArg, /* finalized= */ false);
+    addState(context, "isDead", "die", deadArg, /* finalized= */ true);
   }
 
-  private void addState(String checkName, String actionName, String arg, boolean finalized) {
-    context.nodeSubtype.addMethod(MethodSpec.methodBuilder(checkName)
+  private static void addState(NodeContext context, String checkName,
+      String actionName, String arg, boolean finalized) {
+    context.classSpec.addMethod(MethodSpec.methodBuilder(checkName)
         .addStatement("return (getKeyReference() == $L)", arg)
         .addModifiers(context.publicFinalModifiers())
         .returns(boolean.class)
@@ -66,8 +70,8 @@ public final class AddHealth extends NodeRule {
 
     var action = MethodSpec.methodBuilder(actionName)
         .addModifiers(context.publicFinalModifiers());
-    if (valueStrength() == Strength.STRONG) {
-      if (keyStrength() != Strength.STRONG) {
+    if (context.valueStrength() == Strength.STRONG) {
+      if (context.keyStrength() != Strength.STRONG) {
         action.addStatement("key.clear()");
       }
       // Set the value to null only when dead, as otherwise the explicit removal of an expired async
@@ -77,15 +81,15 @@ public final class AddHealth extends NodeRule {
       }
       action.addStatement("$L.set(this, $N)", varHandleName("key"), arg);
     } else {
-      action.addStatement("$1T valueRef = ($1T) $2L.get(this)",
-          valueReferenceType(), varHandleName("value"));
-      if (keyStrength() != Strength.STRONG) {
+      action.addStatement("$1T valueRef = ($1T) $2L.getOpaque(this)",
+          context.valueReferenceType(), varHandleName("value"));
+      if (context.keyStrength() != Strength.STRONG) {
         action.addStatement("$1T keyRef = ($1T) valueRef.getKeyReference()", referenceType);
         action.addStatement("keyRef.clear()");
       }
       action.addStatement("valueRef.setKeyReference($N)", arg);
       action.addStatement("valueRef.clear()");
     }
-    context.nodeSubtype.addMethod(action.build());
+    context.classSpec.addMethod(action.build());
   }
 }

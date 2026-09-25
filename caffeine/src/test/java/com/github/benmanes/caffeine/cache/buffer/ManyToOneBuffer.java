@@ -15,8 +15,12 @@
  */
 package com.github.benmanes.caffeine.cache.buffer;
 
+import static java.lang.invoke.ConstantBootstraps.fieldVarHandle;
+
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+
+import com.google.errorprone.annotations.Var;
 
 /**
  * A simple ring buffer implementation that watches both the head and tail counts to acquire a
@@ -25,9 +29,9 @@ import java.lang.invoke.VarHandle;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 final class ManyToOneBuffer<E> extends ManyToOneHeader.ReadAndWriteCounterRef<E> {
-  static final VarHandle BUFFER = MethodHandles.arrayElementVarHandle(Object[].class);
+  private static final VarHandle BUFFER = MethodHandles.arrayElementVarHandle(Object[].class);
 
-  final Object[] buffer;
+  private final Object[] buffer;
 
   ManyToOneBuffer() {
     buffer = new Object[BUFFER_SIZE];
@@ -42,6 +46,7 @@ final class ManyToOneBuffer<E> extends ManyToOneHeader.ReadAndWriteCounterRef<E>
       return FULL;
     }
     if (casWriteCounter(tail, tail + 1)) {
+      @SuppressWarnings("Varifier")
       int index = (int) (tail & BUFFER_MASK);
       BUFFER.setRelease(buffer, index, e);
       return SUCCESS;
@@ -50,16 +55,18 @@ final class ManyToOneBuffer<E> extends ManyToOneHeader.ReadAndWriteCounterRef<E>
   }
 
   @Override
-  public void drainTo(Consumer<E> consumer) {
-    long head = readCounter;
+  @SuppressWarnings("unchecked")
+  protected void drainTo(Consumer<E> consumer) {
+    @Var long head = readCounter;
     long tail = writeCounterOpaque();
     long size = (tail - head);
     if (size == 0) {
       return;
     }
     do {
+      @SuppressWarnings("Varifier")
       int index = (int) (head & BUFFER_MASK);
-      E e = (E) BUFFER.getAcquire(buffer, index);
+      var e = (E) BUFFER.getAcquire(buffer, index);
       if (e == null) {
         // not published yet
         break;
@@ -83,9 +90,12 @@ final class ManyToOneBuffer<E> extends ManyToOneHeader.ReadAndWriteCounterRef<E>
 }
 
 /** The namespace for field padding through inheritance. */
+@SuppressWarnings("MultiVariableDeclaration")
 final class ManyToOneHeader {
 
-  @SuppressWarnings("PMD.AbstractClassWithoutAbstractMethod")
+  private ManyToOneHeader() {}
+
+  @SuppressWarnings({"PMD.AbstractClassWithoutAbstractMethod", "unused"})
   abstract static class PadReadCounter<E> extends ReadBuffer<E> {
     byte p000, p001, p002, p003, p004, p005, p006, p007;
     byte p008, p009, p010, p011, p012, p013, p014, p015;
@@ -109,6 +119,7 @@ final class ManyToOneHeader {
     volatile long readCounter;
   }
 
+  @SuppressWarnings("unused")
   abstract static class PadWriteCounter<E> extends ReadCounterRef<E> {
     byte p120, p121, p122, p123, p124, p125, p126, p127;
     byte p128, p129, p130, p131, p132, p133, p134, p135;
@@ -129,7 +140,10 @@ final class ManyToOneHeader {
 
   /** Enforces a memory layout to avoid false sharing by padding the write counter. */
   abstract static class ReadAndWriteCounterRef<E> extends PadWriteCounter<E> {
-    static final VarHandle READ, WRITE;
+    static final VarHandle READ = fieldVarHandle(MethodHandles.lookup(),
+        "readCounter", VarHandle.class, ReadCounterRef.class, long.class);
+    static final VarHandle WRITE = fieldVarHandle(MethodHandles.lookup(),
+        "writeCounter", VarHandle.class, ReadAndWriteCounterRef.class, long.class);
 
     volatile long writeCounter;
 
@@ -143,16 +157,6 @@ final class ManyToOneHeader {
 
     boolean casWriteCounter(long expect, long update) {
       return WRITE.weakCompareAndSet(this, expect, update);
-    }
-
-    static {
-      var lookup = MethodHandles.lookup();
-      try {
-        READ = lookup.findVarHandle(ReadCounterRef.class, "readCounter", long.class);
-        WRITE = lookup.findVarHandle(ReadAndWriteCounterRef.class, "writeCounter", long.class);
-      } catch (ReflectiveOperationException e) {
-        throw new ExceptionInInitializerError(e);
-      }
     }
   }
 }

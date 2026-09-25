@@ -17,8 +17,12 @@ package com.github.benmanes.caffeine.cache;
 
 import static com.github.benmanes.caffeine.testing.CollectionSubject.assertThat;
 import static com.google.common.collect.Iterators.elementsEqual;
+import static com.google.common.truth.Truth.assertAbout;
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
+import static java.util.Objects.requireNonNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.spy;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -28,9 +32,12 @@ import java.util.Deque;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Stream;
 
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import com.github.benmanes.caffeine.cache.AccessOrderDeque.AccessOrder;
 import com.github.benmanes.caffeine.cache.LinkedDeque.PeekingIterator;
@@ -39,104 +46,127 @@ import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
+import com.google.errorprone.annotations.Var;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 /**
  * A unit-test for the @{@link AbstractLinkedDeque} implementations.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@SuppressWarnings("ClassEscapesDefinedScope")
-public final class LinkedDequeTest {
+@SuppressWarnings({"ClassEscapesDefinedScope", "PMD.LooseCoupling"})
+final class LinkedDequeTest {
   static final int SIZE = 100;
 
-  @Test(dataProvider = "empty")
-  public void clear_whenEmpty(Deque<?> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  @SuppressFBWarnings("NPMC_NON_PRODUCTIVE_METHOD_CALL")
+  void isValid_corruptLinks(LinkedDeque<LinkedValue> deque) {
+    var observed = spy(deque);
+    var value = new LinkedValue(1);
+    observed.addLast(value);
+    observed.setPrevious(value, value);
+    observed.setNext(value, value);
+
+    // Fail promptly if assertion formatting tries to traverse the cycle
+    doThrow(new AssertionError("Unexpected deque traversal")).when(observed).toString();
+    var failure = assertThrows(AssertionError.class,
+        () -> assertAbout(LinkedDequeSubject.deque()).that(observed).isValid());
+    assertThat(failure).hasMessageThat().contains("getPrevious(e)");
+  }
+
+  @ParameterizedTest @MethodSource("empty")
+  void clear_whenEmpty(Deque<?> deque) {
     deque.clear();
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "full")
-  public void clear_whenPopulated(Deque<?> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void clear_whenPopulated(Deque<?> deque) {
     deque.clear();
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void isEmpty_whenEmpty(Deque<?> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void isEmpty_whenEmpty(Deque<?> deque) {
     assertThat(deque.isEmpty()).isTrue();
   }
 
-  @Test(dataProvider = "full")
-  public void isEmpty_whenPopulated(Deque<?> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void isEmpty_whenPopulated(Deque<?> deque) {
     assertThat(deque.isEmpty()).isFalse();
   }
 
-  @Test(dataProvider = "empty")
-  public void size_whenEmpty(Deque<?> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void size_whenEmpty(Deque<?> deque) {
     assertThat(deque.size()).isEqualTo(0);
   }
 
-  @Test(dataProvider = "full")
-  public void size_whenPopulated(Deque<?> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void size_whenPopulated(Deque<?> deque) {
     assertThat(deque.size()).isEqualTo(SIZE);
   }
 
-  @Test(dataProvider = "empty")
-  public void contains_withNull(Deque<?> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void contains_withNull(Deque<?> deque) {
     assertThat(deque.contains(null)).isFalse();
   }
 
-  @Test(dataProvider = "full")
-  public void contains_whenFound(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void contains_whenFound(LinkedDeque<LinkedValue> deque) {
     int index = ThreadLocalRandom.current().nextInt(deque.size());
     assertThat(deque.contains(Iterables.get(deque, index))).isTrue();
   }
 
-  @Test(dataProvider = "full")
-  public void contains_whenNotFound(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void contains_whenNotFound(LinkedDeque<LinkedValue> deque) {
     var unlinked = new LinkedValue(1);
     assertThat(deque.contains(unlinked)).isFalse();
   }
 
   /* --------------- Move --------------- */
 
-  @Test(dataProvider = "full")
-  public void moveToFront_first(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void moveToFront_first(LinkedDeque<LinkedValue> deque) {
     checkMoveToFront(deque, deque.getFirst());
   }
 
-  @Test(dataProvider = "full")
-  public void moveToFront_middle(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void moveToFront_middle(LinkedDeque<LinkedValue> deque) {
     checkMoveToFront(deque, Iterables.get(deque, SIZE / 2));
   }
 
-  @Test(dataProvider = "full")
-  public void moveToFront_last(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void moveToFront_last(LinkedDeque<LinkedValue> deque) {
     checkMoveToFront(deque, deque.getLast());
   }
 
-  private void checkMoveToFront(LinkedDeque<LinkedValue> deque, LinkedValue element) {
+  private static void checkMoveToFront(LinkedDeque<LinkedValue> deque,
+      @Nullable LinkedValue element) {
+    assertThat(element).isNotNull();
     deque.moveToFront(element);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.peekFirst()).isEqualTo(element);
   }
 
-  @Test(dataProvider = "full")
-  public void moveToBack_first(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void moveToBack_first(LinkedDeque<LinkedValue> deque) {
     checkMoveToBack(deque, deque.getFirst());
   }
 
-  @Test(dataProvider = "full")
-  public void moveToBack_middle(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void moveToBack_middle(LinkedDeque<LinkedValue> deque) {
     checkMoveToBack(deque, Iterables.get(deque, SIZE / 2));
   }
 
-  @Test(dataProvider = "full")
-  public void moveToBack_last(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void moveToBack_last(LinkedDeque<LinkedValue> deque) {
     checkMoveToBack(deque, deque.getLast());
   }
 
-  private void checkMoveToBack(LinkedDeque<LinkedValue> deque, LinkedValue element) {
+  private static void checkMoveToBack(LinkedDeque<LinkedValue> deque,
+      @Nullable LinkedValue element) {
+    assertThat(element).isNotNull();
     deque.moveToBack(element);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.getLast()).isEqualTo(element);
@@ -144,30 +174,30 @@ public final class LinkedDequeTest {
 
   /* --------------- First / Last --------------- */
 
-  @Test(dataProvider = "empty")
-  public void isFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void isFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.isFirst(new LinkedValue(0))).isFalse();
     assertThat(deque.isFirst(null)).isFalse();
   }
 
-  @Test(dataProvider = "full")
-  public void isFirst_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
-    var first = deque.first;
+  @ParameterizedTest @MethodSource("full")
+  void isFirst_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
+    var first = requireNonNull(deque.first);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.isFirst(first)).isTrue();
     assertThat(deque.contains(first)).isTrue();
     assertThat(deque.first).isSameInstanceAs(first);
   }
 
-  @Test(dataProvider = "empty")
-  public void isLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void isLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.isLast(new LinkedValue(0))).isFalse();
     assertThat(deque.isLast(null)).isFalse();
   }
 
-  @Test(dataProvider = "full")
-  public void isLast_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
-    var last = deque.last;
+  @ParameterizedTest @MethodSource("full")
+  void isLast_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
+    var last = requireNonNull(deque.last);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.isLast(last)).isTrue();
     assertThat(deque.contains(last)).isTrue();
@@ -176,42 +206,44 @@ public final class LinkedDequeTest {
 
   /* --------------- Peek --------------- */
 
-  @Test(dataProvider = "empty")
-  public void peek_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  @SuppressWarnings("DequePeekFirst")
+  void peek_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.peek()).isNull();
   }
 
-  @Test(dataProvider = "full")
-  public void peek_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
-    var first = deque.first;
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequePeekFirst")
+  void peek_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
+    var first = requireNonNull(deque.first);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.contains(first)).isTrue();
     assertThat(deque.first).isSameInstanceAs(first);
     assertThat(deque.peek()).isSameInstanceAs(first);
   }
 
-  @Test(dataProvider = "empty")
-  public void peekFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void peekFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.peekFirst()).isNull();
   }
 
-  @Test(dataProvider = "full")
-  public void peekFirst_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
-    var first = deque.first;
+  @ParameterizedTest @MethodSource("full")
+  void peekFirst_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
+    var first = requireNonNull(deque.first);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.contains(first)).isTrue();
     assertThat(deque.first).isSameInstanceAs(first);
     assertThat(deque.peekFirst()).isSameInstanceAs(first);
   }
 
-  @Test(dataProvider = "empty")
-  public void peekLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void peekLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.peekLast()).isNull();
   }
 
-  @Test(dataProvider = "full")
-  public void peekLast_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
-    var last = deque.last;
+  @ParameterizedTest @MethodSource("full")
+  void peekLast_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
+    var last = requireNonNull(deque.last);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.contains(last)).isTrue();
     assertThat(deque.last).isSameInstanceAs(last);
@@ -220,28 +252,28 @@ public final class LinkedDequeTest {
 
   /* --------------- Get --------------- */
 
-  @Test(dataProvider = "empty")
-  public void getFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void getFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThrows(NoSuchElementException.class, deque::getFirst);
   }
 
-  @Test(dataProvider = "full")
-  public void getFirst_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
-    var first = deque.first;
+  @ParameterizedTest @MethodSource("full")
+  void getFirst_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
+    var first = requireNonNull(deque.first);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.contains(first)).isTrue();
     assertThat(deque.first).isSameInstanceAs(first);
     assertThat(deque.getFirst()).isSameInstanceAs(first);
   }
 
-  @Test(dataProvider = "empty")
-  public void getLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void getLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThrows(NoSuchElementException.class, deque::getLast);
   }
 
-  @Test(dataProvider = "full")
-  public void getLast_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
-    var last = deque.last;
+  @ParameterizedTest @MethodSource("full")
+  void getLast_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
+    var last = requireNonNull(deque.last);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.contains(last)).isTrue();
     assertThat(deque.last).isSameInstanceAs(last);
@@ -250,14 +282,15 @@ public final class LinkedDequeTest {
 
   /* --------------- Element --------------- */
 
-  @Test(dataProvider = "empty")
-  public void element_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void element_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThrows(NoSuchElementException.class, deque::element);
   }
 
-  @Test(dataProvider = "full")
-  public void element_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
-    var first = deque.first;
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeGetFirst")
+  void element_whenPopulated(AbstractLinkedDeque<LinkedValue> deque) {
+    var first = requireNonNull(deque.first);
     assertThat(deque).hasSize(SIZE);
     assertThat(deque.contains(first)).isTrue();
     assertThat(deque.first).isSameInstanceAs(first);
@@ -266,8 +299,9 @@ public final class LinkedDequeTest {
 
   /* --------------- Offer --------------- */
 
-  @Test(dataProvider = "empty")
-  public void offer_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  @SuppressWarnings("DequeOfferLast")
+  void offer_whenEmpty(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(1);
     assertThat(deque.offer(value)).isTrue();
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -275,8 +309,9 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(1);
   }
 
-  @Test(dataProvider = "full")
-  public void offer_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeOfferLast")
+  void offer_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(SIZE);
     assertThat(deque.offer(value)).isTrue();
     assertThat(deque.peekFirst()).isNotSameInstanceAs(value);
@@ -284,14 +319,16 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(SIZE + 1);
   }
 
-  @Test(dataProvider = "full")
-  public void offer_whenLinked(LinkedDeque<LinkedValue> deque) {
-    assertThat(deque.offer(deque.peek())).isFalse();
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeOfferLast")
+  void offer_whenLinked(LinkedDeque<LinkedValue> deque) {
+    var value = requireNonNull(deque.peekFirst());
+    assertThat(deque.offer(value)).isFalse();
     assertThat(deque).hasSize(SIZE);
   }
 
-  @Test(dataProvider = "empty")
-  public void offerFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void offerFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(1);
     assertThat(deque.offerFirst(value)).isTrue();
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -299,8 +336,8 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(1);
   }
 
-  @Test(dataProvider = "full")
-  public void offerFirst_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void offerFirst_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(SIZE);
     assertThat(deque.offerFirst(value)).isTrue();
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -308,14 +345,15 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(SIZE + 1);
   }
 
-  @Test(dataProvider = "full")
-  public void offerFirst_whenLinked(LinkedDeque<LinkedValue> deque) {
-    assertThat(deque.offerFirst(deque.peek())).isFalse();
+  @ParameterizedTest @MethodSource("full")
+  void offerFirst_whenLinked(LinkedDeque<LinkedValue> deque) {
+    var value = requireNonNull(deque.peekFirst());
+    assertThat(deque.offerFirst(value)).isFalse();
     assertThat(deque).hasSize(SIZE);
   }
 
-  @Test(dataProvider = "empty")
-  public void offerLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void offerLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(1);
     assertThat(deque.offerLast(value)).isTrue();
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -323,8 +361,8 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(1);
   }
 
-  @Test(dataProvider = "full")
-  public void offerLast_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void offerLast_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(SIZE);
     assertThat(deque.offerLast(value)).isTrue();
     assertThat(deque.peekFirst()).isNotSameInstanceAs(value);
@@ -332,16 +370,17 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(SIZE + 1);
   }
 
-  @Test(dataProvider = "full")
-  public void offerLast_whenLinked(LinkedDeque<LinkedValue> deque) {
-    assertThat(deque.offerLast(deque.peek())).isFalse();
+  @ParameterizedTest @MethodSource("full")
+  void offerLast_whenLinked(LinkedDeque<LinkedValue> deque) {
+    var value = requireNonNull(deque.peekFirst());
+    assertThat(deque.offerLast(value)).isFalse();
     assertThat(deque).hasSize(SIZE);
   }
 
   /* --------------- Add --------------- */
 
-  @Test(dataProvider = "empty")
-  public void add_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void add_whenEmpty(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(1);
     assertThat(deque.add(value)).isTrue();
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -349,8 +388,8 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(1);
   }
 
-  @Test(dataProvider = "full")
-  public void add_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void add_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(SIZE);
     assertThat(deque.add(value)).isTrue();
     assertThat(deque.peekFirst()).isNotSameInstanceAs(value);
@@ -358,13 +397,14 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(SIZE + 1);
   }
 
-  @Test(dataProvider = "full")
-  public void add_whenLinked(LinkedDeque<LinkedValue> deque) {
-    assertThat(deque.add(deque.peek())).isFalse();
+  @ParameterizedTest @MethodSource("full")
+  void add_whenLinked(LinkedDeque<LinkedValue> deque) {
+    var value = requireNonNull(deque.peekFirst());
+    assertThat(deque.add(value)).isFalse();
   }
 
-  @Test(dataProvider = "empty")
-  public void addFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void addFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(1);
     deque.addFirst(value);
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -372,8 +412,8 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(1);
   }
 
-  @Test(dataProvider = "full")
-  public void addFirst_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void addFirst_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(SIZE);
     deque.addFirst(value);
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -381,13 +421,14 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(SIZE + 1);
   }
 
-  @Test(dataProvider = "full")
-  public void addFirst_whenLinked(LinkedDeque<LinkedValue> deque) {
-    assertThrows(IllegalArgumentException.class, () -> deque.addFirst(deque.peek()));
+  @ParameterizedTest @MethodSource("full")
+  void addFirst_whenLinked(LinkedDeque<LinkedValue> deque) {
+    var value = requireNonNull(deque.peekFirst());
+    assertThrows(IllegalArgumentException.class, () -> deque.addFirst(value));
   }
 
-  @Test(dataProvider = "empty")
-  public void addLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void addLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(1);
     deque.addLast(value);
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -395,8 +436,8 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(1);
   }
 
-  @Test(dataProvider = "full")
-  public void addLast_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void addLast_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(SIZE);
     deque.addLast(value);
     assertThat(deque.peekFirst()).isNotSameInstanceAs(value);
@@ -404,93 +445,97 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(SIZE + 1);
   }
 
-  @Test(dataProvider = "full")
-  public void addLast_whenLinked(LinkedDeque<LinkedValue> deque) {
-    assertThrows(IllegalArgumentException.class, () -> deque.addLast(deque.peek()));
+  @ParameterizedTest @MethodSource("full")
+  void addLast_whenLinked(LinkedDeque<LinkedValue> deque) {
+    var value = requireNonNull(deque.peekFirst());
+    assertThrows(IllegalArgumentException.class, () -> deque.addLast(value));
   }
 
-  @Test(dataProvider = "empty")
-  public void addAll_withEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void addAll_withEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.addAll(List.of())).isFalse();
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void addAll_withPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void addAll_withPopulated(LinkedDeque<LinkedValue> deque) {
     var expected = new ArrayList<LinkedValue>();
     populate(expected);
     assertThat(deque.addAll(expected)).isTrue();
     assertThat(deque).containsExactlyElementsIn(expected).inOrder();
   }
 
-  @Test(dataProvider = "full")
-  @SuppressWarnings("ModifyingCollectionWithItself")
-  public void addAll_withSelf(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings({"CollectionAddedToSelf", "ModifyingCollectionWithItself"})
+  void addAll_withSelf(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.addAll(deque)).isFalse();
   }
 
   /* --------------- Poll --------------- */
 
-  @Test(dataProvider = "empty")
-  public void poll_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  @SuppressWarnings("DequePollFirst")
+  void poll_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.poll()).isNull();
   }
 
-  @Test(dataProvider = "full")
-  public void poll_whenPopulated(LinkedDeque<LinkedValue> deque) {
-    var first = deque.peek();
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequePollFirst")
+  void poll_whenPopulated(LinkedDeque<LinkedValue> deque) {
+    var first = deque.peekFirst();
     assertThat(deque.poll()).isSameInstanceAs(first);
     assertThat(deque.contains(first)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void poll_toEmpty(LinkedDeque<LinkedValue> deque) {
-    LinkedValue value;
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequePollFirst")
+  void poll_toEmpty(LinkedDeque<LinkedValue> deque) {
+    @Var LinkedValue value;
     while ((value = deque.poll()) != null) {
       assertThat(deque.contains(value)).isFalse();
     }
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void pollFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void pollFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.pollFirst()).isNull();
   }
 
-  @Test(dataProvider = "full")
-  public void pollFirst_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void pollFirst_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var first = deque.peekFirst();
     assertThat(deque.pollFirst()).isSameInstanceAs(first);
     assertThat(deque.contains(first)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void pollFirst_toEmpty(LinkedDeque<LinkedValue> deque) {
-    LinkedValue value;
+  @ParameterizedTest @MethodSource("full")
+  void pollFirst_toEmpty(LinkedDeque<LinkedValue> deque) {
+    @Var LinkedValue value;
     while ((value = deque.pollFirst()) != null) {
       assertThat(deque.contains(value)).isFalse();
     }
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void pollLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void pollLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.pollLast()).isNull();
   }
 
-  @Test(dataProvider = "full")
-  public void pollLast_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void pollLast_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var last = deque.peekLast();
     assertThat(deque.pollLast()).isSameInstanceAs(last);
     assertThat(deque.contains(last)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void pollLast_toEmpty(LinkedDeque<LinkedValue> deque) {
-    LinkedValue value;
+  @ParameterizedTest @MethodSource("full")
+  void pollLast_toEmpty(LinkedDeque<LinkedValue> deque) {
+    @Var LinkedValue value;
     while ((value = deque.pollLast()) != null) {
       assertThat(deque.contains(value)).isFalse();
     }
@@ -499,21 +544,23 @@ public final class LinkedDequeTest {
 
   /* --------------- Remove --------------- */
 
-  @Test(dataProvider = "empty")
-  public void remove_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void remove_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThrows(NoSuchElementException.class, deque::remove);
   }
 
-  @Test(dataProvider = "full")
-  public void remove_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeRemoveFirst")
+  void remove_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var first = deque.peekFirst();
     assertThat(deque.remove()).isSameInstanceAs(first);
     assertThat(deque.contains(first)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void remove_toEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeRemoveFirst")
+  void remove_toEmpty(LinkedDeque<LinkedValue> deque) {
     while (!deque.isEmpty()) {
       var value = deque.remove();
       assertThat(deque.contains(value)).isFalse();
@@ -521,44 +568,47 @@ public final class LinkedDequeTest {
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void removeElement_notFound(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  @SuppressWarnings("DequeRemoveFirstOccurrence")
+  void removeElement_notFound(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.remove(new LinkedValue(0))).isFalse();
   }
 
-  @Test(dataProvider = "full")
-  public void removeElement_whenFound(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeRemoveFirstOccurrence")
+  void removeElement_whenFound(LinkedDeque<LinkedValue> deque) {
     var first = deque.peekFirst();
     assertThat(deque.remove(first)).isTrue();
     assertThat(deque.contains(first)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void removeElement_toEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeRemoveFirstOccurrence")
+  void removeElement_toEmpty(LinkedDeque<LinkedValue> deque) {
     while (!deque.isEmpty()) {
-      var value = deque.peek();
+      var value = deque.peekFirst();
       assertThat(deque.remove(value)).isTrue();
       assertThat(deque.contains(value)).isFalse();
     }
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void removeFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void removeFirst_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThrows(NoSuchElementException.class, deque::removeFirst);
   }
 
-  @Test(dataProvider = "full")
-  public void removeFirst_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void removeFirst_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var first = deque.peekFirst();
     assertThat(deque.removeFirst()).isSameInstanceAs(first);
     assertThat(deque.contains(first)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void removeFirst_toEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void removeFirst_toEmpty(LinkedDeque<LinkedValue> deque) {
     while (!deque.isEmpty()) {
       var value = deque.removeFirst();
       assertThat(deque.contains(value)).isFalse();
@@ -566,21 +616,21 @@ public final class LinkedDequeTest {
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void removeLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void removeLast_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThrows(NoSuchElementException.class, deque::removeLast);
   }
 
-  @Test(dataProvider = "full")
-  public void removeLast_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void removeLast_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var last = deque.peekLast();
     assertThat(deque.removeLast()).isSameInstanceAs(last);
     assertThat(deque.contains(last)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void removeLast_toEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void removeLast_toEmpty(LinkedDeque<LinkedValue> deque) {
     while (!deque.isEmpty()) {
       var value = deque.removeLast();
       assertThat(deque.contains(value)).isFalse();
@@ -588,76 +638,93 @@ public final class LinkedDequeTest {
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void removeFirstOccurrence_notFound(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void removeFirstOccurrence_notFound(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.removeFirstOccurrence(new LinkedValue(0))).isFalse();
   }
 
-  @Test(dataProvider = "full")
-  public void removeFirstOccurrence_whenFound(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void removeFirstOccurrence_whenFound(LinkedDeque<LinkedValue> deque) {
     var first = deque.peekFirst();
     assertThat(deque.removeFirstOccurrence(first)).isTrue();
     assertThat(deque.contains(first)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void removeFirstOccurrence_toEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void removeFirstOccurrence_toEmpty(LinkedDeque<LinkedValue> deque) {
     while (!deque.isEmpty()) {
-      var value = deque.peek();
+      var value = deque.peekFirst();
       assertThat(deque.removeFirstOccurrence(value)).isTrue();
       assertThat(deque.contains(value)).isFalse();
     }
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void removeLastOccurrence_notFound(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void removeLastOccurrence_notFound(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.removeLastOccurrence(new LinkedValue(0))).isFalse();
   }
 
-  @Test(dataProvider = "full")
-  public void removeLastOccurrence_whenFound(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void removeLastOccurrence_whenFound(LinkedDeque<LinkedValue> deque) {
     var first = deque.peekFirst();
     assertThat(deque.removeLastOccurrence(first)).isTrue();
     assertThat(deque.contains(first)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void removeLastOccurrence_toEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void removeLastOccurrence_toEmpty(LinkedDeque<LinkedValue> deque) {
     while (!deque.isEmpty()) {
-      var value = deque.peek();
+      var value = deque.peekFirst();
       assertThat(deque.removeLastOccurrence(value)).isTrue();
       assertThat(deque.contains(value)).isFalse();
     }
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "empty")
-  public void removeAll_withEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void removeAll_withEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.removeAll(List.of())).isFalse();
     assertThat(deque).isExhaustivelyEmpty();
   }
 
-  @Test(dataProvider = "full")
-  public void remove_withPopulated(LinkedDeque<LinkedValue> deque) {
-    var first = deque.peekFirst();
+  @ParameterizedTest @MethodSource("full")
+  void remove_withPopulated(LinkedDeque<LinkedValue> deque) {
+    var first = requireNonNull(deque.peekFirst());
     assertThat(deque.removeAll(List.of(first))).isTrue();
     assertThat(deque.contains(first)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void removeAll_toEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void removeAll_toEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.removeAll(List.copyOf(deque))).isTrue();
+    assertThat(deque).isExhaustivelyEmpty();
+  }
+
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("ModifyingCollectionWithItself")
+  @SuppressFBWarnings("DMI_USING_REMOVEALL_TO_CLEAR_COLLECTION")
+  void removeAll_self(LinkedDeque<LinkedValue> deque) {
+    assertThat(deque.removeAll(deque)).isTrue();
+    assertThat(deque).isExhaustivelyEmpty();
+  }
+
+  @ParameterizedTest @MethodSource("empty")
+  @SuppressWarnings("ModifyingCollectionWithItself")
+  @SuppressFBWarnings("DMI_USING_REMOVEALL_TO_CLEAR_COLLECTION")
+  void removeAll_self_whenEmpty(LinkedDeque<LinkedValue> deque) {
+    assertThat(deque.removeAll(deque)).isFalse();
     assertThat(deque).isExhaustivelyEmpty();
   }
 
   /* --------------- Stack --------------- */
 
-  @Test(dataProvider = "empty")
-  public void push_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  @SuppressWarnings("DequeAddFirst")
+  void push_whenEmpty(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(1);
     deque.push(value);
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -665,8 +732,9 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(1);
   }
 
-  @Test(dataProvider = "full")
-  public void push_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeAddFirst")
+  void push_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var value = new LinkedValue(SIZE);
     deque.push(value);
     assertThat(deque.peekFirst()).isSameInstanceAs(value);
@@ -674,26 +742,29 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(SIZE + 1);
   }
 
-  @Test(dataProvider = "full")
-  public void push_whenLinked(LinkedDeque<LinkedValue> deque) {
-    assertThrows(IllegalArgumentException.class, () -> deque.push(deque.peek()));
+  @ParameterizedTest @MethodSource("full")
+  void push_whenLinked(LinkedDeque<LinkedValue> deque) {
+    var value = requireNonNull(deque.peekFirst());
+    assertThrows(IllegalArgumentException.class, () -> deque.push(value));
   }
 
-  @Test(dataProvider = "empty")
-  public void pop_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void pop_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThrows(NoSuchElementException.class, deque::pop);
   }
 
-  @Test(dataProvider = "full")
-  public void pop_whenPopulated(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeRemoveFirst")
+  void pop_whenPopulated(LinkedDeque<LinkedValue> deque) {
     var first = deque.peekFirst();
     assertThat(deque.pop()).isSameInstanceAs(first);
     assertThat(deque.contains(first)).isFalse();
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void pop_toEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("DequeRemoveFirst")
+  void pop_toEmpty(LinkedDeque<LinkedValue> deque) {
     while (!deque.isEmpty()) {
       var value = deque.pop();
       assertThat(deque.contains(value)).isFalse();
@@ -703,35 +774,35 @@ public final class LinkedDequeTest {
 
   /* --------------- Iterators --------------- */
 
-  @Test(dataProvider = "empty")
-  public void iterator_noMoreElements(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void iterator_noMoreElements(LinkedDeque<LinkedValue> deque) {
     var iterator = deque.iterator();
     assertThrows(NoSuchElementException.class, iterator::next);
   }
 
-  @Test(dataProvider = "empty")
-  public void iterator_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void iterator_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.iterator().hasNext()).isFalse();
     assertThat(deque.iterator().peek()).isNull();
   }
 
-  @Test(dataProvider = "full")
-  public void iterator_whenWarmed(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void iterator_whenWarmed(LinkedDeque<LinkedValue> deque) {
     var expected = new ArrayList<LinkedValue>();
     populate(expected);
 
-    assertThat(deque.peek()).isNotNull();
+    assertThat(deque.peekFirst()).isNotNull();
     assertThat(Iterators.size(deque.iterator())).isEqualTo(deque.size());
     assertThat(elementsEqual(deque.iterator(), expected.iterator())).isTrue();
   }
 
-  @Test(dataProvider = "full")
-  public void iterator_removal(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void iterator_removal(LinkedDeque<LinkedValue> deque) {
     var iterator = deque.iterator();
     var value = iterator.next();
     iterator.remove();
 
-    int remaining = 0;
+    @Var int remaining = 0;
     while (iterator.hasNext()) {
       assertThat(iterator.next()).isNotSameInstanceAs(value);
       remaining++;
@@ -740,28 +811,28 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void iterator_removal_exception(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void iterator_removal_exception(LinkedDeque<LinkedValue> deque) {
     var iterator = deque.iterator();
     iterator.next();
     iterator.remove();
     assertThrows(IllegalStateException.class, iterator::remove);
   }
 
-  @Test(dataProvider = "empty")
-  public void descendingIterator_noMoreElements(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void descendingIterator_noMoreElements(LinkedDeque<LinkedValue> deque) {
     var iterator = deque.descendingIterator();
     assertThrows(NoSuchElementException.class, iterator::next);
   }
 
-  @Test(dataProvider = "empty")
-  public void descendingIterator_whenEmpty(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void descendingIterator_whenEmpty(LinkedDeque<LinkedValue> deque) {
     assertThat(deque.descendingIterator().hasNext()).isFalse();
     assertThat(deque.descendingIterator().peek()).isNull();
   }
 
-  @Test(dataProvider = "full")
-  public void descendingIterator_whenWarmed(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void descendingIterator_whenWarmed(LinkedDeque<LinkedValue> deque) {
     var expected = new ArrayList<LinkedValue>();
     populate(expected);
     Collections.reverse(expected);
@@ -770,13 +841,13 @@ public final class LinkedDequeTest {
     assertThat(elementsEqual(deque.descendingIterator(), expected.iterator())).isTrue();
   }
 
-  @Test(dataProvider = "full")
-  public void descendingIterator_removal(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void descendingIterator_removal(LinkedDeque<LinkedValue> deque) {
     var iterator = deque.descendingIterator();
     var value = iterator.next();
     iterator.remove();
 
-    int remaining = 0;
+    @Var int remaining = 0;
     while (iterator.hasNext()) {
       assertThat(iterator.next()).isNotEqualTo(value);
       remaining++;
@@ -785,8 +856,8 @@ public final class LinkedDequeTest {
     assertThat(deque).hasSize(SIZE - 1);
   }
 
-  @Test(dataProvider = "full")
-  public void concat(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void concat(LinkedDeque<LinkedValue> deque) {
     var expect = ImmutableList.copyOf(
         Iterators.concat(deque.iterator(), deque.descendingIterator()));
     Iterable<LinkedValue> actual = () -> PeekingIterator.concat(
@@ -794,8 +865,8 @@ public final class LinkedDequeTest {
     assertThat(actual).containsExactlyElementsIn(expect).inOrder();
   }
 
-  @Test(dataProvider = "full")
-  public void concat_peek(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void concat_peek(LinkedDeque<LinkedValue> deque) {
     var iterator = PeekingIterator.concat(deque.iterator(), deque.iterator());
     while (iterator.hasNext()) {
       var expected = iterator.peek();
@@ -804,14 +875,15 @@ public final class LinkedDequeTest {
     assertThat(iterator.peek()).isNull();
   }
 
-  @Test(dataProvider = "empty")
-  public void concat_noMoreElements(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("empty")
+  void concat_noMoreElements(LinkedDeque<LinkedValue> deque) {
     var iterator = PeekingIterator.concat(deque.iterator(), deque.iterator());
     assertThrows(NoSuchElementException.class, iterator::next);
   }
 
-  @Test(dataProvider = "full")
-  public void comparing(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  @SuppressWarnings("SequencedCollectionGetFirst")
+  void comparing(LinkedDeque<LinkedValue> deque) {
     var expect = ImmutableList.copyOf(
         Iterators.concat(deque.iterator(), deque.descendingIterator()));
     var actual = PeekingIterator.comparing(
@@ -820,8 +892,18 @@ public final class LinkedDequeTest {
     assertThat(ImmutableList.copyOf(actual)).containsExactlyElementsIn(expect).inOrder();
   }
 
-  @Test(dataProvider = "full")
-  public void comparing_uneven(LinkedDeque<LinkedValue> deque) {
+  @ParameterizedTest @MethodSource("full")
+  void comparing_peek(LinkedDeque<LinkedValue> deque) {
+    var ascending = PeekingIterator.comparing(
+        deque.descendingIterator(), deque.iterator(), comparator().reversed());
+    var descending = PeekingIterator.comparing(
+        deque.descendingIterator(), deque.iterator(), comparator());
+    assertThat(ascending.peek()).isEqualTo(deque.peekFirst());
+    assertThat(descending.peek()).isEqualTo(deque.peekLast());
+  }
+
+  @ParameterizedTest @MethodSource("full")
+  void comparing_uneven(LinkedDeque<LinkedValue> deque) {
     var empty = new AccessOrderDeque<LinkedValue>().iterator();
     var left = PeekingIterator.comparing(deque.iterator(), empty, comparator().reversed());
     var right = PeekingIterator.comparing(empty, deque.iterator(), comparator().reversed());
@@ -834,65 +916,135 @@ public final class LinkedDequeTest {
     return Comparator.comparingInt((LinkedValue v) -> v.value);
   }
 
-  /* --------------- Deque providers --------------- */
+  /* --------------- modCount + structural link/unlink --------------- */
 
-  @DataProvider(name = "empty")
-  public Object[][] providesEmptyDeque() {
-    return new Object[][] {
-        { new AccessOrderDeque<LinkedValue>() },
-        { new WriteOrderDeque<LinkedValue>() },
-    };
+  @Test
+  @SuppressWarnings("CheckReturnValue")
+  void modCount_incrementedOnMutation() {
+    var deque = new AccessOrderDeque<LinkedValue>();
+    int initial = deque.modCount;
+
+    deque.linkFirst(new LinkedValue(1));
+    assertThat(deque.modCount).isEqualTo(initial + 1);
+
+    deque.linkLast(new LinkedValue(2));
+    assertThat(deque.modCount).isEqualTo(initial + 2);
+
+    deque.unlinkFirst();
+    assertThat(deque.modCount).isEqualTo(initial + 3);
+
+    deque.unlinkLast();
+    assertThat(deque.modCount).isEqualTo(initial + 4);
+
+    deque.linkFirst(new LinkedValue(3));
+    var peeked = deque.peekFirst();
+    assertThat(peeked).isNotNull();
+    deque.unlink(peeked);
+    assertThat(deque.modCount).isEqualTo(initial + 6);
+
+    deque.linkFirst(new LinkedValue(4));
+    deque.clear();
+    assertThat(deque.modCount).isEqualTo(initial + 8);
   }
 
-  @DataProvider(name = "full")
-  public Object[][] providesWarmedDeque() {
+  @Test
+  void linkFirst_setsPreviousLink() {
+    var deque = new AccessOrderDeque<LinkedValue>();
+    var first = new LinkedValue(1);
+    deque.linkFirst(first);
+    var newFirst = new LinkedValue(2);
+    deque.linkFirst(newFirst);
+    assertThat(first.getPreviousInAccessOrder()).isEqualTo(newFirst);
+    assertThat(newFirst.getNextInAccessOrder()).isEqualTo(first);
+  }
+
+  @Test
+  void unlink_clearsPointers() {
+    var deque = new AccessOrderDeque<LinkedValue>();
+    var a = new LinkedValue(1);
+    var b = new LinkedValue(2);
+    var c = new LinkedValue(3);
+    deque.addLast(a);
+    deque.addLast(b);
+    deque.addLast(c);
+
+    deque.unlink(b);
+    assertThat(b.getPreviousInAccessOrder()).isNull();
+    assertThat(b.getNextInAccessOrder()).isNull();
+    assertThat(a.getNextInAccessOrder()).isEqualTo(c);
+    assertThat(c.getPreviousInAccessOrder()).isEqualTo(a);
+  }
+
+  @Test
+  void clear_clearsAllLinks() {
+    var deque = new AccessOrderDeque<LinkedValue>();
+    var a = new LinkedValue(1);
+    var b = new LinkedValue(2);
+    deque.addLast(a);
+    deque.addLast(b);
+
+    deque.clear();
+    assertThat(a.getPreviousInAccessOrder()).isNull();
+    assertThat(a.getNextInAccessOrder()).isNull();
+    assertThat(b.getPreviousInAccessOrder()).isNull();
+    assertThat(b.getNextInAccessOrder()).isNull();
+  }
+
+  /* --------------- Deque providers --------------- */
+
+  static Stream<LinkedDeque<LinkedValue>> empty() {
+    return Stream.of(new AccessOrderDeque<>(), new WriteOrderDeque<>());
+  }
+
+  static Stream<LinkedDeque<LinkedValue>> full() {
     var accessOrder = new AccessOrderDeque<LinkedValue>();
     var writeOrder = new WriteOrderDeque<LinkedValue>();
     populate(accessOrder);
     populate(writeOrder);
-    return new Object[][] { { accessOrder }, { writeOrder }};
+    return Stream.of(accessOrder, writeOrder);
   }
 
-  void populate(Collection<LinkedValue> collection) {
+  private static void populate(Collection<LinkedValue> collection) {
     for (int i = 0; i < SIZE; i++) {
       collection.add(new LinkedValue(i));
     }
   }
 
-  static final class LinkedValue implements AccessOrder<LinkedValue>, WriteOrder<LinkedValue> {
-    final int value;
+  private static final class LinkedValue
+      implements AccessOrder<LinkedValue>, WriteOrder<LinkedValue> {
+    private final int value;
 
-    LinkedValue prev;
-    LinkedValue next;
+    private @Nullable LinkedValue prev;
+    private @Nullable LinkedValue next;
 
     LinkedValue(int value) {
       this.value = value;
     }
-    @Override public LinkedValue getPreviousInAccessOrder() {
+    @Override public @Nullable LinkedValue getPreviousInAccessOrder() {
       return prev;
     }
-    @Override public void setPreviousInAccessOrder(LinkedValue prev) {
+    @Override public void setPreviousInAccessOrder(@Nullable LinkedValue prev) {
       this.prev = prev;
     }
-    @Override public LinkedValue getNextInAccessOrder() {
+    @Override public @Nullable LinkedValue getNextInAccessOrder() {
       return next;
     }
-    @Override public void setNextInAccessOrder(LinkedValue next) {
+    @Override public void setNextInAccessOrder(@Nullable LinkedValue next) {
       this.next = next;
     }
-    @Override public LinkedValue getPreviousInWriteOrder() {
+    @Override public @Nullable LinkedValue getPreviousInWriteOrder() {
       return prev;
     }
-    @Override public void setPreviousInWriteOrder(LinkedValue prev) {
+    @Override public void setPreviousInWriteOrder(@Nullable LinkedValue prev) {
       this.prev = prev;
     }
-    @Override public LinkedValue getNextInWriteOrder() {
+    @Override public @Nullable LinkedValue getNextInWriteOrder() {
       return next;
     }
-    @Override public void setNextInWriteOrder(LinkedValue next) {
+    @Override public void setNextInWriteOrder(@Nullable LinkedValue next) {
       this.next = next;
     }
-    @Override public boolean equals(Object o) {
+    @Override public boolean equals(@Nullable Object o) {
       return (o instanceof LinkedValue) && (value == ((LinkedValue) o).value);
     }
     @Override public int hashCode() {

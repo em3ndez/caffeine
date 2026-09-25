@@ -21,6 +21,7 @@ import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.admission.Frequency;
 import com.google.common.math.IntMath;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 /**
@@ -30,11 +31,13 @@ import com.typesafe.config.Config;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@SuppressWarnings("NotNullFieldNotInitialized")
 public abstract class CountMin4 implements Frequency {
   static final long[] SEED = { // A mixture of seeds from FNV-1a, CityHash, and Murmur3
       0xc3a5c85c97cb3127L, 0xb492b66fbe98f273L, 0x9ae16a3b2f90404fL, 0xcbf29ce484222325L};
   static final long RESET_MASK = 0x7777777777777777L;
 
+  protected final double countersMultiplier;
   protected final boolean conservative;
 
   protected int tableMask;
@@ -45,32 +48,39 @@ public abstract class CountMin4 implements Frequency {
    * Creates a frequency sketch that can accurately estimate the popularity of elements given
    * the maximum size of the cache.
    */
-  @SuppressWarnings("this-escape")
+  @SuppressWarnings({"NullAway.Init", "this-escape", "Varifier"})
   protected CountMin4(Config config) {
-    BasicSettings settings = new BasicSettings(config);
+    var settings = new BasicSettings(config);
     conservative = settings.tinyLfu().conservative();
 
-    double countersMultiplier = settings.tinyLfu().countMin4().countersMultiplier();
-    long counters = (long) (countersMultiplier * settings.maximumSize());
-    ensureCapacity(counters);
+    countersMultiplier = settings.tinyLfu().countMin4().countersMultiplier();
+    ensureCapacity(settings.maximumSize());
   }
 
   /**
-   * Increases the capacity of this <tt>FrequencySketch</tt> instance, if necessary, to ensure that
-   * it can accurately estimate the popularity of elements given the maximum size of the cache. This
+   * Increases the capacity of this {@code CountMin4} instance, if necessary, to ensure that it can
+   * accurately estimate the popularity of elements given the maximum size of the cache. This
    * operation forgets all previous counts when resizing.
    *
    * @param maximumSize the maximum size of the cache
    */
-  protected void ensureCapacity(long maximumSize) {
+  @Override
+  @SuppressWarnings("Varifier")
+  public void ensureCapacity(long maximumSize) {
     checkArgument(maximumSize >= 0);
-    int maximum = (int) Math.min(maximumSize, Integer.MAX_VALUE >>> 1);
+    long counters = (long) (countersMultiplier * maximumSize);
+    int maximum = (int) Math.min(counters, Integer.MAX_VALUE >>> 1);
     if ((table != null) && (table.length >= maximum)) {
       return;
     }
 
     table = new long[(maximum == 0) ? 1 : IntMath.ceilingPowerOfTwo(maximum)];
     tableMask = Math.max(0, table.length - 1);
+  }
+
+  @Override
+  public boolean isResizable() {
+    return true;
   }
 
   /**
@@ -80,10 +90,11 @@ public abstract class CountMin4 implements Frequency {
    * @return the estimated number of occurrences of the element; possibly zero but never negative
    */
   @Override
+  @SuppressWarnings("Varifier")
   public int frequency(long e) {
     int hash = spread(Long.hashCode(e));
     int start = (hash & 3) << 2;
-    int frequency = Integer.MAX_VALUE;
+    @Var int frequency = Integer.MAX_VALUE;
     for (int i = 0; i < 4; i++) {
       int index = indexOf(hash, i);
       int count = (int) ((table[index] >>> ((start + i) << 2)) & 0xfL);
@@ -119,7 +130,7 @@ public abstract class CountMin4 implements Frequency {
     int index2 = indexOf(hash, 2);
     int index3 = indexOf(hash, 3);
 
-    boolean added = incrementAt(index0, start, step);
+    @Var boolean added = incrementAt(index0, start, step);
     added |= incrementAt(index1, start + 1, step);
     added |= incrementAt(index2, start + 2, step);
     added |= incrementAt(index3, start + 3, step);
@@ -134,7 +145,7 @@ public abstract class CountMin4 implements Frequency {
 
     int[] index = new int[4];
     int[] count = new int[4];
-    int min = Integer.MAX_VALUE;
+    @Var int min = Integer.MAX_VALUE;
     for (int i = 0; i < 4; i++) {
       index[i] = indexOf(hash, i);
       count[i] = (int) ((table[index[i]] >>> ((start + i) << 2)) & 0xfL);
@@ -186,7 +197,7 @@ public abstract class CountMin4 implements Frequency {
    * @return the table index
    */
   int indexOf(int item, int i) {
-    long hash = (item + SEED[i]) * SEED[i];
+    @Var long hash = (item + SEED[i]) * SEED[i];
     hash += (hash >>> 32);
     return ((int) hash) & tableMask;
   }
@@ -195,7 +206,7 @@ public abstract class CountMin4 implements Frequency {
    * Applies a supplemental hash function to a given hashCode, which defends against poor quality
    * hash functions.
    */
-  int spread(int x) {
+  int spread(@Var int x) {
     x = ((x >>> 16) ^ x) * 0x45d9f3b;
     x = ((x >>> 16) ^ x) * 0x45d9f3b;
     return (x >>> 16) ^ x;

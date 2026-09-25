@@ -1,61 +1,131 @@
 /** Guava compatibility adapter. The tests are forked from Guava commit e370dde. */
+@file:Suppress("UnstableApiUsage")
 import de.thetaphi.forbiddenapis.gradle.CheckForbiddenApis
+import org.gradle.api.tasks.PathSensitivity.RELATIVE
+import org.gradle.plugins.ide.eclipse.model.SourceFolder
+import org.gradle.plugins.ide.eclipse.model.Classpath as EclipseClasspath
 
 plugins {
-  id("java-library-caffeine-conventions")
+  id("info.solidsoft.pitest")
+  id("java-library.caffeine")
+  id("roseau.caffeine")
+}
+
+val caffeineOsgiBundle = configurations.register("caffeineOsgiBundle") {
+  configureAsRuntimeIncoming()
 }
 
 dependencies {
   api(project(":caffeine"))
   api(libs.guava)
 
-  testImplementation(libs.jctools)
-  testImplementation(libs.guava.testlib)
-  testImplementation(libs.bundles.slf4j.nop)
+  pitest(libs.pitest.junit5)
+  pitest(libs.pitest)
+
+  caffeineOsgiBundle(project(":caffeine", "osgiBundleElements"))
 }
+
 
 tasks.named<JavaCompile>("compileJava").configure {
-  modularity.inferModulePath = true
+  options.compilerArgs.add("-Xlint:-exports")
 }
 
-tasks.withType<Test>().configureEach {
-  useJUnitPlatform()
+testing.suites {
+  named<JvmTestSuite>("test") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
 
-  project(":caffeine").plugins.withId("java-library") {
-    val caffeineJar = project(":caffeine").tasks.jar
-    val guavaJar = project(":guava").tasks.jar
-    dependsOn(caffeineJar, guavaJar)
+    dependencies {
+      implementation(libs.truth)
+      implementation(libs.guava.testlib)
+      implementation(libs.commons.lang3)
+      implementation(libs.spotbugs.annotations)
 
-    systemProperties(mapOf(
-      "guava.osgi.version" to libs.versions.guava.get(),
-      "caffeine.osgi.jar" to relativePath(caffeineJar.get().archiveFile.get().asFile.path),
-      "caffeine-guava.osgi.jar" to relativePath(guavaJar.get().archiveFile.get().asFile.path),
-    ))
+      runtimeOnly(libs.junit.jupiter.vintage)
+      runtimeOnly.bundle(libs.bundles.slf4j.nop)
+    }
+  }
+  register("compatibilityTest", JvmTestSuite::class) {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation(libs.truth)
+      implementation(libs.guava.testlib)
+      implementation(libs.spotbugs.annotations)
+
+      runtimeOnly(libs.junit.jupiter.vintage)
+    }
+  }
+  register("moduleTest", JvmTestSuite::class) {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+    }
+  }
+  register<JvmTestSuite>("osgiTest") {
+    useJUnitJupiter(libs.versions.junit.jupiter)
+
+    dependencies {
+      implementation(project())
+      implementation.bundle(libs.bundles.osgi.test.compile)
+
+      runtimeOnly(libs.junit.jupiter.vintage)
+      runtimeOnly.bundle(libs.bundles.slf4j.nop)
+      runtimeOnly.bundle(libs.bundles.osgi.test.runtime)
+    }
+    targets.configureEach {
+      testTask.configure {
+        val caffeineOsgiJarFile = layout.file(caffeineOsgiBundle.map { it.singleFile })
+        val guavaJarFile = tasks.named<Jar>("jar").flatMap { it.archiveFile }
+        inputs.files(caffeineOsgiJarFile).withPathSensitivity(RELATIVE)
+        inputs.files(guavaJarFile).withPathSensitivity(RELATIVE)
+
+        val relativeDir = projectDir
+        val versions = libs.versions
+        doFirst {
+          val caffeinePath = caffeineOsgiJarFile.relativePathFrom(relativeDir)
+          val guavaPath = guavaJarFile.relativePathFrom(relativeDir)
+          systemProperties(mapOf(
+            "caffeine.osgi.jar" to caffeinePath.get(),
+            "caffeine-guava.osgi.jar" to guavaPath.get(),
+            "guava.osgi.version" to versions.guava.get()))
+        }
+      }
+    }
   }
 }
 
-tasks.jar {
+tasks.named<Jar>("jar").configure {
   bundle.bnd(mapOf(
     "Bundle-SymbolicName" to "com.github.ben-manes.caffeine.guava",
     "Import-Package" to listOf(
       "com.github.benmanes.caffeine.*",
       "com.google.common.*;version=23.2").joinToString(","),
-    "Export-Package" to "com.github.benmanes.caffeine.guava",
-    "Automatic-Module-Name" to "com.github.benmanes.caffeine.guava"))
+    "Export-Package" to "com.github.benmanes.caffeine.guava"))
 }
 
-tasks.withType<Javadoc>().configureEach {
-  javadocOptions {
-    addStringOption("Xdoclint:none", "-quiet")
+tasks.withType<CheckForbiddenApis>().configureEach {
+  bundledSignatures.addAll(when (name) {
+    "forbiddenApisTest" -> listOf("jdk-deprecated", "jdk-internal",
+      "jdk-non-portable", "jdk-system-out", "jdk-unsafe")
+    else -> listOf("jdk-deprecated", "jdk-internal", "jdk-non-portable",
+      "jdk-reflection", "jdk-system-out", "jdk-unsafe")
+  })
+}
+
+eclipse.classpath.file.whenMerged {
+  if (this is EclipseClasspath) {
+    entries.removeIf { (it is SourceFolder) && it.path.contains("moduleTest") }
   }
 }
 
-tasks.named<CheckForbiddenApis>("forbiddenApisMain").configure {
-  bundledSignatures.addAll(listOf("jdk-deprecated", "jdk-internal",
-    "jdk-non-portable", "jdk-reflection", "jdk-system-out", "jdk-unsafe"))
-}
-
-tasks.named<CheckForbiddenApis>("forbiddenApisTest").configure {
-  bundledSignatures.addAll(listOf("jdk-deprecated", "jdk-internal",
-    "jdk-non-portable", "jdk-system-out", "jdk-unsafe"))
+pitest {
+  testSourceSets.set(listOf(sourceSets["test"], sourceSets["compatibilityTest"]))
+  targetClasses = setOf("com.github.benmanes.caffeine.guava.*")
+  targetTests = setOf("com.github.benmanes.caffeine.guava.*")
+  threads = Runtime.getRuntime().availableProcessors()
+  junit5PluginVersion = libs.versions.pitest.junit5
+  pitestVersion = libs.versions.pitest.asProvider()
+  timestampedReports = false
 }

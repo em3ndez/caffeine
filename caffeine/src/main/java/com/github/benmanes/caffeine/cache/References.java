@@ -15,15 +15,17 @@
  */
 package com.github.benmanes.caffeine.cache;
 
+import static java.lang.invoke.ConstantBootstraps.fieldVarHandle;
 import static java.util.Locale.US;
 import static java.util.Objects.requireNonNull;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.SoftReference;
 import java.lang.ref.WeakReference;
-import java.util.Objects;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Static utility methods and classes pertaining to weak and soft references.
@@ -46,8 +48,7 @@ final class References {
      * @return The object to which this reference refers, or {@code null} if this reference object
      *         has been cleared
      */
-    @Nullable
-    E get();
+    @Nullable E get();
 
     /**
      * Returns the key that is associated to the cache entry holding this reference. If the cache
@@ -69,8 +70,9 @@ final class References {
       if (object == this) {
         return true;
       } else if (object instanceof InternalReference<?>) {
-        InternalReference<?> referent = (InternalReference<?>) object;
-        return (get() == referent.get());
+        var element = get();
+        var referent = (InternalReference<?>) object;
+        return (element != null) && (element == referent.get());
       }
       return false;
     }
@@ -83,12 +85,13 @@ final class References {
      * @return {@code true} if this object is equivalent by {@link Object#equals} as the argument;
      *         {@code false} otherwise
      */
-    default boolean objectEquals(Object object) {
+    default boolean objectEquals(@Nullable Object object) {
       if (object == this) {
         return true;
       } else if (object instanceof InternalReference<?>) {
-        InternalReference<?> referent = (InternalReference<?>) object;
-        return Objects.equals(get(), referent.get());
+        var referent = (InternalReference<?>) object;
+        var element = get();
+        return (element != null) && element.equals(referent.get());
       }
       return false;
     }
@@ -119,7 +122,7 @@ final class References {
     }
 
     @Override
-    public boolean equals(Object object) {
+    public boolean equals(@Nullable Object object) {
       return referenceEquals(object);
     }
 
@@ -160,7 +163,7 @@ final class References {
     }
 
     @Override
-    public boolean equals(Object object) {
+    public boolean equals(@Nullable Object object) {
       return objectEquals(object);
     }
 
@@ -181,7 +184,8 @@ final class References {
    * the advent that the key is reclaimed so that the entry can be removed from the cache in
    * constant time.
    */
-  static class WeakKeyReference<K> extends WeakReference<K> implements InternalReference<K> {
+  static class WeakKeyReference<K> extends WeakReference<K>
+      implements InternalReference<K> {
     private final int hashCode;
 
     public WeakKeyReference(@Nullable K key, @Nullable ReferenceQueue<K> queue) {
@@ -190,22 +194,22 @@ final class References {
     }
 
     @Override
-    public Object getKeyReference() {
+    public final Object getKeyReference() {
       return this;
     }
 
     @Override
-    public boolean equals(Object object) {
+    public final boolean equals(@Nullable Object object) {
       return referenceEquals(object);
     }
 
     @Override
-    public int hashCode() {
+    public final int hashCode() {
       return hashCode;
     }
 
     @Override
-    public String toString() {
+    public final String toString() {
       return String.format(US,
           "%s{key=%s, hashCode=%d}", getClass().getSimpleName(), get(), hashCode);
     }
@@ -231,7 +235,7 @@ final class References {
     }
 
     @Override
-    public boolean equals(Object object) {
+    public boolean equals(@Nullable Object object) {
       return objectEquals(object);
     }
 
@@ -254,6 +258,10 @@ final class References {
    */
   static final class WeakValueReference<V> extends WeakReference<V>
       implements InternalReference<V> {
+    private static final VarHandle KEY_REFERENCE = fieldVarHandle(MethodHandles.lookup(),
+        "keyReference", VarHandle.class, WeakValueReference.class, Object.class);
+
+    @SuppressWarnings({"FieldCanBeFinal", "PMD.ImmutableField", "unused", "UnusedVariable"})
     private Object keyReference;
 
     public WeakValueReference(Object keyReference,
@@ -264,15 +272,15 @@ final class References {
 
     @Override
     public Object getKeyReference() {
-      return keyReference;
+      return KEY_REFERENCE.getOpaque(this);
     }
 
     public void setKeyReference(Object keyReference) {
-      this.keyReference = keyReference;
+      KEY_REFERENCE.setOpaque(this, keyReference);
     }
 
     @Override
-    public boolean equals(Object object) {
+    public boolean equals(@Nullable Object object) {
       return referenceEquals(object);
     }
 
@@ -295,6 +303,10 @@ final class References {
    */
   static final class SoftValueReference<V> extends SoftReference<V>
       implements InternalReference<V> {
+    private static final VarHandle KEY_REFERENCE = fieldVarHandle(MethodHandles.lookup(),
+        "keyReference", VarHandle.class, SoftValueReference.class, Object.class);
+
+    @SuppressWarnings({"FieldCanBeFinal", "PMD.ImmutableField", "unused", "UnusedVariable"})
     private Object keyReference;
 
     public SoftValueReference(Object keyReference,
@@ -305,15 +317,15 @@ final class References {
 
     @Override
     public Object getKeyReference() {
-      return keyReference;
+      return KEY_REFERENCE.getOpaque(this);
     }
 
     public void setKeyReference(Object keyReference) {
-      this.keyReference = keyReference;
+      KEY_REFERENCE.setOpaque(this, keyReference);
     }
 
     @Override
-    public boolean equals(Object object) {
+    public boolean equals(@Nullable Object object) {
       return referenceEquals(object);
     }
 

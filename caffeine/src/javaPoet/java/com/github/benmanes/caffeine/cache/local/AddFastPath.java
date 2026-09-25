@@ -18,16 +18,17 @@ package com.github.benmanes.caffeine.cache.local;
 import javax.lang.model.element.Modifier;
 
 import com.github.benmanes.caffeine.cache.Feature;
+import com.github.benmanes.caffeine.cache.Rule;
 import com.google.common.collect.Sets;
-import com.squareup.javapoet.MethodSpec;
+import com.palantir.javapoet.MethodSpec;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class AddFastPath extends LocalCacheRule {
+public final class AddFastPath implements Rule<LocalCacheContext> {
 
   @Override
-  protected boolean applies() {
+  public boolean applies(LocalCacheContext context) {
     boolean parentFastPath = Feature.usesFastPath(context.parentFeatures);
     boolean fastpath = Feature.usesFastPath(Sets.union(
         context.parentFeatures, context.generateFeatures));
@@ -35,12 +36,15 @@ public final class AddFastPath extends LocalCacheRule {
   }
 
   @Override
-  protected void execute() {
+  public void execute(LocalCacheContext context) {
     boolean fastpath = Feature.usesFastPath(Sets.union(
         context.parentFeatures, context.generateFeatures));
-    context.cache.addMethod(MethodSpec.methodBuilder("fastpath")
+    var modifiers = fastpath
+        ? new Modifier[] {Modifier.PROTECTED}
+        : context.protectedFinalModifiers();
+    context.classSpec.addMethod(MethodSpec.methodBuilder("fastpath")
         .addStatement("return " + fastpath)
-        .addModifiers(Modifier.PROTECTED)
+        .addModifiers(modifiers)
         .returns(boolean.class)
         .build());
   }

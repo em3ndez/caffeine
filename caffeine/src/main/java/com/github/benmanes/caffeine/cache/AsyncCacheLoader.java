@@ -17,12 +17,17 @@ package com.github.benmanes.caffeine.cache;
 
 import static java.util.Objects.requireNonNull;
 
+import java.io.Serializable;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.function.BiFunction;
 import java.util.function.Function;
+
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Computes or retrieves values asynchronously based on a key, for use in populating a
@@ -32,19 +37,17 @@ import java.util.function.Function;
  * overridden as desired.
  * <p>
  * Usage example:
- * <pre>{@code
- *   AsyncCacheLoader<Key, Graph> loader = (key, executor) ->
- *       createExpensiveGraphAsync(key, executor);
- *   AsyncLoadingCache<Key, Graph> cache = Caffeine.newBuilder().buildAsync(loader);
- * }</pre>
+ * {@snippet class=com.github.benmanes.caffeine.cache.Snippets region=asyncLoader_basic lang=java}
  *
  * @param <K> the type of keys
- * @param <V> the type of values
+ * @param <V> the type of values. A loader may return null values if and only if it declares a
+ *     nullable value type. (Null values are still never <i>stored</i> in the cache.)
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@NullMarked
 @FunctionalInterface
-@SuppressWarnings("PMD.SignatureDeclareThrowsException")
-public interface AsyncCacheLoader<K, V> {
+@SuppressWarnings({"JavadocDeclaration", "JavadocReference", "PMD.SignatureDeclareThrowsException"})
+public interface AsyncCacheLoader<K, V extends @Nullable Object> {
 
   /**
    * Asynchronously computes or retrieves the value corresponding to {@code key}.
@@ -52,7 +55,7 @@ public interface AsyncCacheLoader<K, V> {
    * <b>Warning:</b> loading <b>must not</b> attempt to update any mappings of this cache directly.
    *
    * @param key the non-null key whose value should be loaded
-   * @param executor the executor with which the entry may be asynchronously loaded with
+   * @param executor the executor with which the entry may be asynchronously loaded
    * @return the future value associated with {@code key}
    * @throws Exception or Error, in which case the mapping is unchanged
    * @throws InterruptedException if this method is interrupted. {@code InterruptedException} is
@@ -77,7 +80,7 @@ public interface AsyncCacheLoader<K, V> {
    * <b>Warning:</b> loading <b>must not</b> attempt to update any mappings of this cache directly.
    *
    * @param keys the unique, non-null keys whose values should be loaded
-   * @param executor the executor with which the entry may be asynchronously loaded with
+   * @param executor the executor with which the entry may be asynchronously loaded
    * @return a future containing the map from each key in {@code keys} to the value associated with
    *         that key; <b>may not contain null values</b>
    * @throws Exception or Error, in which case the mappings are unchanged
@@ -85,7 +88,7 @@ public interface AsyncCacheLoader<K, V> {
    *         treated like any other {@code Exception} in all respects except that, when it is
    *         caught, the thread's interrupt status is set
    */
-  default CompletableFuture<? extends Map<? extends K, ? extends V>> asyncLoadAll(
+  default CompletableFuture<? extends Map<? extends K, ? extends @NonNull V>> asyncLoadAll(
       Set<? extends K> keys, Executor executor) throws Exception {
     throw new UnsupportedOperationException();
   }
@@ -103,7 +106,7 @@ public interface AsyncCacheLoader<K, V> {
    *
    * @param key the non-null key whose value should be loaded
    * @param oldValue the non-null old value corresponding to {@code key}
-   * @param executor the executor with which the entry may be asynchronously loaded with
+   * @param executor the executor with which the entry may be asynchronously loaded
    * @return a future containing the new value associated with {@code key}, or containing
    *         {@code null} if the mapping is to be removed
    * @throws Exception or Error, in which case the mapping is unchanged
@@ -112,21 +115,18 @@ public interface AsyncCacheLoader<K, V> {
    *         caught, the thread's interrupt status is set
    */
   default CompletableFuture<? extends V> asyncReload(
-      K key, V oldValue, Executor executor) throws Exception {
+      K key, @NonNull V oldValue, Executor executor) throws Exception {
     return asyncLoad(key, executor);
   }
 
   /**
    * Returns an asynchronous cache loader that delegates to the supplied mapping function for
    * retrieving the values. Note that {@link #asyncLoad} will discard any additional mappings
-   * loaded when retrieving the {@code key} prior to returning to the value to the cache.
+   * loaded when retrieving the {@code key} prior to returning the value to the cache.
    * <p>
    * Usage example:
-   * <pre>{@code
-   *   AsyncCacheLoader<Key, Graph> loader = AsyncCacheLoader.bulk(
-   *       keys -> createExpensiveGraphs(keys));
-   *   AsyncLoadingCache<Key, Graph> cache = Caffeine.newBuilder().buildAsync(loader);
-   * }</pre>
+   * {@snippet class=com.github.benmanes.caffeine.cache.Snippets
+   *           region=asyncLoader_bulk_sync lang=java}
    *
    * @param <K> the key type
    * @param <V> the value type
@@ -134,22 +134,20 @@ public interface AsyncCacheLoader<K, V> {
    * @return an asynchronous cache loader that delegates to the supplied {@code mappingFunction}
    * @throws NullPointerException if the mappingFunction is null
    */
-  static <K, V> AsyncCacheLoader<K, V> bulk(Function<? super Set<? extends K>,
-      ? extends Map<? extends K, ? extends V>> mappingFunction) {
+  static <K, V extends @Nullable Object> AsyncCacheLoader<K, V> bulk(
+      Function<? super Set<? extends K>, ? extends Map<? extends K, ? extends @NonNull V>>
+          mappingFunction) {
     return CacheLoader.bulk(mappingFunction);
   }
 
   /**
    * Returns an asynchronous cache loader that delegates to the supplied mapping function for
    * retrieving the values. Note that {@link #asyncLoad} will silently discard any additional
-   * mappings loaded when retrieving the {@code key} prior to returning to the value to the cache.
+   * mappings loaded when retrieving the {@code key} prior to returning the value to the cache.
    * <p>
    * Usage example:
-   * <pre>{@code
-   *   AsyncCacheLoader<Key, Graph> loader = AsyncCacheLoader.bulk(
-   *       (keys, executor) -> createExpensiveGraphs(keys, executor));
-   *   AsyncLoadingCache<Key, Graph> cache = Caffeine.newBuilder().buildAsync(loader);
-   * }</pre>
+   * {@snippet class=com.github.benmanes.caffeine.cache.Snippets
+   *           region=asyncLoader_bulk_async lang=java}
    *
    * @param <K> the key type
    * @param <V> the value type
@@ -157,22 +155,40 @@ public interface AsyncCacheLoader<K, V> {
    * @return an asynchronous cache loader that delegates to the supplied {@code mappingFunction}
    * @throws NullPointerException if the mappingFunction is null
    */
-  static <K, V> AsyncCacheLoader<K, V> bulk(BiFunction<? super Set<? extends K>, ? super Executor,
-      ? extends CompletableFuture<? extends Map<? extends K, ? extends V>>> mappingFunction) {
-    requireNonNull(mappingFunction);
-    return new AsyncCacheLoader<>() {
-      @Override public CompletableFuture<V> asyncLoad(K key, Executor executor) {
-        return asyncLoadAll(Set.of(key), executor)
-            .thenApply(results -> results.get(key));
-      }
-      @Override public CompletableFuture<Map<K, V>> asyncLoadAll(
-          Set<? extends K> keys, Executor executor) {
-        requireNonNull(keys);
-        requireNonNull(executor);
-        @SuppressWarnings("unchecked")
-        var future = (CompletableFuture<Map<K, V>>) mappingFunction.apply(keys, executor);
-        return future;
-      }
-    };
+  static <K, V extends @Nullable Object> AsyncCacheLoader<K, V> bulk(
+      BiFunction<
+          ? super Set<? extends K>,
+          ? super Executor,
+          ? extends CompletableFuture<? extends Map<? extends K, ? extends @NonNull V>>>
+      mappingFunction) {
+    return new BulkAsyncCacheLoader<>(mappingFunction);
+  }
+}
+
+/** An asynchronous cache loader that delegates to a function that loads the values in bulk. */
+final class BulkAsyncCacheLoader<K, V extends @Nullable Object>
+    implements AsyncCacheLoader<K, V>, Serializable {
+  private static final long serialVersionUID = 1L;
+
+  @SuppressWarnings("serial")
+  final BiFunction<? super Set<? extends K>, ? super Executor,
+      ? extends CompletableFuture<? extends Map<? extends K, ? extends @NonNull V>>>
+      mappingFunction;
+
+  BulkAsyncCacheLoader(BiFunction<? super Set<? extends K>, ? super Executor,
+      ? extends CompletableFuture<? extends Map<? extends K, ? extends @NonNull V>>>
+      mappingFunction) {
+    this.mappingFunction = requireNonNull(mappingFunction);
+  }
+  @SuppressWarnings("NullAway")
+  @Override public CompletableFuture<@Nullable V> asyncLoad(K key, Executor executor) {
+    return asyncLoadAll(Set.of(key), executor).thenApply(results -> results.get(key));
+  }
+  @Override
+  public CompletableFuture<? extends Map<? extends K, ? extends @NonNull V>> asyncLoadAll(
+      Set<? extends K> keys, Executor executor) {
+    requireNonNull(keys);
+    requireNonNull(executor);
+    return mappingFunction.apply(keys, executor);
   }
 }

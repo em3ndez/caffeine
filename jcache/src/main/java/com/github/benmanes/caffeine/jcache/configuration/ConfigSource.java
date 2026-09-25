@@ -17,6 +17,8 @@ package com.github.benmanes.caffeine.jcache.configuration;
 
 import java.net.URI;
 
+import org.jspecify.annotations.NullMarked;
+
 import com.typesafe.config.Config;
 
 /**
@@ -24,13 +26,14 @@ import com.typesafe.config.Config;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@NullMarked
 @FunctionalInterface
 public interface ConfigSource {
 
   /**
    * Returns a {@link Config} that provides the cache configurations.
    *
-   * @param uri a uri that may assist in resolving the resource
+   * @param uri a URI that may assist in resolving the resource
    * @param classloader the classloader to load with
    * @return a configuration
    */

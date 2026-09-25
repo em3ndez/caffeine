@@ -17,20 +17,25 @@ package com.github.benmanes.caffeine.cache.simulator.policy.sketch.feedback;
 
 import static com.google.common.base.Preconditions.checkState;
 import static java.util.Locale.US;
+import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toUnmodifiableSet;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
-import com.github.benmanes.caffeine.cache.simulator.admission.TinyLfu;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admission;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admitter;
 import com.github.benmanes.caffeine.cache.simulator.membership.Membership;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 
@@ -51,7 +56,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
   private final Long2ObjectMap<Node> data;
   private final PolicyStats policyStats;
-  private final TinyLfu admittor;
+  private final Admitter admitter;
   private final int maximumSize;
 
   private final Node headWindow;
@@ -79,9 +84,10 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
   boolean debug;
   boolean trace;
 
+  @SuppressWarnings("Varifier")
   public FeedbackWindowTinyLfuPolicy(double percentMain, FeedbackWindowTinyLfuSettings settings) {
     this.policyStats = new PolicyStats(name() + " (%.0f%%)", 100 * (1.0d - percentMain));
-    this.admittor = new TinyLfu(settings.config(), policyStats);
+    this.admitter = Admission.TINYLFU.from(settings.config(), policyStats);
     this.maximumSize = Math.toIntExact(settings.maximumSize());
 
     int maxMain = (int) (maximumSize * percentMain);
@@ -96,6 +102,7 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
     maxPivot = Math.min(settings.maximumWindowSize(), maxProtected);
     sampleSize = Math.min(settings.maximumSampleSize(), maximumSize);
     feedback = settings.membership().filter().create(settings.filterConfig(sampleSize));
+    checkState(sampleSize >= 2, "maximum size %s is too small for a feedback sample", maximumSize);
 
     checkState(settings.pivotIncrement() > 0, "Must increase by at least 1");
     checkState(settings.pivotDecrement() > 0, "Must decrease by at least 1");
@@ -107,7 +114,7 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   /** Returns all variations of this policy based on the configuration parameters. */
   public static Set<Policy> policies(Config config) {
-    FeedbackWindowTinyLfuSettings settings = new FeedbackWindowTinyLfuSettings(config);
+    var settings = new FeedbackWindowTinyLfuSettings(config);
     return settings.percentMain().stream()
         .map(percentMain -> new FeedbackWindowTinyLfuPolicy(percentMain, settings))
         .collect(toUnmodifiableSet());
@@ -128,9 +135,9 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
     }
     sample++;
 
-    admittor.record(key);
+    admitter.record(key);
     policyStats.recordOperation();
-    Node node = data.get(key);
+    var node = data.get(key);
     if (node == null) {
       onMiss(key);
       policyStats.recordMiss();
@@ -150,7 +157,7 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   /** Adds the entry to the admission window, evicting if necessary. */
   private void onMiss(long key) {
-    Node node = new Node(key, Status.WINDOW);
+    var node = new Node(key, Status.WINDOW);
     node.appendToTail(headWindow);
     data.put(key, node);
     sizeWindow++;
@@ -174,7 +181,7 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   private void demoteProtected() {
     if (sizeProtected > maxProtected) {
-      Node demote = headProtected.next;
+      Node demote = requireNonNull(headProtected.next);
       demote.remove();
       demote.status = Status.PROBATION;
       demote.appendToTail(headProbation);
@@ -184,7 +191,6 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
   /** Moves the entry to the MRU position. */
   private void onProtectedHit(Node node) {
-    admittor.record(node.key);
     node.moveToTail(headProtected);
   }
 
@@ -197,7 +203,7 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
       return;
     }
 
-    Node candidate = headWindow.next;
+    Node candidate = requireNonNull(headWindow.next);
     sizeWindow--;
 
     candidate.remove();
@@ -206,8 +212,8 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     if (data.size() > maximumSize) {
       Node evict;
-      Node victim = headProbation.next;
-      if (admittor.admit(candidate.key, victim.key)) {
+      Node victim = requireNonNull(headProbation.next);
+      if (admitter.admit(candidate.key, victim.key)) {
         evict = victim;
       } else if (adapt(candidate)) {
         evict = victim;
@@ -222,17 +228,16 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
     }
   }
 
-  private boolean adapt(Node candidate) {
+  private boolean adapt(@Var Node candidate) {
     if (adjusted == sampled) {
       // Already adjusted this period
       return false;
     }
 
     if (feedback.mightContain(candidate.key)) {
-      adjusted = sampled;
-
       // Increase admission window
       if (pivot < maxPivot) {
+        adjusted = sampled;
         pivot++;
 
         maxWindow++;
@@ -254,7 +259,12 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
             maxProtected--;
 
             demoteProtected();
-            candidate = headProbation.next.next;
+            Node victim = requireNonNull(headProbation.next);
+            Node next = requireNonNull(victim.next);
+            if (next == headProbation) {
+              break;
+            }
+            candidate = next;
             candidate.remove();
             candidate.status = Status.WINDOW;
             candidate.appendToTail(headWindow);
@@ -267,10 +277,8 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
       }
       return true;
     } else if (sampled > (adjusted + 1)) {
-      adjusted = sampled;
-
       // Decrease admission window
-      boolean decremented = false;
+      @Var boolean decremented = false;
       for (int i = 0; i < pivotDecrement; i++) {
         if (pivot > 0) {
           pivot--;
@@ -279,6 +287,7 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
           sizeWindow--;
           maxProtected++;
           decremented = true;
+          requireNonNull(headWindow.next);
 
           candidate = headWindow.next;
           candidate.remove();
@@ -287,6 +296,9 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
         }
       }
 
+      if (decremented) {
+        adjusted = sampled;
+      }
       if (trace && decremented) {
         System.out.println("↓" + maxWindow);
       }
@@ -324,9 +336,9 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
   static final class Node {
     final long key;
 
-    Status status;
-    Node prev;
-    Node next;
+    @Nullable Node prev;
+    @Nullable Node next;
+    @Nullable Status status;
 
     /** Creates a new sentinel node. */
     public Node() {
@@ -348,6 +360,7 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void appendToHead(Node head) {
+      requireNonNull(head.next);
       Node first = head.next;
       head.next = this;
       first.prev = this;
@@ -357,6 +370,7 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Appends the node to the tail of the list. */
     public void appendToTail(Node head) {
+      requireNonNull(head.prev);
       Node tail = head.prev;
       head.prev = this;
       tail.next = this;
@@ -366,6 +380,8 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
 
     /** Removes the node from the list. */
     public void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
       prev.next = next;
       next.prev = prev;
       next = prev = null;
@@ -409,10 +425,11 @@ public final class FeedbackWindowTinyLfuPolicy implements KeyOnlyPolicy {
       return config().getDouble("feedback-window-tiny-lfu.adaptive-fpp");
     }
     public Config filterConfig(int sampleSize) {
-      Map<String, Object> properties = Map.of(
-          "membership.fpp", adaptiveFpp(),
-          "maximum-size", sampleSize);
-      return ConfigFactory.parseMap(properties).withFallback(config());
+      return ConfigFactory
+          .parseMap(Map.of(
+              "membership.fpp", adaptiveFpp(),
+              "maximum-size", sampleSize))
+          .withFallback(config());
     }
   }
 }

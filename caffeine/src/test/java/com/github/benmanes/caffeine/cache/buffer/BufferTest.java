@@ -15,13 +15,18 @@
  */
 package com.github.benmanes.caffeine.cache.buffer;
 
+import static com.github.benmanes.caffeine.cache.buffer.ReadBuffer.BUFFER_SIZE;
+import static com.github.benmanes.caffeine.cache.buffer.ReadBuffer.FAILED;
+import static com.github.benmanes.caffeine.cache.buffer.ReadBuffer.FULL;
+import static com.github.benmanes.caffeine.cache.buffer.ReadBuffer.SUCCESS;
 import static com.google.common.truth.Truth.assertThat;
 
 import java.util.Arrays;
-import java.util.Iterator;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
-import org.testng.annotations.DataProvider;
-import org.testng.annotations.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
 
@@ -31,34 +36,32 @@ import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class BufferTest {
+@SuppressWarnings("JavadocReference")
+final class BufferTest {
 
-  @DataProvider
-  public Iterator<Object[]> buffers() {
-    return Arrays.stream(BufferType.values())
-        .map(factory -> new Object[] { factory.create() })
-        .iterator();
-  }
-
-  @Test(dataProvider = "buffers")
   @SuppressWarnings("ThreadPriorityCheck")
-  public void record(ReadBuffer<Boolean> buffer) {
+  @ParameterizedTest @MethodSource("buffers")
+  void offer(ReadBuffer<Boolean> buffer) {
+    var invalid = new AtomicReference<Integer>();
     ConcurrentTestHarness.timeTasks(100, () -> {
       for (int i = 0; i < 1000; i++) {
-        int added = buffer.offer(Boolean.TRUE);
-        assertThat(added).isAnyOf(ReadBuffer.SUCCESS, ReadBuffer.FAILED, ReadBuffer.FULL);
+        int added = buffer.offer(true);
+        if ((added != SUCCESS) && (added != FULL) && (added != FAILED)) {
+          invalid.set(added);
+        }
         Thread.yield();
       }
     });
     long recorded = buffer.writes();
-    assertThat(recorded).isEqualTo(ReadBuffer.BUFFER_SIZE);
+    assertThat(invalid.get()).isNull();
+    assertThat(recorded).isEqualTo(BUFFER_SIZE);
   }
 
-  @Test(dataProvider = "buffers")
-  public void drain(ReadBuffer<Boolean> buffer) {
-    for (int i = 0; i < 2 * ReadBuffer.BUFFER_SIZE; i++) {
-      int added = buffer.offer(Boolean.TRUE);
-      assertThat(added).isAnyOf(ReadBuffer.SUCCESS, ReadBuffer.FULL);
+  @ParameterizedTest @MethodSource("buffers")
+  void drain(ReadBuffer<Boolean> buffer) {
+    for (int i = 0; i < 2 * BUFFER_SIZE; i++) {
+      int added = buffer.offer(true);
+      assertThat(added).isAnyOf(SUCCESS, FULL);
     }
     buffer.drain();
     long drained = buffer.reads();
@@ -66,13 +69,13 @@ public final class BufferTest {
     assertThat(drained).isEqualTo(recorded);
   }
 
-  @Test(dataProvider = "buffers")
   @SuppressWarnings("ThreadPriorityCheck")
-  public void recordAndDrain(ReadBuffer<Boolean> buffer) {
+  @ParameterizedTest @MethodSource("buffers")
+  void recordAndDrain(ReadBuffer<Boolean> buffer) {
     ConcurrentTestHarness.timeTasks(100, () -> {
       for (int i = 0; i < 1000; i++) {
-        int result = buffer.offer(Boolean.TRUE);
-        if (result == ReadBuffer.FULL) {
+        int result = buffer.offer(true);
+        if (result == FULL) {
           buffer.drain();
         }
         Thread.yield();
@@ -82,5 +85,9 @@ public final class BufferTest {
     long drained = buffer.reads();
     long recorded = buffer.writes();
     assertThat(drained).isEqualTo(recorded);
+  }
+
+  private static Stream<ReadBuffer<Boolean>> buffers() {
+    return Arrays.stream(BufferType.values()).map(BufferType::create);
   }
 }

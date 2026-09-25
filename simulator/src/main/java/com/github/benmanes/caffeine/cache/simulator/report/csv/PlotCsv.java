@@ -15,6 +15,7 @@
  */
 package com.github.benmanes.caffeine.cache.simulator.report.csv;
 
+import static com.google.common.base.Preconditions.checkState;
 import static java.awt.Font.BOLD;
 import static java.awt.Font.PLAIN;
 import static java.util.Objects.requireNonNull;
@@ -28,6 +29,7 @@ import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Font;
 import java.io.IOException;
+import java.io.Serializable;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
 
@@ -39,14 +41,16 @@ import org.jfree.chart.axis.Axis;
 import org.jfree.chart.plot.CategoryPlot;
 import org.jfree.chart.plot.DefaultDrawingSupplier;
 import org.jfree.chart.ui.RectangleInsets;
+import org.jfree.data.Range;
 import org.jfree.data.category.CategoryDataset;
 import org.jfree.data.category.DefaultCategoryDataset;
 
-import com.google.auto.value.AutoValue;
-import com.google.auto.value.AutoValue.CopyAnnotations;
 import com.google.common.base.Strings;
-import com.univocity.parsers.csv.CsvParser;
-import com.univocity.parsers.csv.CsvParserSettings;
+import com.google.common.collect.Iterables;
+import com.google.common.primitives.Doubles;
+import com.google.errorprone.annotations.Var;
+
+import de.siegmar.fastcsv.reader.CsvReader;
 
 /**
  * A utility that generates a line chart from the csv format produced by {@link CombinedCsvReport}.
@@ -55,19 +59,15 @@ import com.univocity.parsers.csv.CsvParserSettings;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class PlotCsv implements Runnable {
-  private final ChartStyle style;
-  private final Path outputFile;
-  private final Path inputFile;
-  private final String metric;
-  private final String title;
+public record PlotCsv(Path inputFile, Path outputFile, String metric,
+    String title, ChartStyle style) implements Runnable {
 
-  public PlotCsv(Path inputFile, Path outputFile, String metric, String title, ChartStyle style) {
-    this.outputFile = requireNonNull(outputFile);
-    this.inputFile = requireNonNull(inputFile);
-    this.metric = requireNonNull(metric);
-    this.title = requireNonNull(title);
-    this.style = requireNonNull(style);
+  public PlotCsv {
+    requireNonNull(outputFile);
+    requireNonNull(inputFile);
+    requireNonNull(metric);
+    requireNonNull(title);
+    requireNonNull(style);
   }
 
   @Override
@@ -87,20 +87,18 @@ public final class PlotCsv implements Runnable {
   }
 
   private CategoryDataset data() {
-    var settings = new CsvParserSettings();
-    settings.setHeaderExtractionEnabled(true);
-    var parser = new CsvParser(settings);
-
-    var records = parser.parseAllRecords(inputFile.toFile());
-    var headers = parser.getContext().headers();
-    var dataset = new DefaultCategoryDataset();
-    for (var record : records) {
-      for (int i = 1; i < headers.length; i++) {
-        var value = record.getDouble(i);
-        dataset.addValue(value, record.getString(0), headers[i]);
+    try (var reader = CsvReader.builder().ofNamedCsvRecord(inputFile)) {
+      var dataset = new DefaultCategoryDataset();
+      for (var record : reader) {
+        for (var column : Iterables.skip(record.getHeader(), 1)) {
+          var value = record.findField(column).map(Doubles::tryParse).orElse(null);
+          dataset.addValue(value, record.getField(0), column);
+        }
       }
+      return dataset;
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
     }
-    return dataset;
   }
 
   private void configurePlot(JFreeChart chart) {
@@ -109,9 +107,33 @@ public final class PlotCsv implements Runnable {
     configureAxis(plot.getRangeAxis());
     configureGrid(plot);
 
-    for (int i = 0; i < plot.getCategories().size(); i++) {
+    plot.getRangeAxis().setAutoRange(false);
+    plot.getRangeAxis().setRange(calculateRange(plot.getDataset()));
+
+    for (int i = 0; i < plot.getDataset().getRowCount(); i++) {
       plot.getRenderer().setSeriesStroke(i, new BasicStroke(3.0f));
     }
+  }
+
+  static Range calculateRange(CategoryDataset dataset) {
+    @Var double upperBound = Double.NEGATIVE_INFINITY;
+    @Var double lowerBound = Double.POSITIVE_INFINITY;
+    for (int series = 0; series < dataset.getRowCount(); series++) {
+      for (int item = 0; item < dataset.getColumnCount(); item++) {
+        var value = dataset.getValue(series, item);
+        if (value != null) {
+          lowerBound = Math.min(lowerBound, value.doubleValue());
+          upperBound = Math.max(upperBound, value.doubleValue());
+        }
+      }
+    }
+    checkState(lowerBound <= upperBound, "No numeric data points to plot");
+
+    // A margin keeps the extremes off the axis; when every value is equal the span is zero, so fall
+    // back to a fixed window to avoid a degenerate (empty) range that the chart cannot render.
+    double span = upperBound - lowerBound;
+    double margin = (span > 0) ? (0.1 * span) : Math.max(1.0, 0.1 * Math.abs(upperBound));
+    return new Range(lowerBound - margin, upperBound + margin);
   }
 
   private void applyTheme(JFreeChart chart) {
@@ -166,17 +188,16 @@ public final class PlotCsv implements Runnable {
   }
 
   private Color[] getWheelColors() {
-    int n = 360;
-    int wheelStep = 3;
-    int paintIndex = 0;
-    var colors = new Color[n];
-    var wheelPaints = new boolean[n];
-    while (paintIndex < n) {
-      int step = n / wheelStep;
-      for (int angle = 0; angle < n; angle += step) {
+    @Var int wheelStep = 3;
+    @Var int paintIndex = 0;
+    var colors = new Color[360];
+    var wheelPaints = new boolean[colors.length];
+    while (paintIndex < colors.length) {
+      int step = (colors.length / wheelStep);
+      for (int angle = 0; angle < colors.length; angle += step) {
         if (!wheelPaints[angle]) {
           wheelPaints[angle] = true;
-          float hue = ((float) angle) / n;
+          float hue = ((float) angle) / colors.length;
           colors[paintIndex++] = getLineColor(hue);
         }
       }
@@ -188,89 +209,58 @@ public final class PlotCsv implements Runnable {
   private Color getLineColor(float hue) {
     int rgb = 0xffffff & Color.HSBtoRGB(hue, style.saturation(), style.brightness());
     int a = ((int) (style.alpha() * 255.0 + 0.5)) << 24;
-    return new Color(rgb | a, /* alpha */  true);
+    return new Color(rgb | a, /* hasalpha= */  true);
   }
 
-  @AutoValue
-  public abstract static class ChartStyle {
-    abstract RectangleInsets axisOffset();
-
-    abstract Color title();
-    abstract Color subtitle();
-    abstract Color background();
-    abstract Color axisLine();
-    abstract Color axisLabel();
-    abstract Color gridLine();
-    abstract Color gridBand();
-    abstract Color legend();
-    abstract Color label();
-
-    abstract Font extraLargeFont();
-    abstract Font regularFont();
-    abstract Font largeFont();
-
-    abstract float brightness();
-    abstract float saturation();
-    abstract float alpha();
-
-    public static ChartStyle forColors(Color background, Color content, Color grid) {
-      return new AutoValue_PlotCsv_ChartStyle.Builder()
-          .axisOffset(new RectangleInsets(20, 20, 20, 20))
-          .extraLargeFont(new Font("Helvetica", BOLD, 18))
-          .regularFont(new Font("Helvetica", PLAIN, 12))
-          .largeFont(new Font("Helvetica", BOLD, 14))
-          .background(background)
-          .axisLabel(content)
-          .axisLine(content)
-          .subtitle(content)
-          .brightness(0.6f)
-          .saturation(0.7f)
-          .legend(content)
-          .label(content)
-          .title(content)
-          .gridLine(grid)
-          .gridBand(grid)
-          .alpha(0.8f)
-          .build();
+  public record ChartStyle(RectangleInsets axisOffset, Font extraLargeFont, Font regularFont,
+      Font largeFont, Color background, Color axisLabel, Color axisLine, Color subtitle,
+      float brightness, float saturation, Color legend, Color label, Color title, Color gridLine,
+      Color gridBand, float alpha) implements Serializable {
+    public ChartStyle {
+      requireNonNull(extraLargeFont);
+      requireNonNull(regularFont);
+      requireNonNull(axisOffset);
+      requireNonNull(background);
+      requireNonNull(largeFont);
+      requireNonNull(axisLabel);
+      requireNonNull(axisLine);
+      requireNonNull(gridLine);
+      requireNonNull(gridBand);
+      requireNonNull(subtitle);
+      requireNonNull(legend);
+      requireNonNull(label);
+      requireNonNull(title);
     }
-
+    public static ChartStyle forColors(Color background, Color content, Color grid) {
+      return new ChartStyle(
+          /* axisOffset= */ new RectangleInsets(20, 20, 20, 20),
+          /* extraLargeFont= */ new Font("Helvetica", BOLD, 18),
+          /* regularFont= */ new Font("Helvetica", PLAIN, 12),
+          /* largeFont= */ new Font("Helvetica", BOLD, 14),
+          /* background= */ background,
+          /* axisLabel= */ content,
+          /* axisLine= */ content,
+          /* subtitle= */ content,
+          /* brightness= */ 0.6f,
+          /* saturation= */ 0.7f,
+          /* legend= */ content,
+          /* label= */ content,
+          /* title= */ content,
+          /* gridLine= */ grid,
+          /* gridBand= */ grid,
+          /* alpha= */ 0.8f);
+    }
     public static ChartStyle light() {
       var grid = new Color(0xeee8d5);
       var content = new Color(0x585858);
       var background = new Color(0xfdf6e3);
       return ChartStyle.forColors(background, content, grid);
     }
-
     public static ChartStyle dark() {
       var grid = new Color(0x073642);
       var content = new Color(0x93a1a1);
       var background = new Color(0x002b36);
       return ChartStyle.forColors(background, content, grid);
-    }
-
-    @AutoValue.Builder @CopyAnnotations
-    public abstract static class Builder {
-      abstract Builder axisOffset(RectangleInsets axisOffset);
-
-      abstract Builder title(Color title);
-      abstract Builder subtitle(Color subtitle);
-      abstract Builder background(Color background);
-      abstract Builder axisLine(Color axisLine);
-      abstract Builder axisLabel(Color axisLabel);
-      abstract Builder gridLine(Color gridLine);
-      abstract Builder gridBand(Color gridBand);
-      abstract Builder legend(Color legend);
-      abstract Builder label(Color label);
-
-      abstract Builder extraLargeFont(Font extraLargeFont);
-      abstract Builder regularFont(Font regularFont);
-      abstract Builder largeFont(Font largeFont);
-
-      abstract Builder brightness(float brightness);
-      abstract Builder saturation(float saturation);
-      abstract Builder alpha(float alpha);
-
-      abstract ChartStyle build();
     }
   }
 }

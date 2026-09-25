@@ -21,13 +21,16 @@
 package com.github.benmanes.caffeine.cache;
 
 import static com.github.benmanes.caffeine.cache.Caffeine.ceilingPowerOfTwo;
+import static java.lang.invoke.ConstantBootstraps.fieldVarHandle;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.Arrays;
 import java.util.function.Consumer;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
+
+import com.google.errorprone.annotations.Var;
 
 /**
  * A base class providing the mechanics for supporting dynamic striping of bounded buffers. This
@@ -46,7 +49,7 @@ abstract class StripedBuffer<E> implements Buffer<E> {
    *
    * Table entries are of class Buffer and should be padded to reduce cache contention. Padding is
    * overkill for most atomics because they are usually irregularly scattered in memory and thus
-   * don't interfere much with each other. But Atomic objects residing in arrays will tend to be
+   * don't interfere much with each other. But atomic objects residing in arrays will tend to be
    * placed adjacent to each other, and so will most often share cache lines (with a huge negative
    * performance impact) without this precaution.
    *
@@ -84,7 +87,8 @@ abstract class StripedBuffer<E> implements Buffer<E> {
    * again; and for short-lived ones, it does not matter.
    */
 
-  static final VarHandle TABLE_BUSY;
+  static final VarHandle TABLE_BUSY = fieldVarHandle(MethodHandles.lookup(),
+      "tableBusy", VarHandle.class, StripedBuffer.class, int.class);
 
   /** Number of CPUS. */
   static final int NCPU = Runtime.getRuntime().availableProcessors();
@@ -96,7 +100,7 @@ abstract class StripedBuffer<E> implements Buffer<E> {
   static final int ATTEMPTS = 3;
 
   /** Table of buffers. When non-null, size is a power of 2. */
-  volatile Buffer<E> @Nullable[] table;
+  volatile @Nullable Buffer<E> @Nullable [] table;
 
   /** Spinlock (locked via CAS) used when resizing and/or creating Buffers. */
   volatile int tableBusy;
@@ -115,6 +119,7 @@ abstract class StripedBuffer<E> implements Buffer<E> {
   protected abstract Buffer<E> create(E e);
 
   @Override
+  @SuppressWarnings("Varifier")
   public int offer(E e) {
     @SuppressWarnings("deprecation")
     long z = mix64(Thread.currentThread().getId());
@@ -124,8 +129,8 @@ abstract class StripedBuffer<E> implements Buffer<E> {
     int mask;
     int result;
     Buffer<E> buffer;
-    boolean uncontended = true;
-    Buffer<E>[] buffers = table;
+    @Var boolean uncontended = true;
+    @Nullable Buffer<E>[] buffers = table;
     if ((buffers == null)
         || ((mask = buffers.length - 1) < 0)
         || ((buffer = buffers[h & mask]) == null)
@@ -146,20 +151,21 @@ abstract class StripedBuffer<E> implements Buffer<E> {
    * @param wasUncontended false if CAS failed before this call
    * @return {@code Buffer.SUCCESS}, {@code Buffer.FAILED}, or {@code Buffer.FULL}
    */
-  final int expandOrRetry(E e, int h, int increment, boolean wasUncontended) {
-    int result = Buffer.FAILED;
-    boolean collide = false; // True if last slot nonempty
+  final int expandOrRetry(E e, @Var int h, int increment, @Var boolean wasUncontended) {
+    @Var int result = Buffer.FAILED;
+    @Var boolean collide = false; // True if last slot nonempty
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
-      Buffer<E>[] buffers;
+      @Nullable Buffer<E>[] buffers;
       Buffer<E> buffer;
       int n;
       if (((buffers = table) != null) && ((n = buffers.length) > 0)) {
         if ((buffer = buffers[(n - 1) & h]) == null) {
           if ((tableBusy == 0) && casTableBusy()) { // Try to attach new Buffer
-            boolean created = false;
+            @Var boolean created = false;
             try { // Recheck under lock
-              Buffer<E>[] rs;
-              int mask, j;
+              @Nullable Buffer<E>[] rs;
+              int mask;
+              int j;
               if (((rs = table) != null) && ((mask = rs.length) > 0)
                   && (rs[j = (mask - 1) & h] == null)) {
                 rs[j] = create(e);
@@ -196,7 +202,7 @@ abstract class StripedBuffer<E> implements Buffer<E> {
         }
         h += increment;
       } else if ((tableBusy == 0) && (table == buffers) && casTableBusy()) {
-        boolean init = false;
+        @Var boolean init = false;
         try { // Initialize table
           if (table == buffers) {
             @SuppressWarnings({"rawtypes", "unchecked"})
@@ -219,7 +225,7 @@ abstract class StripedBuffer<E> implements Buffer<E> {
 
   @Override
   public void drainTo(Consumer<E> consumer) {
-    Buffer<E>[] buffers = table;
+    @Nullable Buffer<E>[] buffers = table;
     if (buffers == null) {
       return;
     }
@@ -232,11 +238,11 @@ abstract class StripedBuffer<E> implements Buffer<E> {
 
   @Override
   public long reads() {
-    Buffer<E>[] buffers = table;
+    @Nullable Buffer<E>[] buffers = table;
     if (buffers == null) {
       return 0;
     }
-    long reads = 0;
+    @Var long reads = 0;
     for (Buffer<E> buffer : buffers) {
       if (buffer != null) {
         reads += buffer.reads();
@@ -247,11 +253,11 @@ abstract class StripedBuffer<E> implements Buffer<E> {
 
   @Override
   public long writes() {
-    Buffer<E>[] buffers = table;
+    @Nullable Buffer<E>[] buffers = table;
     if (buffers == null) {
       return 0;
     }
-    long writes = 0;
+    @Var long writes = 0;
     for (Buffer<E> buffer : buffers) {
       if (buffer != null) {
         writes += buffer.writes();
@@ -261,18 +267,9 @@ abstract class StripedBuffer<E> implements Buffer<E> {
   }
 
   /** Computes Stafford variant 13 of 64-bit mix function. */
-  static long mix64(long z) {
+  static long mix64(@Var long z) {
     z = (z ^ (z >>> 30)) * 0xbf58476d1ce4e5b9L;
     z = (z ^ (z >>> 27)) * 0x94d049bb133111ebL;
     return z ^ (z >>> 31);
-  }
-
-  static {
-    try {
-      TABLE_BUSY = MethodHandles.lookup()
-          .findVarHandle(StripedBuffer.class, "tableBusy", int.class);
-    } catch (ReflectiveOperationException e) {
-      throw new ExceptionInInitializerError(e);
-    }
   }
 }

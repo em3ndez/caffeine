@@ -17,11 +17,14 @@ package com.github.benmanes.caffeine.examples.coalescing.bulkloader;
 
 import static com.google.common.truth.Truth.assertThat;
 import static java.util.stream.Collectors.toMap;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -34,10 +37,10 @@ import com.google.common.collect.Range;
  * @author guus@bloemsma.net (Guus C. Bloemsma)
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class CoalescingBulkLoaderTest {
+final class CoalescingBulkLoaderTest {
 
   @Test
-  public void maxTime() {
+  void maxTime() {
     var maxTime = Duration.ofMillis(50);
     var end = new AtomicReference<Long>();
     var loader = new CoalescingBulkLoader.Builder<Integer, Integer>()
@@ -59,7 +62,7 @@ public final class CoalescingBulkLoaderTest {
   }
 
   @Test
-  public void maxSize() {
+  void maxSize() {
     int maxSize = 5;
     int requests = 5 * maxSize;
     var maxTime = Duration.ofSeconds(1);
@@ -84,10 +87,66 @@ public final class CoalescingBulkLoaderTest {
     }
 
     results.forEach((key, future) -> assertThat(future.join()).isEqualTo(-key));
-    batchSizes.forEach(batchSize-> assertThat(batchSize).isAtMost(maxSize));
+    batchSizes.forEach(batchSize -> assertThat(batchSize).isAtMost(maxSize));
     assertThat(batchSizes).hasSize(requests / maxSize);
 
     long delay = TimeUnit.NANOSECONDS.toMillis(end.get() - start);
     assertThat(delay).isLessThan(maxTime.toMillis());
+  }
+
+  @Test
+  void duplicateKeysInBatch() throws Exception {
+    var loader = new CoalescingBulkLoader.Builder<Integer, Integer>()
+        .mappingFunction(keys -> keys.stream().collect(toMap(key -> key, key -> -key)))
+        .maxTime(Duration.ofMillis(100))
+        .parallelism(1)
+        .maxSize(2)
+        .build();
+    var cache = Caffeine.newBuilder().buildAsync(loader);
+
+    // Two loads of the same key land in one batch (invalidating the in-flight entry re-triggers a
+    // load) so a duplicate key must complete both futures
+    var first = cache.get(1);
+    cache.synchronous().invalidate(1);
+    var second = cache.get(1);
+
+    assertThat(first.get(5, TimeUnit.SECONDS)).isEqualTo(-1);
+    assertThat(second.get(5, TimeUnit.SECONDS)).isEqualTo(-1);
+    assertThat(cache.get(2).get(5, TimeUnit.SECONDS)).isEqualTo(-2);
+  }
+
+  @Test
+  void mappingFunctionThrows() {
+    var loader = new CoalescingBulkLoader.Builder<Integer, Integer>()
+        .mappingFunction(_ -> { throw new IllegalStateException("load failed"); })
+        .maxTime(Duration.ofMillis(100))
+        .parallelism(1)
+        .maxSize(2)
+        .build();
+    var cache = Caffeine.newBuilder().buildAsync(loader);
+
+    // A throwing mappingFunction must complete the futures exceptionally, not leave them hanging
+    var error = assertThrows(ExecutionException.class, () -> cache.get(1).get(5, TimeUnit.SECONDS));
+    assertThat(error).hasCauseThat().isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void invalidArguments() {
+    var builder = new CoalescingBulkLoader.Builder<Integer, Integer>();
+    assertThrows(IllegalArgumentException.class, () -> builder.maxSize(0));
+    assertThrows(IllegalArgumentException.class, () -> builder.parallelism(0));
+    assertThrows(IllegalArgumentException.class, () -> builder.maxTime(Duration.ZERO));
+    assertThrows(IllegalArgumentException.class, () -> builder.maxTime(Duration.ofMillis(-1)));
+  }
+
+  @Test
+  void missingRequiredFields() {
+    assertThrows(NullPointerException.class, () ->
+        new CoalescingBulkLoader.Builder<Integer, Integer>().build());
+    assertThrows(IllegalStateException.class, () ->
+        new CoalescingBulkLoader.Builder<Integer, Integer>()
+            .mappingFunction(_ -> Map.of())
+            .maxTime(Duration.ofMillis(1))
+            .build());
   }
 }

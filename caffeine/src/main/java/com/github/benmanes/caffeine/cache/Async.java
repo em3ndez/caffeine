@@ -21,13 +21,12 @@ import static java.util.Objects.requireNonNull;
 import java.io.Serializable;
 import java.lang.System.Logger;
 import java.lang.System.Logger.Level;
-import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Static utility methods and classes pertaining to asynchronous operations.
@@ -41,21 +40,28 @@ final class Async {
 
   private Async() {}
 
-  /** Returns if the future has successfully completed. */
+  /** Returns if the future has successfully completed with a non-null value. */
   static boolean isReady(@Nullable CompletableFuture<?> future) {
-    return (future != null) && future.isDone()
-        && !future.isCompletedExceptionally()
-        && (future.join() != null);
+    return getIfReady(future) != null;
   }
 
   /** Returns the current value or null if either not done or failed. */
-  @SuppressWarnings("NullAway")
-  static @Nullable <V> V getIfReady(@Nullable CompletableFuture<V> future) {
-    return isReady(future) ? future.join() : null;
+  static <V extends @Nullable Object> @Nullable V getIfReady(
+      @Nullable CompletableFuture<V> future) {
+    if ((future == null) || !future.isDone() || future.isCompletedExceptionally()) {
+      return null;
+    }
+    try {
+      return future.join();
+    } catch (CancellationException | CompletionException e) {
+      // not ready if the future's completion state was obtruded
+      return null;
+    }
   }
 
   /** Returns the value when completed successfully or null if failed. */
-  static @Nullable <V> V getWhenSuccessful(@Nullable CompletableFuture<V> future) {
+  static <V extends @Nullable Object> @Nullable V getWhenSuccessful(
+      @Nullable CompletableFuture<V> future) {
     try {
       return (future == null) ? null : future.join();
     } catch (CancellationException | CompletionException e) {
@@ -68,7 +74,7 @@ final class Async {
    * if successful to the user-supplied removal listener.
    */
   static final class AsyncRemovalListener<K, V>
-      implements RemovalListener<K, CompletableFuture<V>>, Serializable {
+      implements RemovalListener<K, CompletableFuture<@Nullable V>>, Serializable {
     private static final long serialVersionUID = 1L;
 
     final RemovalListener<K, V> delegate;
@@ -82,17 +88,25 @@ final class Async {
     @Override
     @SuppressWarnings("FutureReturnValueIgnored")
     public void onRemoval(@Nullable K key,
-        @Nullable CompletableFuture<V> future, RemovalCause cause) {
+        @Nullable CompletableFuture<@Nullable V> future, RemovalCause cause) {
       if (future != null) {
-        future.thenAcceptAsync(value -> {
+        future.thenAccept(value -> {
           if (value != null) {
+            Runnable task = () -> {
+              try {
+                delegate.onRemoval(key, value, cause);
+              } catch (Throwable t) {
+                logger.log(Level.WARNING, "Exception thrown by removal listener", t);
+              }
+            };
             try {
-              delegate.onRemoval(key, value, cause);
+              executor.execute(task);
             } catch (Throwable t) {
-              logger.log(Level.WARNING, "Exception thrown by removal listener", t);
+              logger.log(Level.ERROR, "Exception thrown when submitting removal listener", t);
+              task.run();
             }
           }
-        }, executor);
+        });
       }
     }
 
@@ -135,7 +149,7 @@ final class Async {
    * {@code 0} to indicate that the entry should not be evicted due to a size constraint. If the
    * value is computed successfully then the entry must be reinserted so that the weight is updated
    * and the expiration timeouts reflect the value once present. This can be done safely using
-   * {@link Map#replace(Object, Object, Object)}.
+   * {@link java.util.Map#replace(Object, Object, Object)}.
    */
   static final class AsyncWeigher<K, V> implements Weigher<K, CompletableFuture<V>>, Serializable {
     private static final long serialVersionUID = 1L;
@@ -148,7 +162,8 @@ final class Async {
 
     @Override
     public int weigh(K key, CompletableFuture<V> future) {
-      return isReady(future) ? delegate.weigh(key, future.join()) : 0;
+      V value = getIfReady(future);
+      return (value == null) ? 0 : delegate.weigh(key, value);
     }
 
     Object writeReplace() {
@@ -174,8 +189,9 @@ final class Async {
 
     @Override
     public long expireAfterCreate(K key, CompletableFuture<V> future, long currentTime) {
-      if (isReady(future)) {
-        long duration = delegate.expireAfterCreate(key, future.join(), currentTime);
+      V value = getIfReady(future);
+      if (value != null) {
+        long duration = delegate.expireAfterCreate(key, value, currentTime);
         return Math.min(duration, MAXIMUM_EXPIRY);
       }
       return ASYNC_EXPIRY;
@@ -184,10 +200,11 @@ final class Async {
     @Override
     public long expireAfterUpdate(K key, CompletableFuture<V> future,
         long currentTime, long currentDuration) {
-      if (isReady(future)) {
+      V value = getIfReady(future);
+      if (value != null) {
         long duration = (currentDuration > MAXIMUM_EXPIRY)
-            ? delegate.expireAfterCreate(key, future.join(), currentTime)
-            : delegate.expireAfterUpdate(key, future.join(), currentTime, currentDuration);
+            ? delegate.expireAfterCreate(key, value, currentTime)
+            : delegate.expireAfterUpdate(key, value, currentTime, currentDuration);
         return Math.min(duration, MAXIMUM_EXPIRY);
       }
       return ASYNC_EXPIRY;
@@ -196,8 +213,9 @@ final class Async {
     @Override
     public long expireAfterRead(K key, CompletableFuture<V> future,
         long currentTime, long currentDuration) {
-      if (isReady(future)) {
-        long duration = delegate.expireAfterRead(key, future.join(), currentTime, currentDuration);
+      V value = getIfReady(future);
+      if (value != null) {
+        long duration = delegate.expireAfterRead(key, value, currentTime, currentDuration);
         return Math.min(duration, MAXIMUM_EXPIRY);
       }
       return ASYNC_EXPIRY;

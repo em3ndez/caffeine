@@ -1,0 +1,228 @@
+# Synchronization Reference
+
+## Lock Hierarchy (strict total order)
+
+```
+evictionLock (outer, ReentrantLock)
+  └─ CHM bin lock (implicit in compute/computeIfPresent)
+      └─ synchronized(node) (inner)
+```
+
+Never acquire in reverse order. evictionLock is NEVER acquired while holding
+synchronized(node). synchronized(node) is acquired in various contexts: inside
+CHM compute lambdas, under evictionLock outside compute (makeDead, AddTask),
+or standalone (put fast path, Policy API methods).
+
+**Never hold `synchronized(node)` across a CHM mutating call** (`data.putIfAbsent`/
+`compute`/`computeIfPresent`/`merge`). CHM takes bin-head locks internally not just to
+link the entry but also for a follow-on table resize (`addCount`→`transfer`, which runs
+*after* the node is already visible). Holding a node monitor across the call is therefore a
+`node`→bin acquisition that deadlocks against a concurrent `remove`/`compute`'s standard
+bin→node order (a real `put`-insert vs `computeIfPresent`-remove deadlock was shipped and
+reverted this way). To mutate the map and node-scoped state together, do it *inside* the CHM
+lambda — which holds only the bin lock, no node monitor — e.g.
+`data.computeIfAbsent(ref, k -> { discardRefresh(k); return node; })`.
+
+## What Each Lock Protects
+
+### evictionLock
+- Window/probation/protected deques
+- Timer wheel
+- Frequency sketch mutations
+- Weight counters (weightedSize, windowWeightedSize)
+- Drain status transitions (under lock)
+- policyWeight, split across its own field and the node's metadata word
+- metadata field on nodes (queue type, and a weighted node's policy weight high half)
+
+### CHM bin lock (held implicitly during compute/computeIfPresent/merge)
+- Atomic read-modify-write on map entries
+- Ensures "at most once" for mapping functions
+
+### synchronized(node)
+- Value field mutations (setValue)
+- Weight field mutations (setWeight)
+- Access time / write time updates
+- Node lifecycle transitions (alive → retired → dead)
+- Expiration re-validation during eviction
+
+## Node Field Access Modes
+
+| Field | Read Mode | Write Mode | Guard |
+|-------|-----------|------------|-------|
+| value (strong) | getAcquire | setRelease + storeStoreFence; `die()` plain-sets null | synchronized(node) for mutations; fence orders the store before subsequent timestamp stores |
+| value (weak/soft) | getAcquire | setRelease + storeStoreFence | synchronized(node); the release store publishes the new reference, and the fence orders it before the old reference's `clear()` and subsequent timestamp stores |
+| key (strong) | getOpaque | set (retire/die only) | synchronized(node) for retire/die; otherwise immutable after construction |
+| key (weak) | plain | set (retire/die only) | synchronized(node) for retire/die; otherwise immutable after construction; getRef uses getOpaque |
+| accessTime | getOpaque | setOpaque | benign races acceptable |
+| writeTime | getOpaque | setOpaque | synchronized(node) |
+| variableTime | getOpaque | setOpaque, CAS | synchronized(node), except `tryExpireAfterRead`'s lock-free CAS |
+| weight | plain | plain | synchronized(node); unlocked reads accept staleness |
+| policyWeight | plain | plain | evictionLock; unlocked reads accept staleness |
+| metadata | plain | plain | evictionLock |
+
+`getPolicyWeight` reads two plain fields, its own and `metadata`, so an unlocked reader can
+see them from different moments. Maintenance callers hold `evictionLock`. A `Policy` snapshot's
+caller holds it through the mapping function; parallel workers do not acquire it themselves.
+The snapshot clamps the result into the `int` range for `CacheEntry.weight`. That is the policy's
+view, not what a writer last published under the node's monitor, so a concurrent update can pair a
+value with an older weight; the snapshot is best effort rather than synchronizing every node. A
+replayed update can also leave the policy weight negative or beyond the `int` range, a weight no
+entry has. `WeightLimiter` reads a negative running sum as overflow and stops, so without the clamp
+a finite `coldestWeighted` or `hottestWeighted` limit ends at that entry.
+
+Note: the expiry read protocol pairs these modes. A rewrite stores the value and then the
+timestamps, with `setValue`'s trailing `storeStoreFence` holding that order; a lock-free
+reader calls `hasExpired` (timestamps, ending in a `loadLoadFence`) and then loads the value.
+A reader that observes a timestamp written by the rewriting thread is therefore guaranteed that
+thread's value, which closes the tear. It does not follow that an already-announced EXPIRED value
+is never returned. A reader that judged the entry live at its own clock reading can park in
+`Expiry.expireAfterRead` and land `tryExpireAfterRead`'s CAS after a writer has announced the
+entry's EXPIRED eviction but before it stores the replacement, leaving the announced value looking
+fresh to a later reader. The opaque `setAccessTime` store for a fixed `expireAfterAccess` has the
+same window with no callback, needing only a pause between `hasExpired` and the store. That is
+the read-extension resurrection in `design-decisions.md`, and it is a benign race: any lock-free
+read can be invalidated an instruction after it returns, so closing it would require synchronized
+reads. Readers must not load the value before `hasExpired`, and writers must not store a
+timestamp before `setValue`; a caller acting on an expired verdict exempts an in-flight async load
+via `isComputingAsync` on a value loaded after the check.
+
+## Drain Status State Machine
+
+```
+IDLE(0) ──CAS──► REQUIRED(1) ──schedule──► PROCESSING_TO_IDLE(2)
+  ▲                                              │
+  └──────────CAS success──────────────────────────┘
+                                                  │
+                                           CAS from REQUIRED
+                                                  │
+                                                  ▼
+                                    PROCESSING_TO_REQUIRED(3)
+                                           │
+                                           └──► set REQUIRED, loop
+```
+
+- IDLE → REQUIRED: CAS by `scheduleAfterWrite()` (lock-free)
+- REQUIRED → PROCESSING_TO_IDLE: set by `scheduleDrainBuffers()` or `maintenance()` (under evictionLock)
+- PROCESSING_TO_IDLE → IDLE: CAS by `maintenance()` exit (under evictionLock)
+- PROCESSING_TO_IDLE → PROCESSING_TO_REQUIRED: CAS by `scheduleAfterWrite()` (lock-free)
+- PROCESSING_TO_REQUIRED → set REQUIRED: by `maintenance()` exit (under evictionLock)
+
+Access modes: opaque and acquire reads, release and opaque writes, CAS for transitions.
+
+**Both processing states are terminal under an executor that accepts a task and drops it.**
+`scheduleDrainBuffers` sets `PROCESSING_TO_IDLE` *before* `executor.execute(drainBuffersTask)`, so
+a silently-discarding executor leaves the machine parked there with no maintainer. Every exit is
+then closed: `shouldDrainBuffers` returns false for both processing states, `scheduleDrainBuffers`
+returns early on `>= PROCESSING_TO_IDLE`, and both of `scheduleAfterWrite`'s processing arms
+return. The only way out is `afterWrite`'s inline assist, which needs the write buffer to fill, so
+a cache that goes quiescent *or* read-only stays parked. This is by design and is what
+`Caffeine.executor`'s javadoc means by an executor "that discards tasks or never runs them may
+experience non-deterministic behavior"; `BoundedLocalCacheTest.scheduleDrainBuffers_discarded_quiescent`
+pins the parked state deliberately. Don't add a recovery path for a broken executor.
+
+## User Callback Invocation Points
+
+The lock contexts below describe locks acquired by each cache path; callbacks can also inherit
+locks held by their callers.
+
+### notifyEviction — INSIDE synchronized(node)
+Irrevocable. In `remap()` and `doComputeIfAbsent()` it precedes the mapping function, weigher,
+and expiry callbacks; `put()` calls its weigher (outside all locks) and `expireAfterCreate` first.
+- `put()`, `evictEntry()`, `remove()`, `removeNode()`
+- `remap()`, `doComputeIfAbsent()` (before try block with user code)
+
+### notifyRemoval — OUTSIDE synchronized(node) and CHM bin lock, AFTER mutations
+Wraps the listener call in a task submitted to the executor. The actual
+`onRemoval` normally runs in the executor thread outside all locks. Note: in
+`evictEntry` and `removeNode`, notifyRemoval is called while evictionLock is
+still held (but outside synchronized(node) and CHM bin lock).
+
+**Inline delivery**: a caller-runs executor such as `Runnable::run` runs the task on the caller
+thread, and if `executor.execute(task)` throws (such as `RejectedExecutionException`) the task is
+invoked inline (`task.run()`). From `evictEntry`/`removeNode` that caller thread is holding
+`evictionLock`, so the user's `RemovalListener` runs synchronously under the eviction lock. A
+listener that re-enters the cache via a write can deadlock in that path.
+
+### Mapping functions (compute, merge, etc.)
+Lock context depends on path:
+- **Existing node**: INSIDE CHM bin lock + synchronized(node)
+- **New node (n == null)**: INSIDE CHM bin lock only (no node to synchronize on)
+Re-entrant cache operations from these callbacks can deadlock.
+
+### Weigher.weigh
+Lock context depends on path:
+- **put()/replace()**: OUTSIDE all locks (called before CHM operation)
+- **compute/merge (existing node)**: INSIDE CHM bin lock + synchronized(node)
+- **compute/merge (new node)**: INSIDE CHM bin lock only
+Can throw (caught by catch-commit-rethrow in compute paths).
+
+### Expiry callbacks
+Lock context depends on path:
+- **put()**: INSIDE synchronized(node) only (no CHM bin lock)
+- **compute/merge (existing node)**: INSIDE CHM bin lock + synchronized(node)
+- **New node creation**: varies by call site
+Can throw (caught by catch-commit-rethrow in compute paths).
+
+### StatsCounter
+`LocalCache.statsAware` records misses and load outcomes inside the computation, under its
+CHM bin lock and, for an existing bounded node, its node monitor. During maintenance,
+`recordEviction` runs under `evictionLock`. `GuardedStatsCounter` suppresses exceptions; it
+does not defer these calls.
+
+### CompletableFuture dependent actions
+Non-async actions may run inline on a thread invoking a completion method, or on the
+registering thread when the future is already complete. They inherit any locks that thread
+holds. `LocalAsyncCache.handleCompletion` can remove the mapping or finalize its weight and
+expiration, so completing a cached future inside a mapping function can recursively modify
+the cache. `AsyncBulkCompleter.fillProxies` acquires no surrounding lock before completing
+proxies, but its caller may already hold one.
+
+### CacheLoader.load
+Lock context depends on path:
+- **Initial load (new node)**: INSIDE CHM bin lock, NOT inside synchronized(node)
+- **Expired/collected existing node**: INSIDE CHM bin lock + synchronized(node)
+
+### CacheLoader.asyncReload / asyncLoad — INSIDE the `refreshes` CHM bin lock
+Refresh registration invokes the loader inside a `refreshes.compute*` bin lambda, so the
+loader dispatch (including the default `CompletableFuture.supplyAsync`'s `executor.execute`)
+runs under the **refreshes** bin lock. Two consequences, both bounded to user misuse:
+- **Caller-runs executor** (`Runnable::run` or a synchronous prefix) runs the entire user
+  reload body under that lock — a slow reload stalls other refreshes on the same bin.
+- The only closing leg of a `refreshes-bin → data-bin` order (which would invert
+  `discardRefresh`'s `data-bin → refreshes-bin`) is a user loader re-entering the cache —
+  the documented callback-re-entrancy hazard, not an in-library cycle.
+
+### RemovalListener.onRemoval — OUTSIDE all locks (normal path)
+Delivered asynchronously via executor. Safe for re-entrant cache operations on
+the normal path. Exception: see inline delivery under `notifyRemoval`; a caller-runs or
+rejecting executor delivers on the caller thread, which holds `evictionLock` for
+eviction-triggered removals.
+
+### EvictionListener — INSIDE synchronized(node), varies for other locks
+- In `evictEntry`/`removeNode`: evictionLock + CHM bin lock + synchronized(node)
+- In `put()`: synchronized(node) only
+- In `remove()`/compute paths: CHM bin lock + synchronized(node)
+- Writers to the key wait for the listener; lock-free readers do not, and return the value until the
+  computation completes. That is `ConcurrentHashMap.compute`'s atomicity and what
+  `Caffeine.evictionListener` means by "the atomic operation to remove the entry". A listener that
+  disposes of the value must tolerate a reader still holding it, as it must after any removal.
+Synchronous. Re-entrant cache operations risk deadlock.
+
+### Other user components under evictionLock
+These also run while `evictionLock` is held: `Scheduler.schedule` (through `Pacer`),
+`Executor.execute` (the maintenance task and eviction's removal notifications),
+`StatsCounter.recordEviction`, `Ticker.read`, and `Policy` snapshot mapping functions (after
+maintenance). One that blocks stalls maintenance, then writers once the write buffer fills.
+
+## Buffer Semantics
+
+### Read buffer (BoundedBuffer — striped ring buffer)
+- Lossy: drops are benign (affects eviction quality, not correctness)
+- Lock-free CAS on per-stripe slots
+- Drained under evictionLock during maintenance (single consumer)
+
+### Write buffer (MpscGrowableArrayQueue)
+- Guaranteed delivery: if offer fails, acquires evictionLock
+  and runs maintenance inline
+- Tasks: AddTask, UpdateTask, RemovalTask
+- Drained under evictionLock during maintenance (single consumer)

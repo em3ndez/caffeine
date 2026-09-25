@@ -16,10 +16,11 @@
 package com.github.benmanes.caffeine.cache;
 
 import static com.github.benmanes.caffeine.cache.Caffeine.calculateHashMapCapacity;
-import static com.github.benmanes.caffeine.cache.LocalLoadingCache.newBulkMappingFunction; // NOPMD
-import static com.github.benmanes.caffeine.cache.LocalLoadingCache.newMappingFunction; // NOPMD
+import static com.github.benmanes.caffeine.cache.LocalCache.castNonNull;
+import static com.github.benmanes.caffeine.cache.LocalLoadingCache.newBulkMappingFunction;
+import static com.github.benmanes.caffeine.cache.LocalLoadingCache.newMappingFunction;
+import static java.lang.invoke.ConstantBootstraps.fieldVarHandle;
 import static java.util.Objects.requireNonNull;
-import static java.util.function.Function.identity;
 
 import java.io.InvalidObjectException;
 import java.io.ObjectInputStream;
@@ -37,6 +38,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.Spliterator;
@@ -50,10 +52,11 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.stats.StatsCounter;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import com.google.errorprone.annotations.Var;
 
 /**
  * An in-memory cache that has no capabilities for bounding the map. This implementation provides
@@ -64,9 +67,10 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
 @SuppressWarnings("serial")
 final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
   static final Logger logger = System.getLogger(UnboundedLocalCache.class.getName());
-  static final VarHandle REFRESHES;
+  static final VarHandle REFRESHES = fieldVarHandle(MethodHandles.lookup(),
+      "refreshes", VarHandle.class, UnboundedLocalCache.class, ConcurrentMap.class);
 
-  @Nullable final RemovalListener<K, V> removalListener;
+  final @Nullable RemovalListener<K, V> removalListener;
   final ConcurrentHashMap<K, V> data;
   final StatsCounter statsCounter;
   final boolean isRecordingStats;
@@ -76,7 +80,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
   @Nullable Set<K> keySet;
   @Nullable Collection<V> values;
   @Nullable Set<Entry<K, V>> entrySet;
-  @Nullable volatile ConcurrentMap<Object, CompletableFuture<?>> refreshes;
+  volatile @Nullable ConcurrentMap<Object, CompletableFuture<?>> refreshes;
 
   UnboundedLocalCache(Caffeine<? super K, ? super V> builder, boolean isAsync) {
     this.data = new ConcurrentHashMap<>(builder.getInitialCapacity());
@@ -87,24 +91,24 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     this.isAsync = isAsync;
   }
 
-  static {
-    try {
-      REFRESHES = MethodHandles.lookup()
-          .findVarHandle(UnboundedLocalCache.class, "refreshes", ConcurrentMap.class);
-    } catch (ReflectiveOperationException e) {
-      throw new ExceptionInInitializerError(e);
-    }
-  }
-
   @Override
   public boolean isAsync() {
     return isAsync;
   }
 
   @Override
-  @SuppressWarnings("NullAway")
-  public Expiry<K, V> expiry() {
+  public @Nullable RemovalListener<K, V> removalListener() {
+    return removalListener;
+  }
+
+  @Override
+  public @Nullable Expiry<K, V> expiry() {
     return null;
+  }
+
+  @Override
+  public boolean collectKeys() {
+    return false;
   }
 
   @Override
@@ -148,14 +152,14 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
   @Override
   public Map<K, V> getAllPresent(Iterable<? extends K> keys) {
-    var result = new LinkedHashMap<K, V>(calculateHashMapCapacity(keys));
+    var result = new LinkedHashMap<K, @Nullable V>(calculateHashMapCapacity(keys));
     for (K key : keys) {
       result.put(key, null);
     }
 
     int uniqueKeys = result.size();
     for (var iter = result.entrySet().iterator(); iter.hasNext();) {
-      Map.Entry<K, V> entry = iter.next();
+      Map.Entry<K, @Nullable V> entry = iter.next();
       V value = data.get(entry.getKey());
       if (value == null) {
         iter.remove();
@@ -166,7 +170,9 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     statsCounter.recordHits(result.size());
     statsCounter.recordMisses(uniqueKeys - result.size());
 
-    return Collections.unmodifiableMap(result);
+    @SuppressWarnings({"NullableProblems", "NullAway"})
+    Map<K, V> unmodifiable = Collections.unmodifiableMap(result);
+    return unmodifiable;
   }
 
   @Override
@@ -177,14 +183,10 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     return statsCounter;
   }
 
-  private boolean hasRemovalListener() {
-    return (removalListener != null);
-  }
-
   @Override
-  @SuppressWarnings("NullAway")
   public void notifyRemoval(@Nullable K key, @Nullable V value, RemovalCause cause) {
-    if (!hasRemovalListener()) {
+    var removalListener = removalListener();
+    if (removalListener == null) {
       return;
     }
     Runnable task = () -> {
@@ -213,13 +215,12 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
   }
 
   @Override
-  @SuppressWarnings("NullAway")
   public ConcurrentMap<Object, CompletableFuture<?>> refreshes() {
-    var pending = refreshes;
+    @Var var pending = refreshes;
     if (pending == null) {
       pending = new ConcurrentHashMap<>();
       if (!REFRESHES.compareAndSet(this, null, pending)) {
-        pending = refreshes;
+        pending = requireNonNull(refreshes);
       }
     }
     return pending;
@@ -246,41 +247,25 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
   }
 
   @Override
+  @SuppressWarnings("ResultOfMethodCallIgnored")
   public void replaceAll(BiFunction<? super K, ? super V, ? extends V> function) {
     requireNonNull(function);
 
-    // ensures that the removal notification is processed after the removal has completed
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    K[] notificationKey = (K[]) new Object[1];
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    V[] notificationValue = (V[]) new Object[1];
-    data.replaceAll((key, value) -> {
-      if (notificationKey[0] != null) {
-        notifyRemoval(notificationKey[0], notificationValue[0], RemovalCause.REPLACED);
-        notificationValue[0] = null;
-        notificationKey[0] = null;
-      }
-
-      V newValue = requireNonNull(function.apply(key, value));
-      if (newValue != value) {
-        notificationKey[0] = key;
-        notificationValue[0] = value;
-      }
-
-      return newValue;
-    });
-    if (notificationKey[0] != null) {
-      notifyRemoval(notificationKey[0], notificationValue[0], RemovalCause.REPLACED);
+    BiFunction<K, @Nullable V, @Nullable V> remappingFunction = (key, oldValue) ->
+        requireNonNull(function.apply(key, requireNonNull(oldValue)));
+    for (K key : data.keySet()) {
+      remap(key, remappingFunction, /* hints= */ null, /* computeIfAbsent= */ false);
     }
   }
 
   @Override
-  public V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction,
+  public @Nullable V computeIfAbsent(K key,
+      Function<? super K, ? extends @Nullable V> mappingFunction,
       boolean recordStats, boolean recordLoad) {
     requireNonNull(mappingFunction);
 
-    // optimistic fast path due to computeIfAbsent always locking
-    V value = data.get(key);
+    // An optimistic fast path to avoid unnecessary locking
+    @Var V value = data.get(key);
     if (value != null) {
       if (recordStats) {
         statsCounter.recordHits(1);
@@ -290,11 +275,12 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     boolean[] missed = new boolean[1];
     value = data.computeIfAbsent(key, k -> {
-      // Do not communicate to CacheWriter on a load
       missed[0] = true;
-      return recordStats
-          ? statsAware(mappingFunction, recordLoad).apply(key)
-          : mappingFunction.apply(key);
+      V computed = recordStats
+          ? statsAware(mappingFunction, recordLoad).apply(k)
+          : mappingFunction.apply(k);
+      discardRefresh(k);
+      return castNonNull(computed);
     });
     if (!missed[0] && recordStats) {
       statsCounter.recordHits(1);
@@ -304,32 +290,34 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
   @Override
   public @Nullable V computeIfPresent(K key,
-      BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+      BiFunction<? super K, ? super V, ? extends @Nullable V> remappingFunction) {
     requireNonNull(remappingFunction);
 
-    // optimistic fast path due to computeIfAbsent always locking
+    // An optimistic fast path to avoid unnecessary locking
     if (!data.containsKey(key)) {
       return null;
     }
 
     // ensures that the removal notification is processed after the removal has completed
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    V[] oldValue = (V[]) new Object[1];
-    boolean[] replaced = new boolean[1];
+    @SuppressWarnings({"rawtypes", "unchecked", "Varifier"})
+    @Nullable V[] oldValue = (V[]) new Object[1];
     V nv = data.computeIfPresent(key, (K k, V value) -> {
-      BiFunction<? super K, ? super V, ? extends V> function = statsAware(remappingFunction,
-          /* recordLoad */ true, /* recordLoadFailure */ true);
-      V newValue = function.apply(k, value);
+      BiFunction<? super K, ? super V, ? extends @Nullable V> function = statsAware(
+          remappingFunction, /* recordLoad= */ true, /* recordLoadFailure= */ true);
+      try {
+        V newValue = function.apply(k, value);
+        if (newValue != value) {
+          oldValue[0] = value;
+        }
 
-      replaced[0] = (newValue != null);
-      if (newValue != value) {
-        oldValue[0] = value;
+        discardRefresh(k);
+        return newValue;
+      } catch (Throwable t) {
+        discardRefresh(k);
+        throw t;
       }
-
-      discardRefresh(k);
-      return newValue;
     });
-    if (replaced[0]) {
+    if (nv != null) {
       notifyOnReplace(key, oldValue[0], nv);
     } else if (oldValue[0] != null) {
       notifyRemoval(key, oldValue[0], RemovalCause.EXPLICIT);
@@ -338,20 +326,24 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
   }
 
   @Override
-  public V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction,
+  public @Nullable V compute(K key,
+      BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction,
       @Nullable Expiry<? super K, ? super V> expiry, boolean recordLoad,
-      boolean recordLoadFailure) {
+      boolean recordLoadFailure, @Nullable RemapHints hints) {
     requireNonNull(remappingFunction);
-    return remap(key, statsAware(remappingFunction, recordLoad, recordLoadFailure));
+    return remap(key, statsAware(remappingFunction, recordLoad, recordLoadFailure),
+        hints, /* computeIfAbsent= */ true);
   }
 
   @Override
-  public V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
+  public @Nullable V merge(K key, V value,
+      BiFunction<? super V, ? super V, ? extends @Nullable V> remappingFunction) {
     requireNonNull(remappingFunction);
     requireNonNull(value);
 
-    return remap(key, (k, oldValue) ->
-      (oldValue == null) ? value : statsAware(remappingFunction).apply(oldValue, value));
+    return remap(key, (K k, @Nullable V oldValue) ->
+      (oldValue == null) ? value : statsAware(remappingFunction).apply(oldValue, value),
+      /* hints= */ null, /* computeIfAbsent= */ true);
   }
 
   /**
@@ -359,28 +351,50 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
    *
    * @param key key with which the specified value is to be associated
    * @param remappingFunction the function to compute a value
+   * @param hints flags from a query-style caller, or {@code null} if not present
+   * @param computeIfAbsent whether the caller may create an entry when the key is absent
    * @return the new value associated with the specified key, or null if none
    */
-  V remap(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
+  @Nullable V remap(K key,
+      BiFunction<? super K, ? super @Nullable V, ? extends @Nullable V> remappingFunction,
+      @Nullable RemapHints hints, boolean computeIfAbsent) {
     // ensures that the removal notification is processed after the removal has completed
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    V[] oldValue = (V[]) new Object[1];
-    boolean[] replaced = new boolean[1];
-    V nv = data.compute(key, (K k, V value) -> {
-      V newValue = remappingFunction.apply(k, value);
-      if ((value == null) && (newValue == null)) {
+    @SuppressWarnings({"rawtypes", "unchecked", "Varifier"})
+    @Nullable V[] oldValue = (@Nullable V[]) new Object[1];
+    V nv = data.compute(key, (K k, @Nullable V value) -> {
+      if ((value == null) && !computeIfAbsent) {
         return null;
       }
+      try {
+        V newValue = remappingFunction.apply(k, value);
+        if ((value == null) && (newValue == null)) {
+          // A stale refresh whose entry is absent leaves a successor's registration intact
+          if ((hints == null) || !hints.preserveRefresh) {
+            discardRefresh(k);
+          }
+          return null;
+        }
 
-      replaced[0] = (newValue != null);
-      if ((value != null) && (newValue != value)) {
-        oldValue[0] = value;
+        if (newValue != value) {
+          oldValue[0] = value;
+        }
+
+        // A query-style caller may flag a same-instance return as a no-op that must leave any
+        // in-flight refresh intact whereas a real mutation discards a racing refresh so that a
+        // stale reload cannot overwrite the new mapping.
+        boolean preserveRefresh = (hints != null) && hints.preserveRefresh && (newValue == value);
+        if (!preserveRefresh) {
+          discardRefresh(k);
+        }
+        return newValue;
+      } catch (Throwable t) {
+        if (value != null) {
+          discardRefresh(k);
+        }
+        throw t;
       }
-
-      discardRefresh(k);
-      return newValue;
     });
-    if (replaced[0]) {
+    if (nv != null) {
       notifyOnReplace(key, oldValue[0], nv);
     } else if (oldValue[0] != null) {
       notifyRemoval(key, oldValue[0], RemovalCause.EXPLICIT);
@@ -401,59 +415,88 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
   }
 
   @Override
+  @SuppressWarnings("ResultOfMethodCallIgnored")
   public void clear() {
-    if (!hasRemovalListener() && ((refreshes == null) || refreshes.isEmpty())) {
-      data.clear();
-      return;
+    var pending = refreshes;
+    if (pending != null) {
+      pending.clear();
     }
-    for (K key : List.copyOf(data.keySet())) {
+
+    var keys = (removalListener == null) ? data.keySet() : List.copyOf(data.keySet());
+    for (K key : keys) {
       remove(key);
     }
   }
 
   @Override
-  public boolean containsKey(Object key) {
+  public boolean containsKey(@Nullable Object key) {
+    requireNonNull(key);
     return data.containsKey(key);
   }
 
   @Override
-  public boolean containsValue(Object value) {
+  public boolean containsValue(@Nullable Object value) {
+    requireNonNull(value);
     return data.containsValue(value);
   }
 
   @Override
-  public @Nullable V get(Object key) {
-    return getIfPresent(key, /* recordStats */ false);
+  public @Nullable V get(@Nullable Object key) {
+    requireNonNull(key);
+    return getIfPresent(key, /* recordStats= */ false);
   }
 
   @Override
   public @Nullable V put(K key, V value) {
-    V oldValue = data.put(key, value);
-    notifyOnReplace(key, oldValue, value);
-    return oldValue;
+    requireNonNull(value);
+
+    @SuppressWarnings({"rawtypes", "unchecked", "Varifier"})
+    @Nullable V[] oldValue = (@Nullable V[]) new Object[1];
+    data.compute(key, (K k, @Nullable V v) -> {
+      discardRefresh(k);
+      oldValue[0] = v;
+      return value;
+    });
+    if (oldValue[0] != null) {
+      notifyOnReplace(key, oldValue[0], value);
+    }
+    return oldValue[0];
   }
 
   @Override
   public @Nullable V putIfAbsent(K key, V value) {
-    return data.putIfAbsent(key, value);
-  }
+    requireNonNull(value);
 
-  @Override
-  public void putAll(Map<? extends K, ? extends V> map) {
-    if (hasRemovalListener()) {
-      map.forEach(this::put);
-    } else {
-      data.putAll(map);
+    // An optimistic fast path to avoid unnecessary locking
+    var v = data.get(key);
+    if (v != null) {
+      return v;
     }
+
+    var added = new boolean[1];
+    var val = data.computeIfAbsent(key, k -> {
+      discardRefresh(k);
+      added[0] = true;
+      return value;
+    });
+    return added[0] ? null : val;
   }
 
   @Override
-  public @Nullable V remove(Object key) {
+  @SuppressWarnings("ResultOfMethodCallIgnored")
+  public void putAll(Map<? extends K, ? extends V> map) {
+    map.forEach(this::put);
+  }
+
+  @Override
+  public @Nullable V remove(@Nullable Object key) {
+    requireNonNull(key);
+
     @SuppressWarnings("unchecked")
-    K castKey = (K) key;
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    V[] oldValue = (V[]) new Object[1];
-    data.computeIfPresent(castKey, (k, v) -> {
+    var castKey = (K) key;
+    @SuppressWarnings({"rawtypes", "unchecked", "Varifier"})
+    @Nullable V[] oldValue = (V[]) new Object[1];
+    data.compute(castKey, (k, v) -> {
       discardRefresh(k);
       oldValue[0] = v;
       return null;
@@ -467,19 +510,19 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
   }
 
   @Override
-  public boolean remove(Object key, Object value) {
+  public boolean remove(@Nullable Object key, @Nullable Object value) {
+    requireNonNull(key);
     if (value == null) {
-      requireNonNull(key);
       return false;
     }
 
     @SuppressWarnings("unchecked")
-    K castKey = (K) key;
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    V[] oldValue = (V[]) new Object[1];
+    var castKey = (K) key;
+    @SuppressWarnings({"rawtypes", "unchecked", "Varifier"})
+    @Nullable V[] oldValue = (V[]) new Object[1];
 
     data.computeIfPresent(castKey, (k, v) -> {
-      if (v.equals(value)) {
+      if (Objects.equals(value, v)) {
         discardRefresh(k);
         oldValue[0] = v;
         return null;
@@ -498,8 +541,8 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
   public @Nullable V replace(K key, V value) {
     requireNonNull(value);
 
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    V[] oldValue = (V[]) new Object[1];
+    @SuppressWarnings({"rawtypes", "unchecked", "Varifier"})
+    @Nullable V[] oldValue = (@Nullable V[]) new Object[1];
     data.computeIfPresent(key, (k, v) -> {
       discardRefresh(k);
       oldValue[0] = v;
@@ -507,25 +550,21 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     });
 
     if ((oldValue[0] != null) && (oldValue[0] != value)) {
-      notifyRemoval(key, oldValue[0], RemovalCause.REPLACED);
+      notifyOnReplace(key, oldValue[0], value);
     }
     return oldValue[0];
   }
 
   @Override
-  public boolean replace(K key, V oldValue, V newValue) {
-    return replace(key, oldValue, newValue, /* shouldDiscardRefresh */ true);
-  }
-
-  @Override
-  public boolean replace(K key, V oldValue, V newValue, boolean shouldDiscardRefresh) {
+  public boolean replace(K key, V oldValue, V newValue,
+      boolean shouldDiscardRefresh, boolean quietly) {
     requireNonNull(oldValue);
     requireNonNull(newValue);
 
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    V[] prev = (V[]) new Object[1];
+    @SuppressWarnings({"rawtypes", "unchecked", "Varifier"})
+    @Nullable V[] prev = (V[]) new Object[1];
     data.computeIfPresent(key, (k, v) -> {
-      if (v.equals(oldValue)) {
+      if (Objects.equals(oldValue, v)) {
         if (shouldDiscardRefresh) {
           discardRefresh(k);
         }
@@ -537,15 +576,22 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     boolean replaced = (prev[0] != null);
     if (replaced && (prev[0] != newValue)) {
-      notifyRemoval(key, prev[0], RemovalCause.REPLACED);
+      notifyOnReplace(key, prev[0], newValue);
     }
     return replaced;
   }
 
   @Override
   @SuppressWarnings("EqualsWhichDoesntCheckParameterClass")
-  public boolean equals(Object o) {
-    return (o == this) || data.equals(o);
+  public boolean equals(@Nullable Object o) {
+    if (o == this) {
+      return true;
+    }
+    try {
+      return data.equals(o);
+    } catch (ClassCastException | NullPointerException ignored) {
+      return false;
+    }
   }
 
   @Override
@@ -569,19 +615,19 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
   @Override
   public Set<K> keySet() {
-    final Set<K> ks = keySet;
+    Set<K> ks = keySet;
     return (ks == null) ? (keySet = new KeySetView<>(this)) : ks;
   }
 
   @Override
   public Collection<V> values() {
-    final Collection<V> vs = values;
+    Collection<V> vs = values;
     return (vs == null) ? (values = new ValuesView<>(this)) : vs;
   }
 
   @Override
   public Set<Entry<K, V>> entrySet() {
-    final Set<Entry<K, V>> es = entrySet;
+    Set<Entry<K, V>> es = entrySet;
     return (es == null) ? (entrySet = new EntrySetView<>(this)) : es;
   }
 
@@ -610,14 +656,27 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     @Override
     @SuppressWarnings("SuspiciousMethodCalls")
-    public boolean contains(Object o) {
+    public boolean contains(@Nullable Object o) {
       return cache.containsKey(o);
+    }
+
+    @Override
+    public boolean containsAll(Collection<?> collection) {
+      requireNonNull(collection);
+      if (collection != this) {
+        for (Object o : collection) {
+          if ((o == null) || !contains(o)) {
+            return false;
+          }
+        }
+      }
+      return true;
     }
 
     @Override
     public boolean removeAll(Collection<?> collection) {
       requireNonNull(collection);
-      boolean modified = false;
+      @Var boolean modified = false;
       if ((collection instanceof Set<?>) && (collection.size() > size())) {
         for (K key : this) {
           if (collection.contains(key)) {
@@ -633,14 +692,14 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     }
 
     @Override
-    public boolean remove(Object o) {
+    public boolean remove(@Nullable Object o) {
       return (cache.remove(o) != null);
     }
 
     @Override
     public boolean removeIf(Predicate<? super K> filter) {
       requireNonNull(filter);
-      boolean modified = false;
+      @Var boolean modified = false;
       for (K key : this) {
         if (filter.test(key) && remove(key)) {
           modified = true;
@@ -652,7 +711,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     @Override
     public boolean retainAll(Collection<?> collection) {
       requireNonNull(collection);
-      boolean modified = false;
+      @Var boolean modified = false;
       for (K key : this) {
         if (!collection.contains(key) && remove(key)) {
           modified = true;
@@ -673,7 +732,17 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     @Override
     public Spliterator<K> spliterator() {
-      return cache.data.keySet().spliterator();
+      return new KeySpliterator<>(cache);
+    }
+
+    @Override
+    public @Nullable Object[] toArray() {
+      return cache.data.keySet().toArray();
+    }
+
+    @Override
+    public <T extends @Nullable Object> T[] toArray(T[] array) {
+      return cache.data.keySet().toArray(array);
     }
   }
 
@@ -700,12 +769,54 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     }
 
     @Override
+    @SuppressWarnings("ResultOfMethodCallIgnored")
     public void remove() {
       if (current == null) {
         throw new IllegalStateException();
       }
       cache.remove(current);
       current = null;
+    }
+  }
+
+  /** An adapter to safely externalize the key spliterator. */
+  static final class KeySpliterator<K> implements Spliterator<K> {
+    final Spliterator<K> spliterator;
+
+    KeySpliterator(UnboundedLocalCache<K, ?> cache) {
+      this(cache.data.keySet().spliterator());
+    }
+
+    KeySpliterator(Spliterator<K> spliterator) {
+      this.spliterator = requireNonNull(spliterator);
+    }
+
+    @Override
+    public void forEachRemaining(Consumer<? super K> action) {
+      requireNonNull(action);
+      spliterator.forEachRemaining(action);
+    }
+
+    @Override
+    public boolean tryAdvance(Consumer<? super K> action) {
+      requireNonNull(action);
+      return spliterator.tryAdvance(action);
+    }
+
+    @Override
+    public @Nullable KeySpliterator<K> trySplit() {
+      Spliterator<K> split = spliterator.trySplit();
+      return (split == null) ? null : new KeySpliterator<>(split);
+    }
+
+    @Override
+    public long estimateSize() {
+      return spliterator.estimateSize();
+    }
+
+    @Override
+    public int characteristics() {
+      return DISTINCT | CONCURRENT | NONNULL;
     }
   }
 
@@ -734,14 +845,27 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     @Override
     @SuppressWarnings("SuspiciousMethodCalls")
-    public boolean contains(Object o) {
+    public boolean contains(@Nullable Object o) {
       return cache.containsValue(o);
+    }
+
+    @Override
+    public boolean containsAll(Collection<?> collection) {
+      requireNonNull(collection);
+      if (collection != this) {
+        for (Object o : collection) {
+          if ((o == null) || !contains(o)) {
+            return false;
+          }
+        }
+      }
+      return true;
     }
 
     @Override
     public boolean removeAll(Collection<?> collection) {
       requireNonNull(collection);
-      boolean modified = false;
+      @Var boolean modified = false;
       for (var entry : cache.data.entrySet()) {
         if (collection.contains(entry.getValue())
             && cache.remove(entry.getKey(), entry.getValue())) {
@@ -752,7 +876,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     }
 
     @Override
-    public boolean remove(Object o) {
+    public boolean remove(@Nullable Object o) {
       if (o == null) {
         return false;
       }
@@ -767,7 +891,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     @Override
     public boolean removeIf(Predicate<? super V> filter) {
       requireNonNull(filter);
-      boolean removed = false;
+      @Var boolean removed = false;
       for (var entry : cache.data.entrySet()) {
         if (filter.test(entry.getValue())) {
           removed |= cache.remove(entry.getKey(), entry.getValue());
@@ -779,7 +903,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     @Override
     public boolean retainAll(Collection<?> collection) {
       requireNonNull(collection);
-      boolean modified = false;
+      @Var boolean modified = false;
       for (var entry : cache.data.entrySet()) {
         if (!collection.contains(entry.getValue())
             && cache.remove(entry.getKey(), entry.getValue())) {
@@ -796,22 +920,32 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     @Override
     public Iterator<V> iterator() {
-      return new ValuesIterator<>(cache);
+      return new ValueIterator<>(cache);
     }
 
     @Override
     public Spliterator<V> spliterator() {
-      return cache.data.values().spliterator();
+      return new ValueSpliterator<>(cache);
+    }
+
+    @Override
+    public @Nullable Object[] toArray() {
+      return cache.data.values().toArray();
+    }
+
+    @Override
+    public <T extends @Nullable Object> T[] toArray(T[] array) {
+      return cache.data.values().toArray(array);
     }
   }
 
   /** An adapter to safely externalize the value iterator. */
-  static final class ValuesIterator<K, V> implements Iterator<V> {
+  static final class ValueIterator<K, V> implements Iterator<V> {
     final UnboundedLocalCache<K, V> cache;
     final Iterator<Entry<K, V>> iterator;
     @Nullable Entry<K, V> entry;
 
-    ValuesIterator(UnboundedLocalCache<K, V> cache) {
+    ValueIterator(UnboundedLocalCache<K, V> cache) {
       this.iterator = cache.data.entrySet().iterator();
       this.cache = cache;
     }
@@ -828,12 +962,54 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     }
 
     @Override
+    @SuppressWarnings("ResultOfMethodCallIgnored")
     public void remove() {
       if (entry == null) {
         throw new IllegalStateException();
       }
       cache.remove(entry.getKey());
       entry = null;
+    }
+  }
+
+  /** An adapter to safely externalize the value spliterator. */
+  static final class ValueSpliterator<V> implements Spliterator<V> {
+    final Spliterator<V> spliterator;
+
+    ValueSpliterator(UnboundedLocalCache<?, V> cache) {
+      this(cache.data.values().spliterator());
+    }
+
+    ValueSpliterator(Spliterator<V> spliterator) {
+      this.spliterator = requireNonNull(spliterator);
+    }
+
+    @Override
+    public void forEachRemaining(Consumer<? super V> action) {
+      requireNonNull(action);
+      spliterator.forEachRemaining(action);
+    }
+
+    @Override
+    public boolean tryAdvance(Consumer<? super V> action) {
+      requireNonNull(action);
+      return spliterator.tryAdvance(action);
+    }
+
+    @Override
+    public @Nullable ValueSpliterator<V> trySplit() {
+      Spliterator<V> split = spliterator.trySplit();
+      return (split == null) ? null : new ValueSpliterator<>(split);
+    }
+
+    @Override
+    public long estimateSize() {
+      return spliterator.estimateSize();
+    }
+
+    @Override
+    public int characteristics() {
+      return CONCURRENT | NONNULL;
     }
   }
 
@@ -862,7 +1038,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     @Override
     @SuppressWarnings("SuspiciousMethodCalls")
-    public boolean contains(Object o) {
+    public boolean contains(@Nullable Object o) {
       if (!(o instanceof Entry<?, ?>)) {
         return false;
       }
@@ -873,13 +1049,13 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
         return false;
       }
       V cachedValue = cache.get(key);
-      return (cachedValue != null) && cachedValue.equals(value);
+      return value.equals(cachedValue);
     }
 
     @Override
     public boolean removeAll(Collection<?> collection) {
       requireNonNull(collection);
-      boolean modified = false;
+      @Var boolean modified = false;
       if ((collection instanceof Set<?>) && (collection.size() > size())) {
         for (var entry : this) {
           if (collection.contains(entry)) {
@@ -896,7 +1072,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     @Override
     @SuppressWarnings("SuspiciousMethodCalls")
-    public boolean remove(Object o) {
+    public boolean remove(@Nullable Object o) {
       if (!(o instanceof Entry<?, ?>)) {
         return false;
       }
@@ -908,10 +1084,12 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     @Override
     public boolean removeIf(Predicate<? super Entry<K, V>> filter) {
       requireNonNull(filter);
-      boolean removed = false;
+      @Var boolean removed = false;
       for (var entry : cache.data.entrySet()) {
-        if (filter.test(entry)) {
-          removed |= cache.remove(entry.getKey(), entry.getValue());
+        var key = entry.getKey();
+        var value = entry.getValue();
+        if (filter.test(Map.entry(key, value))) {
+          removed |= cache.remove(key, value);
         }
       }
       return removed;
@@ -920,7 +1098,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     @Override
     public boolean retainAll(Collection<?> collection) {
       requireNonNull(collection);
-      boolean modified = false;
+      @Var boolean modified = false;
       for (var entry : this) {
         if (!collection.contains(entry) && remove(entry)) {
           modified = true;
@@ -963,6 +1141,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     }
 
     @Override
+    @SuppressWarnings("ResultOfMethodCallIgnored")
     public void remove() {
       if (entry == null) {
         throw new IllegalStateException();
@@ -1017,7 +1196,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     @Override
     public int characteristics() {
-      return spliterator.characteristics();
+      return DISTINCT | CONCURRENT | NONNULL;
     }
   }
 
@@ -1030,40 +1209,44 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     @Nullable Policy<K, V> policy;
 
     UnboundedLocalManualCache(Caffeine<K, V> builder) {
-      cache = new UnboundedLocalCache<>(builder, /* async */ false);
+      cache = new UnboundedLocalCache<>(builder, /* isAsync= */ false);
     }
 
     @Override
-    public UnboundedLocalCache<K, V> cache() {
+    public final UnboundedLocalCache<K, V> cache() {
       return cache;
     }
 
     @Override
-    public Policy<K, V> policy() {
-      return (policy == null)
-          ? (policy = new UnboundedPolicy<>(cache, identity()))
-          : policy;
+    public final Policy<K, V> policy() {
+      @Var var p = policy;
+      if (p == null) {
+        Function<@Nullable V, @Nullable V> identity = v -> v;
+        p = new UnboundedPolicy<>(cache, identity);
+        policy = p;
+      }
+      return p;
     }
 
-    @SuppressWarnings("UnusedVariable")
     private void readObject(ObjectInputStream stream) throws InvalidObjectException {
       throw new InvalidObjectException("Proxy required");
     }
 
     Object writeReplace() {
-      SerializationProxy<K, V> proxy = new SerializationProxy<>();
+      var proxy = new SerializationProxy<K, V>();
       proxy.isRecordingStats = cache.isRecordingStats;
       proxy.removalListener = cache.removalListener;
       return proxy;
     }
   }
 
-  /** An eviction policy that supports no boundings. */
+  /** An eviction policy that supports no bounding. */
   static final class UnboundedPolicy<K, V> implements Policy<K, V> {
+    final Function<@Nullable V, @Nullable V> transformer;
     final UnboundedLocalCache<K, V> cache;
-    final Function<V, V> transformer;
 
-    UnboundedPolicy(UnboundedLocalCache<K, V> cache, Function<V, V> transformer) {
+    UnboundedPolicy(UnboundedLocalCache<K, V> cache,
+        Function<@Nullable V, @Nullable V> transformer) {
       this.transformer = transformer;
       this.cache = cache;
     }
@@ -1081,7 +1264,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     @Override public Map<K, CompletableFuture<V>> refreshes() {
       var refreshes = cache.refreshes;
       if ((refreshes == null) || refreshes.isEmpty()) {
-        @SuppressWarnings("ImmutableMapOf")
+        @SuppressWarnings({"ImmutableMapOf", "RedundantUnmodifiable"})
         Map<K, CompletableFuture<V>> emptyMap = Collections.unmodifiableMap(Collections.emptyMap());
         return emptyMap;
       }
@@ -1112,9 +1295,9 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
       implements LocalLoadingCache<K, V> {
     private static final long serialVersionUID = 1;
 
-    final Function<K, V> mappingFunction;
+    final Function<K, @Nullable V> mappingFunction;
     final CacheLoader<? super K, V> cacheLoader;
-    @Nullable final Function<Set<? extends K>, Map<K, V>> bulkMappingFunction;
+    final @Nullable Function<Set<? extends K>, Map<K, V>> bulkMappingFunction;
 
     UnboundedLocalLoadingCache(Caffeine<K, V> builder, CacheLoader<? super K, V> cacheLoader) {
       super(builder);
@@ -1129,7 +1312,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     }
 
     @Override
-    public Function<K, V> mappingFunction() {
+    public Function<K, @Nullable V> mappingFunction() {
       return mappingFunction;
     }
 
@@ -1146,7 +1329,6 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
       return proxy;
     }
 
-    @SuppressWarnings("UnusedVariable")
     private void readObject(ObjectInputStream stream) throws InvalidObjectException {
       throw new InvalidObjectException("Proxy required");
     }
@@ -1166,7 +1348,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     @SuppressWarnings("unchecked")
     UnboundedLocalAsyncCache(Caffeine<K, V> builder) {
       cache = new UnboundedLocalCache<>(
-          (Caffeine<K, CompletableFuture<V>>) builder, /* async */ true);
+          (Caffeine<K, CompletableFuture<V>>) builder, /* isAsync= */ true);
     }
 
     @Override
@@ -1176,33 +1358,35 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     @Override
     public ConcurrentMap<K, CompletableFuture<V>> asMap() {
-      return (mapView == null) ? (mapView = new AsyncAsMapView<>(this)) : mapView;
+      var mv = mapView;
+      return (mv == null) ? (mapView = new AsyncAsMapView<>(this)) : mv;
     }
 
     @Override
     public Cache<K, V> synchronous() {
-      return (cacheView == null) ? (cacheView = new CacheView<>(this)) : cacheView;
+      var cv = cacheView;
+      return (cv == null) ? (cacheView = new CacheView<>(this)) : cv;
     }
 
     @Override
     public Policy<K, V> policy() {
       @SuppressWarnings("unchecked")
-      UnboundedLocalCache<K, V> castCache = (UnboundedLocalCache<K, V>) cache;
-      Function<CompletableFuture<V>, V> transformer = Async::getIfReady;
+      var castCache = (UnboundedLocalCache<K, V>) cache;
+      Function<CompletableFuture<V>, @Nullable V> transformer = Async::getIfReady;
       @SuppressWarnings("unchecked")
-      Function<V, V> castTransformer = (Function<V, V>) transformer;
-      return (policy == null)
+      var castTransformer = (Function<@Nullable V, @Nullable V>) transformer;
+      var p = policy;
+      return (p == null)
           ? (policy = new UnboundedPolicy<>(castCache, castTransformer))
-          : policy;
+          : p;
     }
 
-    @SuppressWarnings("UnusedVariable")
     private void readObject(ObjectInputStream stream) throws InvalidObjectException {
       throw new InvalidObjectException("Proxy required");
     }
 
     Object writeReplace() {
-      SerializationProxy<K, V> proxy = new SerializationProxy<>();
+      var proxy = new SerializationProxy<K, V>();
       proxy.isRecordingStats = cache.isRecordingStats;
       proxy.removalListener = cache.removalListener;
       proxy.async = true;
@@ -1225,7 +1409,7 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
     UnboundedLocalAsyncLoadingCache(Caffeine<K, V> builder, AsyncCacheLoader<? super K, V> loader) {
       super(loader);
       cache = new UnboundedLocalCache<>(
-          (Caffeine<K, CompletableFuture<V>>) builder, /* async */ true);
+          (Caffeine<K, CompletableFuture<V>>) builder, /* isAsync= */ true);
     }
 
     @Override
@@ -1235,28 +1419,29 @@ final class UnboundedLocalCache<K, V> implements LocalCache<K, V> {
 
     @Override
     public ConcurrentMap<K, CompletableFuture<V>> asMap() {
-      return (mapView == null) ? (mapView = new AsyncAsMapView<>(this)) : mapView;
+      var mv = mapView;
+      return (mv == null) ? (mapView = new AsyncAsMapView<>(this)) : mv;
     }
 
     @Override
     public Policy<K, V> policy() {
       @SuppressWarnings("unchecked")
-      UnboundedLocalCache<K, V> castCache = (UnboundedLocalCache<K, V>) cache;
-      Function<CompletableFuture<V>, V> transformer = Async::getIfReady;
+      var castCache = (UnboundedLocalCache<K, V>) cache;
+      Function<CompletableFuture<V>, @Nullable V> transformer = Async::getIfReady;
       @SuppressWarnings("unchecked")
-      Function<V, V> castTransformer = (Function<V, V>) transformer;
-      return (policy == null)
+      var castTransformer = (Function<@Nullable V, @Nullable V>) transformer;
+      var p = policy;
+      return (p == null)
           ? (policy = new UnboundedPolicy<>(castCache, castTransformer))
-          : policy;
+          : p;
     }
 
-    @SuppressWarnings("UnusedVariable")
     private void readObject(ObjectInputStream stream) throws InvalidObjectException {
       throw new InvalidObjectException("Proxy required");
     }
 
     Object writeReplace() {
-      SerializationProxy<K, V> proxy = new SerializationProxy<>();
+      var proxy = new SerializationProxy<K, V>();
       proxy.isRecordingStats = cache.isRecordingStats();
       proxy.removalListener = cache.removalListener;
       proxy.cacheLoader = cacheLoader;

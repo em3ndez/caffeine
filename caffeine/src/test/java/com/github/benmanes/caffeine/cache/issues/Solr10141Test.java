@@ -17,18 +17,23 @@ package com.github.benmanes.caffeine.cache.issues;
 
 import static com.github.benmanes.caffeine.testing.Awaits.await;
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth.assertWithMessage;
 import static java.util.Locale.US;
 
 import java.util.Random;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
+import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 
 /**
  * SOLR-10141: Removal listener notified with stale value
@@ -39,33 +44,33 @@ import com.github.benmanes.caffeine.testing.ConcurrentTestHarness;
  * @author yseeley@gmail.com (Yonik Seeley)
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@Test(groups = "isolated")
-public final class Solr10141Test {
-  static final int blocksInTest = 400;
-  static final int maxEntries = blocksInTest / 2;
-
-  static final int nThreads = 64;
-  static final int nReads = 10000000;
-  static final int readsPerThread = nReads / nThreads;
+@Isolated
+final class Solr10141Test {
+  private static final int NUM_THREADS = 64;
+  private static final int BLOCKS_IN_TEST = 400;
+  private static final int NUM_READS = 10_000_000;
+  private static final int MAX_ENTRIES = BLOCKS_IN_TEST / 2;
+  private static final int READS_PER_THREAD = NUM_READS / NUM_THREADS;
 
   // odds (1 in N) of the next block operation being on the same block as the previous operation...
   // helps flush concurrency issues
-  static final int readLastBlockOdds = 10;
+  private static final int READ_LAST_BLOCK_ODDS = 10;
   // sometimes insert a new entry for the key even if one was found
-  static final boolean updateAnyway = true;
+  private static final boolean UPDATE_ANYWAY = true;
 
-  final Random rnd = new Random();
+  private final Random rnd = new Random();
 
   @Test
-  public void eviction() {
+  void eviction() {
     var hits = new AtomicLong();
     var inserts = new AtomicLong();
     var removals = new AtomicLong();
 
     RemovalListener<Long, Val> listener = (k, v, removalCause) -> {
+      assertThat(v).isNotNull();
       assertThat(v.key).isEqualTo(k);
-      if (!v.live.compareAndSet(true, false)) {
-        throw new RuntimeException(String.format(US,
+      if (!v.live.compareAndSet(/* expectedValue= */ true, /* newValue= */ false)) {
+        throw new IllegalStateException(String.format(US,
             "listener called more than once! k=%s, v=%s, removalCause=%s", k, v, removalCause));
       }
       removals.incrementAndGet();
@@ -74,46 +79,41 @@ public final class Solr10141Test {
     Cache<Long, Val> cache = Caffeine.newBuilder()
         .executor(ConcurrentTestHarness.executor)
         .removalListener(listener)
-        .maximumSize(maxEntries)
+        .maximumSize(MAX_ENTRIES)
         .build();
-
     var lastBlock = new AtomicLong();
-    var failed = new AtomicBoolean();
     var maxObservedSize = new AtomicLong();
-
-    ConcurrentTestHarness.timeTasks(nThreads, new Runnable() {
-
+    var failed = new ConcurrentLinkedQueue<Throwable>();
+    ConcurrentTestHarness.timeTasks(NUM_THREADS, new Runnable() {
       @Override public void run() {
         try {
           var r = new Random(rnd.nextLong());
-          for (int i = 0; i < readsPerThread; i++) {
+          for (int i = 0; i < READS_PER_THREAD; i++) {
             test(r);
           }
         } catch (Throwable e) {
-          failed.set(true);
-          e.printStackTrace();
+          failed.add(e);
         }
       }
 
       void test(Random r) {
-        long block = r.nextInt(blocksInTest);
-        if (readLastBlockOdds > 0 && r.nextInt(readLastBlockOdds) == 0) {
+        @Var long block = r.nextInt(BLOCKS_IN_TEST);
+        if (READ_LAST_BLOCK_ODDS > 0 && r.nextInt(READ_LAST_BLOCK_ODDS) == 0) {
           // some percent of the time, try to read the last block another
           block = lastBlock.get();
         }
         // thread was just reading/writing
         lastBlock.set(block);
 
-        Long k = block;
-        Val v = cache.getIfPresent(k);
+        long k = block;
+        @Var Val v = cache.getIfPresent(k);
         if (v != null) {
           hits.incrementAndGet();
           assertThat(k).isEqualTo(v.key);
         }
 
-        if ((v == null) || (updateAnyway && r.nextBoolean())) {
-          v = new Val();
-          v.key = k;
+        if ((v == null) || (UPDATE_ANYWAY && r.nextBoolean())) {
+          v = new Val(k);
           cache.put(k, v);
           inserts.incrementAndGet();
         }
@@ -128,23 +128,24 @@ public final class Solr10141Test {
 
     await().until(() -> (inserts.get() - removals.get()) == cache.estimatedSize());
 
-    System.out.printf(US, "Done!%n"
-        + "entries=%,d inserts=%,d removals=%,d hits=%,d maxEntries=%,d maxObservedSize=%,d%n",
-        cache.estimatedSize(), inserts.get(), removals.get(),
-        hits.get(), maxEntries, maxObservedSize.get());
-    assertThat(failed.get()).isFalse();
+    var message = String.format(US,
+        "entries=%,d inserts=%,d removals=%,d hits=%,d maxEntries=%,d maxObservedSize=%,d%n",
+        cache.estimatedSize(), inserts.get(), removals.get(), hits.get(), MAX_ENTRIES,
+        maxObservedSize.get());
+    assertWithMessage(message).that(failed).isEmpty();
   }
 
   @Test
-  public void clear() {
+  void clear() {
     var inserts = new AtomicLong();
     var removals = new AtomicLong();
-    var failed = new AtomicBoolean();
+    var failed = new ConcurrentLinkedQueue<Throwable>();
 
     RemovalListener<Long, Val> listener = (k, v, removalCause) -> {
+      assertThat(v).isNotNull();
       assertThat(v.key).isEqualTo(k);
-      if (!v.live.compareAndSet(true, false)) {
-        throw new RuntimeException(String.format(US,
+      if (!v.live.compareAndSet(/* expectedValue= */ true, /* newValue= */ false)) {
+        throw new IllegalStateException(String.format(US,
             "listener called more than once! k=%s, v=%s, removalCause=%s", k, v, removalCause));
       }
       removals.incrementAndGet();
@@ -154,31 +155,26 @@ public final class Solr10141Test {
         .maximumSize(Integer.MAX_VALUE)
         .removalListener(listener)
         .build();
-
-    ConcurrentTestHarness.timeTasks(nThreads, new Runnable() {
-
+    ConcurrentTestHarness.timeTasks(NUM_THREADS, new Runnable() {
       @Override public void run() {
         try {
           var r = new Random(rnd.nextLong());
-          for (int i = 0; i < readsPerThread; i++) {
+          for (int i = 0; i < READS_PER_THREAD; i++) {
             test(r);
           }
         } catch (Throwable e) {
-          failed.set(true);
-          e.printStackTrace();
+          failed.add(e);
         }
       }
-
       void test(Random r) {
-        Long k = (long) r.nextInt(blocksInTest);
-        Val v = cache.getIfPresent(k);
+        long k = r.nextInt(BLOCKS_IN_TEST);
+        @Var Val v = cache.getIfPresent(k);
         if (v != null) {
           assertThat(k).isEqualTo(v.key);
         }
 
-        if ((v == null) || (updateAnyway && r.nextBoolean())) {
-          v = new Val();
-          v.key = k;
+        if ((v == null) || (UPDATE_ANYWAY && r.nextBoolean())) {
+          v = new Val(k);
           cache.put(k, v);
           inserts.incrementAndGet();
         }
@@ -191,11 +187,22 @@ public final class Solr10141Test {
 
     cache.asMap().clear();
     await().until(() -> inserts.get() == removals.get());
-    assertThat(failed.get()).isFalse();
+    assertThat(failed).isEmpty();
   }
 
-  static class Val {
-    long key;
-    AtomicBoolean live = new AtomicBoolean(true);
+  private static final class Val {
+    private final AtomicBoolean live;
+    private final long key;
+
+    Val(long key) {
+      this.live = new AtomicBoolean(true);
+      this.key = key;
+    }
+    @Override public String toString() {
+      return MoreObjects.toStringHelper(this)
+          .add("key", key)
+          .add("live", live.get())
+          .toString();
+    }
   }
 }

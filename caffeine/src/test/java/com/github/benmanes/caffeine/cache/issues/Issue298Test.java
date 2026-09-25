@@ -23,14 +23,12 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
-import com.github.benmanes.caffeine.cache.Policy.VarExpiration;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 
 /**
@@ -45,84 +43,55 @@ import com.google.errorprone.annotations.CanIgnoreReturnValue;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@Test(groups = "isolated")
-public final class Issue298Test {
-  static final long EXPIRE_NS = Duration.ofDays(1).toNanos();
-
-  AtomicBoolean startedLoad;
-  AtomicBoolean doLoad;
-
-  AtomicBoolean startedCreate;
-  AtomicBoolean doCreate;
-
-  AtomicBoolean startedRead;
-  AtomicBoolean doRead;
-  AtomicBoolean endRead;
-
-  AsyncLoadingCache<String, String> cache;
-  VarExpiration<String, String> policy;
-  String key;
-
-  @BeforeMethod
-  public void before() {
-    startedCreate = new AtomicBoolean();
-    startedLoad = new AtomicBoolean();
-    startedRead = new AtomicBoolean();
-    doCreate = new AtomicBoolean();
-    endRead = new AtomicBoolean();
-    doLoad = new AtomicBoolean();
-    doRead = new AtomicBoolean();
-
-    key = "key";
-    cache = makeAsyncCache();
-    policy = cache.synchronous().policy().expireVariably().orElseThrow();
-  }
-
-  @AfterMethod
-  public void after() {
-    endRead.set(true);
-  }
+@Isolated
+final class Issue298Test {
+  private static final long EXPIRE_NS = Duration.ofDays(1).toNanos();
+  private static final String TEST_KEY = "key";
 
   @Test
-  @SuppressWarnings("FutureReturnValueIgnored")
-  public void readDuringCreate() {
+  @SuppressWarnings({"FutureReturnValueIgnored", "UndefinedEquals"})
+  void readDuringCreate() {
+    var flags = new Flags();
+    var cache = makeAsyncCache(flags);
+    var policy = cache.synchronous().policy().expireVariably().orElseThrow();
+
     // Loaded value and waiting at expireAfterCreate (expire: infinite)
-    var initialValue = cache.get(key);
+    var initialValue = cache.get(TEST_KEY);
     assertThat(initialValue).isNotNull();
 
-    await().untilTrue(startedLoad);
-    doLoad.set(true);
-    await().untilTrue(startedCreate);
+    await().untilTrue(flags.startedLoad);
+    flags.doLoad.set(true);
+    await().untilTrue(flags.startedCreate);
 
     // Async read trying to wait at expireAfterRead
     var reader = CompletableFuture.runAsync(() -> {
       do {
-        var value = cache.get(key);
+        var value = cache.get(TEST_KEY);
         assertThat(value).isEqualTo(initialValue);
-      } while (!endRead.get());
+      } while (!flags.endRead.get());
     }, executor);
 
     // Ran expireAfterCreate (expire: infinite -> create)
-    doCreate.set(true);
-    await().until(() -> policy.getExpiresAfter(key).orElseThrow().toNanos() <= EXPIRE_NS);
-    await().untilTrue(startedRead);
+    flags.doCreate.set(true);
+    await().until(() -> policy.getExpiresAfter(TEST_KEY)
+        .filter(duration -> duration.toNanos() <= EXPIRE_NS).isPresent());
+    await().untilTrue(flags.startedRead);
 
     // Ran reader (expire: create -> ?)
-    doRead.set(true);
-    endRead.set(true);
+    flags.doRead.set(true);
+    flags.endRead.set(true);
     reader.join();
 
     // Ensure expire is [expireAfterCreate], not [infinite]
-    assertThat(policy.getExpiresAfter(key).orElseThrow().toNanos()).isAtMost(EXPIRE_NS);
+    assertThat(policy.getExpiresAfter(TEST_KEY).orElseThrow().toNanos()).isAtMost(EXPIRE_NS);
   }
 
-  private AsyncLoadingCache<String, String> makeAsyncCache() {
+  private static AsyncLoadingCache<String, String> makeAsyncCache(Flags flags) {
     return Caffeine.newBuilder()
-        .executor(executor)
         .expireAfter(new Expiry<String, String>() {
           @Override public long expireAfterCreate(String key, String value, long currentTime) {
-            startedCreate.set(true);
-            await().untilTrue(doCreate);
+            flags.startedCreate.set(true);
+            await().untilTrue(flags.doCreate);
             return EXPIRE_NS;
           }
           @CanIgnoreReturnValue
@@ -133,15 +102,25 @@ public final class Issue298Test {
           @CanIgnoreReturnValue
           @Override public long expireAfterRead(String key, String value,
               long currentTime, long currentDuration) {
-            startedRead.set(true);
-            await().untilTrue(doRead);
+            flags.startedRead.set(true);
+            await().untilTrue(flags.doRead);
             return currentDuration;
           }
-        })
+        }).executor(executor)
         .buildAsync(key -> {
-          startedLoad.set(true);
-          await().untilTrue(doLoad);
+          flags.startedLoad.set(true);
+          await().untilTrue(flags.doLoad);
           return key + "'s value";
         });
+  }
+
+  private static final class Flags {
+    private final AtomicBoolean startedCreate = new AtomicBoolean();
+    private final AtomicBoolean startedLoad = new AtomicBoolean();
+    private final AtomicBoolean startedRead = new AtomicBoolean();
+    private final AtomicBoolean doCreate = new AtomicBoolean();
+    private final AtomicBoolean endRead = new AtomicBoolean();
+    private final AtomicBoolean doLoad = new AtomicBoolean();
+    private final AtomicBoolean doRead = new AtomicBoolean();
   }
 }

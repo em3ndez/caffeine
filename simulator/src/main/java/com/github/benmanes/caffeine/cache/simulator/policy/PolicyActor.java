@@ -21,8 +21,9 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
 
+import org.jspecify.annotations.Nullable;
+
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
-import com.google.common.collect.ImmutableList;
 
 /**
  * An actor that proxies to the page replacement policy.
@@ -30,12 +31,13 @@ import com.google.common.collect.ImmutableList;
  * @author ben.manes@gmail.com (Ben Manes)
  */
 public final class PolicyActor {
-  private final CompletableFuture<Void> completed;
+  private final CompletableFuture<@Nullable Void> completed;
+  private final PolicyStats policyStats;
   private final Semaphore semaphore;
   private final Policy policy;
   private final Thread parent;
 
-  private CompletableFuture<Void> future;
+  private CompletableFuture<@Nullable Void> future;
 
   /**
    * Creates an actor that executes the policy actions asynchronously over a buffered channel.
@@ -47,13 +49,15 @@ public final class PolicyActor {
   public PolicyActor(Thread parent, Policy policy, BasicSettings settings) {
     this.semaphore = new Semaphore(settings.actor().mailboxSize());
     this.future = CompletableFuture.completedFuture(null);
+    this.policyStats = requireNonNull(policy.stats());
     this.completed = new CompletableFuture<>();
     this.policy = requireNonNull(policy);
     this.parent = requireNonNull(parent);
+
   }
 
   /** Sends the access events for async processing and blocks until accepted into the mailbox. */
-  public void send(ImmutableList<AccessEvent> events) {
+  public void send(List<AccessEvent> events) {
     submit(new Execute(events));
   }
 
@@ -63,7 +67,7 @@ public final class PolicyActor {
   }
 
   /** Return the future that signals the policy's completion. */
-  public CompletableFuture<Void> completed() {
+  public CompletableFuture<@Nullable Void> completed() {
     return completed;
   }
 
@@ -80,7 +84,7 @@ public final class PolicyActor {
 
   /** Returns the cache efficiency statistics. */
   public PolicyStats stats() {
-    return policy.stats();
+    return policyStats;
   }
 
   /** A command to process the access events. */
@@ -90,32 +94,33 @@ public final class PolicyActor {
     Execute(List<AccessEvent> events) {
       this.events = requireNonNull(events);
     }
-    @Override public void execute() {
-      policy.stats().stopwatch().start();
+    @Override void execute() {
+      policyStats.stopwatch().start();
       for (AccessEvent event : events) {
-        long priorMisses = policy.stats().missCount();
-        long priorHits = policy.stats().hitCount();
+        long priorMisses = policyStats.missCount();
+        long priorHits = policyStats.hitCount();
         policy.record(event);
 
-        if (policy.stats().hitCount() > priorHits) {
-          policy.stats().recordHitPenalty(event.hitPenalty());
-        } else if (policy.stats().missCount() > priorMisses) {
-          policy.stats().recordMissPenalty(event.missPenalty());
+        if (policyStats.hitCount() > priorHits) {
+          policyStats.recordHitPenalty(event.hitPenalty());
+        } else if (policyStats.missCount() > priorMisses) {
+          policyStats.recordMissPenalty(event.missPenalty());
         }
       }
-      policy.stats().stopwatch().stop();
+      policyStats.stopwatch().stop();
     }
   }
 
   /** A command to shut down the policy and finalize the statistics. */
   private final class Finish extends Command {
-    @Override public void execute() {
+    @Override void execute() {
       policy.finished();
       completed.complete(null);
     }
   }
 
   private abstract class Command implements Runnable {
+    @SuppressWarnings("Interruption")
     @Override public final void run() {
       var name = Thread.currentThread().getName();
       Thread.currentThread().setName(policy.getClass().getSimpleName());
@@ -130,6 +135,6 @@ public final class PolicyActor {
         Thread.currentThread().setName(name);
       }
     }
-    protected abstract void execute();
+    abstract void execute();
   }
 }

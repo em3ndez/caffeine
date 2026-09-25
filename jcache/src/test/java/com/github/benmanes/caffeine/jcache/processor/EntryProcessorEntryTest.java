@@ -16,43 +16,96 @@
 package com.github.benmanes.caffeine.jcache.processor;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.Map;
 import java.util.Optional;
 
 import javax.cache.Cache;
 
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class EntryProcessorEntryTest {
-  EntryProcessorEntry<Integer, Integer> entry = new EntryProcessorEntry<>(1, 2, Optional.empty());
+final class EntryProcessorEntryTest {
+  private static final EntryProcessorEntry<Integer, Integer> ENTRY =
+      new EntryProcessorEntry<>(1, 2, Optional.empty());
 
   @Test
-  public void unwrap_fail() {
-    assertThrows(IllegalArgumentException.class, () -> entry.unwrap(Map.Entry.class));
+  void unwrap_fail() {
+    assertThrows(IllegalArgumentException.class, () -> ENTRY.unwrap(Map.Entry.class));
   }
 
   @Test
-  public void unwrap() {
-    assertThat(entry.unwrap(Cache.Entry.class)).isSameInstanceAs(entry);
+  void unwrap() {
+    assertThat(ENTRY.unwrap(Cache.Entry.class)).isSameInstanceAs(ENTRY);
   }
 
   @Test
-  public void equals() {
-    assertThat(entry.equals(entry)).isTrue();
+  @SuppressWarnings("EqualsWithItself")
+  void equals() {
+    assertThat(ENTRY.equals(ENTRY)).isTrue();
   }
 
   @Test
-  public void hash() {
-    assertThat(entry.hashCode()).isEqualTo(entry.hashCode());
+  void hash() {
+    assertThat(ENTRY.hashCode()).isEqualTo(ENTRY.hashCode());
   }
 
   @Test
-  public void string() {
-    assertThat(entry.toString()).isEqualTo(Map.entry(1, 2).toString());
+  void string() {
+    assertThat(ENTRY.toString()).isEqualTo(Map.entry(1, 2).toString());
+  }
+
+  @Test
+  void remove_onPresentEntry_isDeleted() {
+    var entry = new EntryProcessorEntry<>(1, 2, Optional.empty());
+    entry.remove();
+    assertThat(entry.getAction()).isEqualTo(Action.DELETED);
+    assertThat(entry.exists()).isFalse();
+    assertThat(entry.getValue()).isNull();
+  }
+
+  @Test
+  void remove_onMissingEntry_isDeleted() {
+    var entry = new EntryProcessorEntry<Integer, Integer>(1, null, Optional.empty());
+    entry.remove();
+    assertThat(entry.getAction()).isEqualTo(Action.DELETED);
+    assertThat(entry.exists()).isFalse();
+    assertThat(entry.getValue()).isNull();
+  }
+
+  @Test
+  void setValue_afterRemove_onPresentEntry_isUpdated() {
+    var entry = new EntryProcessorEntry<>(1, 2, Optional.empty());
+    entry.remove();
+    entry.setValue(3);
+    assertThat(entry.getAction()).isEqualTo(Action.UPDATED);
+    assertThat(entry.getValue()).isEqualTo(3);
+  }
+
+  @Test
+  void setValue_afterRemove_onMissingEntry_isCreated() {
+    var entry = new EntryProcessorEntry<Integer, Integer>(1, null, Optional.empty());
+    entry.setValue(2);
+    entry.remove();
+    entry.setValue(3);
+    assertThat(entry.getAction()).isEqualTo(Action.CREATED);
+    assertThat(entry.getValue()).isEqualTo(3);
+  }
+
+  @Test
+  void setValue_onPresentEntry_isUpdated() {
+    var entry = new EntryProcessorEntry<>(1, 2, Optional.empty());
+    entry.setValue(3);
+    assertThat(entry.getAction()).isEqualTo(Action.UPDATED);
+  }
+
+  @Test
+  void setValue_onMissingEntry_isCreated() {
+    var entry = new EntryProcessorEntry<Integer, Integer>(1, null, Optional.empty());
+    entry.setValue(2);
+    assertThat(entry.getAction()).isEqualTo(Action.CREATED);
   }
 }

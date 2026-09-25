@@ -16,6 +16,7 @@
 package com.github.benmanes.caffeine.jcache.size;
 
 import static com.google.common.truth.Truth.assertThat;
+import static java.util.Objects.requireNonNull;
 
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -24,46 +25,68 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.cache.configuration.MutableCacheEntryListenerConfiguration;
 import javax.cache.event.CacheEntryRemovedListener;
 
-import org.testng.annotations.Test;
+import org.junit.jupiter.api.Test;
 
-import com.github.benmanes.caffeine.jcache.AbstractJCacheTest;
-import com.github.benmanes.caffeine.jcache.configuration.CaffeineConfiguration;
+import com.github.benmanes.caffeine.jcache.JCacheFixture;
 import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.MoreExecutors;
 
 /**
- * The test cases that ensure the <tt>maximum weight</tt> setting is honored by the cache and
- * removal notifications are published.
+ * The test cases that ensure the maximum weight setting is honored by the cache and removal
+ * notifications are published.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-@Test(singleThreaded = true)
-public final class JCacheMaximumWeightTest extends AbstractJCacheTest {
+final class JCacheMaximumWeightTest {
   private static final int MAXIMUM = 10;
 
-  private final AtomicInteger removedWeight = new AtomicInteger();
-
-  @Override
-  protected CaffeineConfiguration<Integer, Integer> getConfiguration() {
-    CacheEntryRemovedListener<Integer, Integer> listener = events ->
-        removedWeight.addAndGet(Iterables.getOnlyElement(events).getValue());
-    var configuration = new CaffeineConfiguration<Integer, Integer>();
-    configuration.setMaximumWeight(OptionalLong.of(MAXIMUM));
-    configuration.setWeigherFactory(Optional.of(() -> (key, value) -> value));
-    var listenerConfiguration = new MutableCacheEntryListenerConfiguration<Integer, Integer>(
-        () -> listener, /* filterFactory */ null,
-        /* isOldValueRequired */ true, /* isSynchronous */ true);
-    configuration.addCacheEntryListenerConfiguration(listenerConfiguration);
-    configuration.setExecutorFactory(MoreExecutors::directExecutor);
-    return configuration;
+  private static JCacheFixture jcacheFixture(AtomicInteger removedWeight) {
+    return JCacheFixture.builder()
+        .configure(config -> {
+          config.setMaximumWeight(OptionalLong.of(MAXIMUM));
+          config.setWeigherFactory(Optional.of(() -> (key, value) -> value));
+          CacheEntryRemovedListener<Integer, Integer> listener = events -> removedWeight
+              .addAndGet(requireNonNull(Iterables.getOnlyElement(events)).getValue());
+          var listenerConfiguration = new MutableCacheEntryListenerConfiguration<>(
+              () -> listener, /* filterFactory= */ null,
+              /* isOldValueRequired= */ true, /* isSynchronous= */ true);
+          config.addCacheEntryListenerConfiguration(listenerConfiguration);
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+        }).build();
   }
 
   @Test
-  public void evict() {
-    for (int i = 0; i < MAXIMUM; i++) {
-      jcache.put(i, 1);
+  void evict() {
+    var removedWeight = new AtomicInteger();
+    try (var fixture = jcacheFixture(removedWeight)) {
+      for (int i = 0; i < MAXIMUM; i++) {
+        fixture.jcache().put(i, 1);
+      }
+      fixture.jcache().put(2 * MAXIMUM, MAXIMUM / 2);
+      assertThat(removedWeight.get()).isEqualTo(MAXIMUM / 2);
     }
-    jcache.put(2 * MAXIMUM, MAXIMUM / 2);
-    assertThat(removedWeight.get()).isEqualTo(MAXIMUM / 2);
+  }
+
+  @Test
+  void evict_countsEntryNotRemovalOrWeight() {
+    // The eviction counter is one per evicted mapping, distinct from a removal, and independent
+    // of the removed weight: a single put whose own weight exceeds the maximum evicts itself
+    // once, regardless of how large that weight is
+    try (var fixture = JCacheFixture.builder()
+        .configure(config -> {
+          config.setStatisticsEnabled(true);
+          config.setMaximumWeight(OptionalLong.of(MAXIMUM));
+          config.setWeigherFactory(Optional.of(() -> (key, value) -> value));
+          config.setExecutorFactory(MoreExecutors::directExecutor);
+        }).build();
+        var jcache = fixture.jcache()) {
+      var stats = JCacheFixture.getStatistics(jcache);
+
+      jcache.put(1, 2 * MAXIMUM);
+
+      assertThat(stats.getCachePuts()).isEqualTo(1L);
+      assertThat(stats.getCacheEvictions()).isEqualTo(1L);
+      assertThat(stats.getCacheRemovals()).isEqualTo(0L);
+    }
   }
 }

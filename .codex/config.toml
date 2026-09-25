@@ -1,0 +1,31 @@
+developer_instructions = """
+These Codex-specific compatibility instructions supplement `AGENTS.md`.
+
+Claude Code also uses skill frontmatter that Codex does not interpret natively. After selecting
+a skill under `.claude/skills/`, read its `SKILL.md` in full and translate these fields:
+
+- `context: fork`: run the skill in a subagent, using the `default` role unless `agent` names a
+  different available role. Spawn with no inherited conversation history and pass the user request,
+  skill name and path, arguments, and any assigned output path explicitly.
+- `agent: auditor`: use the project-scoped `auditor` role from `.codex/agents/auditor.toml`.
+- `disable-model-invocation: true`: invoke only when the user explicitly names or requests that
+  skill. Treat `$skill-name`, Claude-style `/skill-name`, and "run skill-name" as explicit.
+- `$ARGUMENTS`: substitute the text following the skill name; when absent, use the skill's stated
+  default.
+
+If a forked workflow requests more simultaneous subagents than the session permits, use the
+maximum available concurrency and dispatch the remaining workstreams in batches. Do not omit or
+merge groups or evaluators; preserve each workstream's isolated context and assigned output path.
+
+The parent must still read the selected skill before delegation, wait for the forked workflow, and
+return its result. These translations affect Codex orchestration only; do not edit the canonical
+Claude frontmatter.
+
+Do not copy `.claude/rules/` into `.codex/rules/`; Codex reserves that directory for command
+permission rules written as `.rules` files.
+
+Whenever Opus or Fable models are requested, Codex should use `gpt-6-astra` with `ultra`
+reasoning effort instead, or retain the current session model with `ultra` reasoning effort.
+Apply this to all delegated auditors, evaluators, witnesses, and CLI subprocesses. Set reasoning
+effort explicitly when overriding the model so it does not fall back to the model's default.
+"""

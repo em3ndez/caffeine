@@ -16,12 +16,16 @@
 package com.github.benmanes.caffeine.cache.simulator.policy.adaptive;
 
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.Objects.requireNonNull;
+
+import org.jspecify.annotations.Nullable;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.KeyOnlyPolicy;
 import com.github.benmanes.caffeine.cache.simulator.policy.Policy.PolicySpec;
 import com.github.benmanes.caffeine.cache.simulator.policy.PolicyStats;
 import com.google.common.base.MoreObjects;
+import com.google.errorprone.annotations.Var;
 import com.typesafe.config.Config;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -62,7 +66,7 @@ public final class CartPolicy implements KeyOnlyPolicy {
   private int q;
 
   public CartPolicy(Config config) {
-    BasicSettings settings = new BasicSettings(config);
+    var settings = new BasicSettings(config);
     this.maximumSize = Math.toIntExact(settings.maximumSize());
     this.policyStats = new PolicyStats(name());
     this.data = new Long2ObjectOpenHashMap<>();
@@ -84,7 +88,7 @@ public final class CartPolicy implements KeyOnlyPolicy {
     }
   }
 
-  private static boolean isHit(Node node) {
+  private static boolean isHit(@Nullable Node node) {
     // if (x is in T1 ∪ T2) then cache hit
     return (node != null) && ((node.type == QueueType.T1) || (node.type == QueueType.T2));
   }
@@ -95,7 +99,7 @@ public final class CartPolicy implements KeyOnlyPolicy {
     policyStats.recordOperation();
   }
 
-  private void onMiss(long key, Node node) {
+  private void onMiss(long key, @Var @Nullable Node node) {
     // if (|T1| + |T2| = c) then
     //   /* cache full, replace a page from cache */
     //   replace()
@@ -133,13 +137,13 @@ public final class CartPolicy implements KeyOnlyPolicy {
       if (!isGhost(node) && ((sizeB1 + sizeB2) == (maximumSize + 1))) {
         if (sizeB1 > Math.max(0, q) || (sizeB2 == 0)) {
           // Remove the bottom page in B1 from the history
-          Node victim = headB1.next;
+          Node victim = requireNonNull(headB1.next);
           data.remove(victim.key);
           victim.remove();
           sizeB1--;
         } else {
           // Remove the bottom page in B2 from the history
-          Node victim = headB2.next;
+          Node victim = requireNonNull(headB2.next);
           data.remove(victim.key);
           victim.remove();
           sizeB2--;
@@ -157,9 +161,9 @@ public final class CartPolicy implements KeyOnlyPolicy {
 
       // Set filter bit of x to "S"
       // nS = nS + 1 /* history hit */
-      node.filter = FilterType.ShortTerm;
+      node.filter = FilterType.SHORT_TERM;
       sizeS++;
-    } else if (node.type == QueueType.B1) {
+    } else if (requireNonNull(node).type == QueueType.B1) {
       // Adapt: Increase the target size for the list T1 as: p = min{p + max{1, nS / |B1|}, c}
       p = Math.min(p + Math.max(1, sizeS / sizeB1), maximumSize);
 
@@ -173,7 +177,7 @@ public final class CartPolicy implements KeyOnlyPolicy {
       // Reset the page reference bit of x
       // Set nL = nL + 1.
       // Set type of x to "L".
-      node.filter = FilterType.LongTerm;
+      node.filter = FilterType.LONG_TERM;
       node.marked = false;
       sizeL++;
     } else if (node.type == QueueType.B2) {
@@ -189,7 +193,7 @@ public final class CartPolicy implements KeyOnlyPolicy {
 
       // Reset the page reference bit of x
       // Set nL = nL + 1
-      node.filter = FilterType.LongTerm;
+      node.filter = FilterType.LONG_TERM;
       node.marked = false;
       sizeL++;
 
@@ -203,7 +207,8 @@ public final class CartPolicy implements KeyOnlyPolicy {
     }
   }
 
-  private static boolean isGhost(Node node) {
+  @SuppressWarnings("BooleanMethodIsAlwaysInverted")
+  private static boolean isGhost(@Nullable Node node) {
     return (node != null) && ((node.type == QueueType.B1) || (node.type == QueueType.B2));
   }
 
@@ -237,10 +242,11 @@ public final class CartPolicy implements KeyOnlyPolicy {
     //   nL = nL − 1
 
     policyStats.recordEviction();
+    requireNonNull(headT2.next);
 
     while (headT2.next.marked) {
       policyStats.recordOperation();
-      Node demoted = headT2.next;
+      Node demoted = requireNonNull(headT2.next);
       demoted.marked = false;
       demoted.remove();
       sizeT2--;
@@ -253,15 +259,16 @@ public final class CartPolicy implements KeyOnlyPolicy {
       }
     }
 
-    while ((headT1.next.filter == FilterType.LongTerm) || headT1.next.marked) {
+    requireNonNull(headT1.next);
+    while ((headT1.next.filter == FilterType.LONG_TERM) || headT1.next.marked) {
       policyStats.recordOperation();
-      Node node = headT1.next;
+      Node node = requireNonNull(headT1.next);
       if (node.marked) {
         node.moveToTail(headT1);
         node.marked = false;
 
-        if ((sizeT1 >= Math.max(p + 1, sizeB1)) && (node.filter == FilterType.ShortTerm)) {
-          node.filter = FilterType.LongTerm;
+        if ((sizeT1 >= Math.min(p + 1, sizeB1)) && (node.filter == FilterType.SHORT_TERM)) {
+          node.filter = FilterType.LONG_TERM;
           sizeS--;
           sizeL++;
         }
@@ -316,17 +323,17 @@ public final class CartPolicy implements KeyOnlyPolicy {
   }
 
   private enum FilterType {
-    ShortTerm,
-    LongTerm,
+    SHORT_TERM,
+    LONG_TERM,
   }
 
-  static final class Node {
+  private static final class Node {
     final long key;
 
-    Node prev;
-    Node next;
-    QueueType type;
-    FilterType filter;
+    @Nullable Node prev;
+    @Nullable Node next;
+    @Nullable QueueType type;
+    @Nullable FilterType filter;
 
     boolean marked;
 
@@ -341,8 +348,8 @@ public final class CartPolicy implements KeyOnlyPolicy {
     }
 
     /** Appends the node to the tail of the list. */
-    public void appendToTail(Node head) {
-      Node tail = head.prev;
+    void appendToTail(Node head) {
+      Node tail = requireNonNull(head.prev);
       head.prev = this;
       tail.next = this;
       next = head;
@@ -350,7 +357,11 @@ public final class CartPolicy implements KeyOnlyPolicy {
     }
 
     /** Moves the node to the tail. */
-    public void moveToTail(Node head) {
+    void moveToTail(Node head) {
+      requireNonNull(head.prev);
+      requireNonNull(prev);
+      requireNonNull(next);
+
       // unlink
       prev.next = next;
       next.prev = prev;
@@ -363,7 +374,10 @@ public final class CartPolicy implements KeyOnlyPolicy {
     }
 
     /** Removes the node from the list. */
-    public void remove() {
+    void remove() {
+      requireNonNull(prev);
+      requireNonNull(next);
+
       prev.next = next;
       next.prev = prev;
       prev = next = null;

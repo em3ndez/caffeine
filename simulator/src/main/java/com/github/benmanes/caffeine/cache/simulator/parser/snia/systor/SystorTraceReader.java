@@ -27,7 +27,7 @@ import com.google.common.math.IntMath;
 
 /**
  * A reader for the SNIA SYSTOR '17 trace files provided by
- * <a href="http://iotta.snia.org/traces/4964">SNIA</a>. This reader uses the response time as the
+ * <a href="https://iotta.snia.org/traces/4964">SNIA</a>. This reader uses the response time as the
  * miss penalty (converted to milliseconds).
  *
  * @author himelbrand@gmail.com (Omri Himelbrand)
@@ -52,12 +52,14 @@ public final class SystorTraceReader extends TextTraceReader {
         .filter(array -> !array[1].isEmpty())
         .filter(array -> array[2].equals("R"))
         .flatMap(array -> {
+          long lun = Long.parseLong(array[3]);
           int size = Integer.parseInt(array[5]);
-          long offset = Long.parseLong(array[4]);
-          double responseTime = 1000 * Double.parseDouble(array[1]);
+          long startBlock = Long.parseLong(array[4]) / BLOCK_SIZE;
           int sequence = IntMath.divide(size, BLOCK_SIZE, RoundingMode.UP);
-          return LongStream.range(offset, offset + sequence)
-              .mapToObj(key -> AccessEvent.forKeyAndPenalties(key, 0, responseTime));
+          double responseTime = (1000 * Double.parseDouble(array[1])) / sequence;
+          return LongStream.range(startBlock, startBlock + sequence)
+              .mapToObj(block -> AccessEvent.forKeyAndPenalties(
+                  (lun << 40) | (block & 0xFFFFFFFFFFL), 0, responseTime));
         });
   }
 }

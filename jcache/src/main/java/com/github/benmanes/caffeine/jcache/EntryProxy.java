@@ -28,7 +28,7 @@ public final class EntryProxy<K, V> extends SimpleImmutableEntry<K, V>
     implements Cache.Entry<K, V> {
   private static final long serialVersionUID = 1L;
 
-  EntryProxy(K key, V value) {
+  public EntryProxy(K key, V value) {
     super(key, value);
   }
 
@@ -38,7 +38,7 @@ public final class EntryProxy<K, V> extends SimpleImmutableEntry<K, V>
       throw new IllegalArgumentException("Class " + clazz + " is unknown to this implementation");
     }
     @SuppressWarnings("unchecked")
-    T castedEntry = (T) this;
+    var castedEntry = (T) this;
     return castedEntry;
   }
 }

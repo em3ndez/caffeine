@@ -22,54 +22,35 @@ import static com.github.benmanes.caffeine.cache.Specifications.vTypeVar;
 
 import javax.lang.model.element.Modifier;
 
-import com.github.benmanes.caffeine.cache.Feature;
-import com.google.common.base.CaseFormat;
-import com.squareup.javapoet.TypeSpec;
+import com.github.benmanes.caffeine.cache.Rule;
 
 /**
  * Adds the node inheritance hierarchy.
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class AddSubtype extends NodeRule {
+public final class AddSubtype implements Rule<NodeContext> {
 
   @Override
-  protected boolean applies() {
+  public boolean applies(NodeContext context) {
     return true;
   }
 
   @Override
-  protected void execute() {
-    context.suppressedWarnings.add("MissingOverride");
-    context.nodeSubtype = TypeSpec.classBuilder(context.className)
-        .addJavadoc(getJavaDoc())
+  public void execute(NodeContext context) {
+    context.classSpec
+        .addJavadoc(context.classJavadoc("A cache entry that provides the following features"))
         .addTypeVariable(kTypeVar)
         .addTypeVariable(vTypeVar);
     if (context.isFinal) {
-      context.nodeSubtype.addModifiers(Modifier.FINAL);
+      context.classSpec.addModifiers(Modifier.FINAL);
     }
-    if (isBaseClass()) {
-      context.nodeSubtype
+    if (context.isBaseClass()) {
+      context.classSpec
           .superclass(NODE)
           .addSuperinterface(NODE_FACTORY);
     } else {
-      context.nodeSubtype.superclass(context.superClass);
+      context.classSpec.superclass(context.superClass);
     }
-  }
-
-  private String getJavaDoc() {
-    var doc = new StringBuilder(200);
-    doc.append("<em>WARNING: GENERATED CODE</em>\n\n"
-        + "A cache entry that provides the following features:\n<ul>");
-    for (Feature feature : context.generateFeatures) {
-      String name = CaseFormat.UPPER_UNDERSCORE.to(CaseFormat.UPPER_CAMEL, feature.name());
-      doc.append("\n  <li>").append(name);
-    }
-    for (Feature feature : context.parentFeatures) {
-      String name = CaseFormat.UPPER_UNDERSCORE.to(CaseFormat.UPPER_CAMEL, feature.name());
-      doc.append("\n  <li>").append(name).append(" (inherited)");
-    }
-    doc.append("\n</ul>\n\n@author ben.manes@gmail.com (Ben Manes)\n");
-    return doc.toString();
   }
 }

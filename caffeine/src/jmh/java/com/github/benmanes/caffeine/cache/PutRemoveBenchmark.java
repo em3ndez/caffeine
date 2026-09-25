@@ -40,15 +40,15 @@ import site.ycsb.generator.ScrambledZipfianGenerator;
  * relatively rare compared to reads. Thus, this benchmark is only for diagnosing performance
  * concerns and should not be used to compare implementations.
  * <p>
- * <pre>{@code
- *   ./gradlew jmh -PincludePattern=PutRemoveBenchmark
- * }</pre>
+ * {@snippet lang="shell" :
+ * ./gradlew jmh -PincludePattern=PutRemoveBenchmark --rerun
+ * }
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
 @State(Scope.Group)
 @SuppressWarnings({"CanonicalAnnotationSyntax", "LexicographicalAnnotationAttributeListing",
-    "PMD.JUnit4TestShouldUseAfterAnnotation", "PMD.MethodNamingConventions"})
+    "JavadocDeclaration", "NotNullFieldNotInitialized"})
 public class PutRemoveBenchmark {
   private static final int SIZE = (2 << 14);
   private static final int MASK = SIZE - 1;
@@ -80,7 +80,7 @@ public class PutRemoveBenchmark {
 
     // Enforce full initialization of internal structures
     for (int i = 0; i < 2 * SIZE; i++) {
-      cache.put(i, Boolean.TRUE);
+      cache.put(i, true);
     }
     cache.clear();
 
@@ -88,7 +88,7 @@ public class PutRemoveBenchmark {
     NumberGenerator generator = new ScrambledZipfianGenerator(ITEMS);
     for (int i = 0; i < SIZE; i++) {
       ints[i] = generator.nextValue().intValue();
-      cache.put(ints[i], Boolean.TRUE);
+      cache.put(ints[i], true);
     }
   }
 
@@ -99,7 +99,7 @@ public class PutRemoveBenchmark {
 
   @Benchmark @Group @GroupThreads(4)
   public void put(ThreadState threadState) {
-    cache.put(ints[threadState.index++ & MASK], Boolean.TRUE);
+    cache.put(ints[threadState.index++ & MASK], true);
   }
 
   @Benchmark @Group @GroupThreads(4)

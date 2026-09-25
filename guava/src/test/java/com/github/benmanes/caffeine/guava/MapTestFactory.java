@@ -43,20 +43,21 @@ final class MapTestFactory {
    * @param generator the map generator
    * @return a suite of tests
    */
-  public static Test suite(String name, TestMapGenerator<?, ?> generator) {
+  @SuppressWarnings("PMD.JUnit4SuitesShouldUseSuiteAnnotation")
+  public static <K, V> Test suite(String name, TestMapGenerator<K, V> generator) {
     return ConcurrentMapTestSuiteBuilder
         .using(generator)
         .named(name)
         .withFeatures(
             CollectionSize.ANY,
             MapFeature.GENERAL_PURPOSE,
-            MapFeature.ALLOWS_NULL_ENTRY_QUERIES,
+            MapFeature.ALLOWS_ANY_NULL_QUERIES,
             CollectionFeature.SUPPORTS_ITERATOR_REMOVE)
         .createTestSuite();
   }
 
   /** Returns a map generator for synchronous values. */
-  public static TestStringMapGenerator synchronousGenerator(
+  public static TestStringMapGenerator generator(
       Supplier<Map<String, String>> supplier) {
     return new TestStringMapGenerator() {
       @Override protected Map<String, String> create(Map.Entry<String, String>[] entries) {

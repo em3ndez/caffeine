@@ -15,62 +15,75 @@
  */
 package com.github.benmanes.caffeine.cache.local;
 
+import static com.github.benmanes.caffeine.cache.RuleContext.varHandleName;
 import static com.github.benmanes.caffeine.cache.Specifications.FREQUENCY_SKETCH;
+import static com.github.benmanes.caffeine.cache.Specifications.LOCAL_CACHE_FACTORY;
+import static com.github.benmanes.caffeine.cache.Specifications.WINDOW_CLIMBER;
 import static org.apache.commons.lang3.StringUtils.capitalize;
 
 import javax.lang.model.element.Modifier;
 
 import com.github.benmanes.caffeine.cache.Feature;
-import com.squareup.javapoet.CodeBlock;
-import com.squareup.javapoet.FieldSpec;
-import com.squareup.javapoet.MethodSpec;
+import com.github.benmanes.caffeine.cache.Rule;
+import com.github.benmanes.caffeine.cache.RuleContext;
+import com.palantir.javapoet.CodeBlock;
+import com.palantir.javapoet.FieldSpec;
+import com.palantir.javapoet.MethodSpec;
+import com.palantir.javapoet.TypeName;
 
 /**
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class AddMaximum extends LocalCacheRule {
+public final class AddMaximum implements Rule<LocalCacheContext> {
 
   @Override
-  protected boolean applies() {
-    return !(Feature.usesMaximum(context.parentFeatures)
-        || !Feature.usesMaximum(context.generateFeatures));
+  public boolean applies(LocalCacheContext context) {
+    return !Feature.usesMaximum(context.parentFeatures)
+        && Feature.usesMaximum(context.generateFeatures);
   }
 
   @Override
-  protected void execute() {
-    addEvicts();
-    addMaximumSize();
-    addHillClimber();
-    addFrequencySketch();
+  public void execute(LocalCacheContext context) {
+    addEvicts(context);
+    addMaximumSize(context);
+    addHillClimber(context);
+    addFrequencySketch(context);
   }
 
-  private void addEvicts() {
-    context.cache.addMethod(MethodSpec.methodBuilder("evicts")
+  private static void addEvicts(LocalCacheContext context) {
+    context.classSpec.addMethod(MethodSpec.methodBuilder("evicts")
         .addModifiers(context.protectedFinalModifiers())
         .addStatement("return true")
         .returns(boolean.class)
         .build());
   }
 
-  private void addMaximumSize() {
-    addField(long.class, "maximum");
-    addField(long.class, "weightedSize");
-    addField(long.class, "windowMaximum");
-    addField(long.class, "windowWeightedSize");
-    addField(long.class, "mainProtectedMaximum");
-    addField(long.class, "mainProtectedWeightedSize");
+  private static void addMaximumSize(LocalCacheContext context) {
+    addPlainAndAcquireField(context, long.class, "maximum");
+    addPlainAndAcquireField(context, long.class, "weightedSize");
+
+    addField(context, long.class, "windowMaximum");
+    addField(context, long.class, "windowWeightedSize");
+    addField(context, long.class, "mainProtectedMaximum");
+    addField(context, long.class, "mainProtectedWeightedSize");
   }
 
-  private void addHillClimber() {
-    addField(double.class, "stepSize");
-    addField(long.class, "adjustment");
-    addField(int.class, "hitsInSample");
-    addField(int.class, "missesInSample");
-    addField(double.class, "previousSampleHitRate");
+  private static void addHillClimber(LocalCacheContext context) {
+    context.classSpec.addField(FieldSpec.builder(
+        WINDOW_CLIMBER, "climber", Modifier.FINAL).build());
+    context.constructor.addCode(CodeBlock.builder()
+        .addStatement("this.climber = new $T()", WINDOW_CLIMBER)
+        .addStatement("this.climber.resized(maximum())")
+        .build());
+    context.classSpec.addMethod(MethodSpec.methodBuilder("climber")
+        .addModifiers(context.protectedFinalModifiers())
+        .addStatement("return climber")
+        .returns(WINDOW_CLIMBER)
+        .build());
   }
 
-  private void addFrequencySketch() {
-    context.cache.addField(FieldSpec.builder(
+  private static void addFrequencySketch(LocalCacheContext context) {
+    context.classSpec.addField(FieldSpec.builder(
         FREQUENCY_SKETCH, "sketch", Modifier.FINAL).build());
     context.constructor.addCode(CodeBlock.builder()
         .addStatement("this.sketch = new $T()", FREQUENCY_SKETCH)
@@ -78,25 +91,47 @@ public final class AddMaximum extends LocalCacheRule {
             .addStatement("long capacity = Math.min($L, $L)",
                 "builder.getMaximum()", "builder.getInitialCapacity()")
             .addStatement("this.sketch.ensureCapacity(capacity)")
+            .addStatement("recordReads()")
         .endControlFlow().build());
-    context.cache.addMethod(MethodSpec.methodBuilder("frequencySketch")
+    context.classSpec.addMethod(MethodSpec.methodBuilder("frequencySketch")
         .addModifiers(context.protectedFinalModifiers())
         .addStatement("return sketch")
         .returns(FREQUENCY_SKETCH)
         .build());
   }
 
-  private void addField(Class<?> type, String name) {
-    context.cache.addField(FieldSpec.builder(type, name).build());
-    context.cache.addMethod(MethodSpec.methodBuilder(name)
+  private static void addField(RuleContext context, Class<?> type, String name) {
+    context.classSpec.addField(FieldSpec.builder(type, name).build());
+    context.classSpec.addMethod(MethodSpec.methodBuilder(name)
         .addModifiers(context.protectedFinalModifiers())
         .addStatement("return $L", name)
         .returns(type)
         .build());
-    context.cache.addMethod(MethodSpec.methodBuilder("set" + capitalize(name))
+    context.classSpec.addMethod(MethodSpec.methodBuilder("set" + capitalize(name))
         .addModifiers(context.protectedFinalModifiers())
         .addParameter(type, name)
         .addStatement("this.$1L = $1L", name)
+        .build());
+  }
+
+  private static void addPlainAndAcquireField(RuleContext context, Class<?> type, String name) {
+    context.addVarHandle(LOCAL_CACHE_FACTORY, name, TypeName.get(type));
+    context.classSpec.addField(FieldSpec.builder(type, name, Modifier.VOLATILE).build());
+    context.classSpec.addMethod(MethodSpec.methodBuilder(name)
+        .addModifiers(context.protectedFinalModifiers())
+        .addStatement("return ($L) $L.get(this)", type, varHandleName(name))
+        .returns(type)
+        .build());
+    context.classSpec.addMethod(MethodSpec.methodBuilder(name + "Acquire")
+        .addModifiers(context.protectedFinalModifiers())
+        .addStatement("return ($L) $L.getAcquire(this)",
+            type, varHandleName(name))
+        .returns(type)
+        .build());
+    context.classSpec.addMethod(MethodSpec.methodBuilder("set" + capitalize(name))
+        .addModifiers(context.protectedFinalModifiers())
+        .addParameter(type, name)
+        .addStatement("$L.setRelease(this, $N)", varHandleName(name), name)
         .build());
   }
 }

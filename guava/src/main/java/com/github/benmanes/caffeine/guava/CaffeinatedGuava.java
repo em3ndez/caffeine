@@ -17,6 +17,8 @@ package com.github.benmanes.caffeine.guava;
 
 import java.lang.reflect.Method;
 
+import org.jspecify.annotations.NullMarked;
+
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.guava.CaffeinatedGuavaLoadingCache.ExternalBulkLoader;
 import com.github.benmanes.caffeine.guava.CaffeinatedGuavaLoadingCache.ExternalSingleLoader;
@@ -31,6 +33,7 @@ import com.google.common.cache.LoadingCache;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
+@NullMarked
 public final class CaffeinatedGuava {
 
   private CaffeinatedGuava() {}
@@ -39,8 +42,13 @@ public final class CaffeinatedGuava {
    * Returns a Caffeine cache wrapped in a Guava {@link Cache} facade.
    *
    * @param builder the configured cache builder
+   * @param <K> the most general key type to create caches for
+   * @param <V> the most general value type to create caches for
+   * @param <K1> the key type of the cache
+   * @param <V1> the value type of the cache
    * @return a cache exposed under the Guava APIs
    */
+  @SuppressWarnings("PMD.TypeParameterNamingConventions")
   public static <K, V, K1 extends K, V1 extends V> Cache<K1, V1> build(Caffeine<K, V> builder) {
     return new CaffeinatedGuavaCache<>(builder.build());
   }
@@ -50,8 +58,13 @@ public final class CaffeinatedGuava {
    *
    * @param builder the configured cache builder
    * @param loader the cache loader used to obtain new values
+   * @param <K> the most general key type to create caches for
+   * @param <V> the most general value type to create caches for
+   * @param <K1> the key type of the cache
+   * @param <V1> the value type of the cache
    * @return a cache exposed under the Guava APIs
    */
+  @SuppressWarnings("PMD.TypeParameterNamingConventions")
   public static <K, V, K1 extends K, V1 extends V> LoadingCache<K1, V1> build(
       Caffeine<K, V> builder, CacheLoader<? super K1, V1> loader) {
     return build(builder, hasLoadAll(loader)
@@ -64,8 +77,13 @@ public final class CaffeinatedGuava {
    *
    * @param builder the configured cache builder
    * @param loader the cache loader used to obtain new values
+   * @param <K> the most general key type to create caches for
+   * @param <V> the most general value type to create caches for
+   * @param <K1> the key type of the cache
+   * @param <V1> the value type of the cache
    * @return a cache exposed under the Guava APIs
    */
+  @SuppressWarnings("PMD.TypeParameterNamingConventions")
   public static <K, V, K1 extends K, V1 extends V> LoadingCache<K1, V1> build(
       Caffeine<K, V> builder,
       com.github.benmanes.caffeine.cache.CacheLoader<? super K1, V1> loader) {
@@ -76,6 +94,8 @@ public final class CaffeinatedGuava {
    * Returns a Caffeine cache loader that delegates to a Guava cache loader.
    *
    * @param loader the cache loader used to obtain new values
+   * @param <K> the type of keys
+   * @param <V> the type of values
    * @return a cache loader exposed under the Caffeine APIs
    */
   public static <K, V> com.github.benmanes.caffeine.cache.CacheLoader<K, V> caffeinate(

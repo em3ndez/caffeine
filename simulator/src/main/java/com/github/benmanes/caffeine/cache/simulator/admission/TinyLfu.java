@@ -15,10 +15,13 @@
  */
 package com.github.benmanes.caffeine.cache.simulator.admission;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.util.Locale.US;
+
 import java.util.Random;
 
 import com.github.benmanes.caffeine.cache.simulator.BasicSettings;
-import com.github.benmanes.caffeine.cache.simulator.admission.Admittor.KeyOnlyAdmittor;
+import com.github.benmanes.caffeine.cache.simulator.admission.Admitter.KeyOnlyAdmitter;
 import com.github.benmanes.caffeine.cache.simulator.admission.countmin4.ClimberResetCountMin4;
 import com.github.benmanes.caffeine.cache.simulator.admission.countmin4.IncrementalResetCountMin4;
 import com.github.benmanes.caffeine.cache.simulator.admission.countmin4.IndicatorResetCountMin4;
@@ -35,7 +38,7 @@ import com.typesafe.config.Config;
  *
  * @author ben.manes@gmail.com (Ben Manes)
  */
-public final class TinyLfu implements KeyOnlyAdmittor {
+public final class TinyLfu implements KeyOnlyAdmitter {
   private final PolicyStats policyStats;
   private final Frequency sketch;
   private final Random random;
@@ -48,6 +51,9 @@ public final class TinyLfu implements KeyOnlyAdmittor {
     this.random = new Random(settings.randomSeed());
     this.sketch = makeSketch(settings);
     this.policyStats = policyStats;
+    checkArgument((settings.maximumSize() > 0) || sketch.isResizable(),
+        "The %s sketch cannot be resized, so it requires a maximum size",
+        settings.tinyLfu().sketch());
     if (settings.tinyLfu().jitter().enabled()) {
       this.threshold = settings.tinyLfu().jitter().threshold();
       this.probability = settings.tinyLfu().jitter().probability();
@@ -57,33 +63,6 @@ public final class TinyLfu implements KeyOnlyAdmittor {
     }
   }
 
-  private Frequency makeSketch(BasicSettings settings) {
-    String type = settings.tinyLfu().sketch();
-    if (type.equalsIgnoreCase("count-min-4")) {
-      String reset = settings.tinyLfu().countMin4().reset();
-      if (reset.equalsIgnoreCase("periodic")) {
-        return new PeriodicResetCountMin4(settings.config());
-      } else if (reset.equalsIgnoreCase("incremental")) {
-        return new IncrementalResetCountMin4(settings.config());
-      } else if (reset.equalsIgnoreCase("climber")) {
-        return new ClimberResetCountMin4(settings.config());
-      } else if (reset.equalsIgnoreCase("indicator")) {
-        return new IndicatorResetCountMin4(settings.config());
-      } else {
-        throw new IllegalStateException("Unknown reset type: " + reset);
-      }
-    } else if (type.equalsIgnoreCase("count-min-64")) {
-      return new CountMin64TinyLfu(settings.config());
-    } else if (type.equalsIgnoreCase("random-table")) {
-      return new RandomRemovalFrequencyTable(settings.config());
-    } else if (type.equalsIgnoreCase("tiny-table")) {
-      return new TinyCacheAdapter(settings.config());
-    } else if (type.equalsIgnoreCase("perfect-table")) {
-      return new PerfectFrequency(settings.config());
-    }
-    throw new IllegalStateException("Unknown sketch type: " + type);
-  }
-
   public int frequency(long key) {
     return sketch.frequency(key);
   }
@@ -91,6 +70,11 @@ public final class TinyLfu implements KeyOnlyAdmittor {
   @Override
   public void record(long key) {
     sketch.increment(key);
+  }
+
+  @Override
+  public void ensureCapacity(long maximumSize) {
+    sketch.ensureCapacity(maximumSize);
   }
 
   @Override
@@ -106,5 +90,27 @@ public final class TinyLfu implements KeyOnlyAdmittor {
     }
     policyStats.recordRejection();
     return false;
+  }
+
+  /** Returns the frequency histogram. */
+  private static Frequency makeSketch(BasicSettings settings) {
+    String type = settings.tinyLfu().sketch();
+    return switch (type.toLowerCase(US)) {
+      case "count-min-4" -> {
+        String reset = settings.tinyLfu().countMin4().reset();
+        yield switch (reset.toLowerCase(US)) {
+          case "climber" -> new ClimberResetCountMin4(settings.config());
+          case "periodic" -> new PeriodicResetCountMin4(settings.config());
+          case "indicator" -> new IndicatorResetCountMin4(settings.config());
+          case "incremental" -> new IncrementalResetCountMin4(settings.config());
+          default -> throw new IllegalStateException("Unknown reset type: " + reset);
+        };
+      }
+      case "tiny-table" -> new TinyCacheAdapter(settings.config());
+      case "count-min-64" -> new CountMin64TinyLfu(settings.config());
+      case "perfect-table" -> new PerfectFrequency(settings.config());
+      case "random-table" -> new RandomRemovalFrequencyTable(settings.config());
+      default -> throw new IllegalStateException("Unknown sketch type: " + type);
+    };
   }
 }
